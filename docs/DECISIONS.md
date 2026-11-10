@@ -238,6 +238,25 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   1,000× below uniform Q4_K's KL (0.063). So references are built once on the GPU; final CPU-build
   evaluations compare against them. The measured build floor is reported alongside final KL numbers.
 
+### D32. Per-chunk NLL from `--ppl-output-type 1` — planned (A3)
+- The perplexity bootstrap in the decision rule (D5) resamples chunks, so it needs each chunk's NLL.
+  llama.cpp prints only running averages: perplexity to 4 decimals by default, or mean NLL to 6
+  decimals with `--ppl-output-type 1`. With equal tokens per chunk, per-chunk NLL is recovered as
+  `i·m_i − (i−1)·m_(i−1)`, error ≤ (2i − 1) × 5×10⁻⁷ ≈ 2×10⁻⁴ at 219 chunks, versus typical per-chunk
+  differences between configurations of 0.01–0.05. The recovered values must reproduce the final
+  perplexity within 0.01% or the run is rejected.
+- **Alternatives:** one run per chunk (exact, but loads the model 219 times per evaluation); patching
+  llama.cpp to print more (a change to a pinned dependency).
+
+### D33. One JSON record per evaluation in `data/results/<model>/` — planned (A3)
+- Each record states what was evaluated, how, the metrics and the per-chunk values, so any table or
+  decision can be recomputed from records alone. Records are append-only: a re-run gets a new record.
+
+### D34. The Phase A gate never reads the test split — planned (A3)
+- PLAN.md's test split is "touched once", for finalists only (§3). The gate proves that the
+  perplexity and KL metrics *run* using the selection and sensitivity texts; test-split numbers first
+  appear in Phase D.
+
 ### D25. Task scoring definitions follow llama.cpp's task modes, checked against source first — planned
 - Before converting tasks, read `tools/perplexity` at the pinned commit for the exact input formats and
   scoring (e.g. HellaSwag length normalisation vs lm-eval `acc_norm`), and record any difference here.

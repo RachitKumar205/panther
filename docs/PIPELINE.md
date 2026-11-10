@@ -326,9 +326,50 @@ run's output is now checked. A polling loop also got this Mac blocked by the ser
 Kept: the two references and their manifest (`data/reference/<model>/`), all logs and `study.json`.
 Deleted as planned: per-chunk references, study files and chunk texts (23 GB), and the probe (1.2 GB).
 
-### A3. KL, perplexity, top-1 📝
-- `llama-perplexity --kl-divergence` on the A1 file against A2: mean KL, 99th percentile, top-1
-  agreement ("same top"), perplexity. Check the numbers are sane (mixed ≈ between its formats' extremes).
+### A3. KL, perplexity, top-1 📝 planned
+A3 builds the **evaluator** that every later stage uses (penalty table, shortlist, finalists), then
+validates it on 1.5B. It does not touch the test split.
+
+**What llama.cpp gives us** (checked in `tools/perplexity` at the pinned commit):
+- `--kl-divergence` against a saved reference prints mean KL (± SE), percentiles including the 99th,
+  maximum, top-1 agreement ("same top p", ± SE) and PPL(Q)/PPL(base).
+- Plain perplexity with `--ppl-output-type 1` prints, after each chunk, the running mean negative
+  log-likelihood to 6 decimals. Because every chunk scores the same number of tokens (1,023 at
+  `-c 2048`), each chunk's own mean is `i·m_i − (i−1)·m_(i−1)`, accurate to ≈ 2×10⁻⁴ at 219 chunks.
+  That is what the pre-registered perplexity bootstrap (D5) needs; the default output (4-decimal running
+  perplexity) is not precise enough (D32).
+- It exits 0 on failure, so the evaluator checks every output itself (as in A2).
+
+**A3.1 Evaluator** (`src/panther/quality/`):
+- `kl.py`: run a KL evaluation of one GGUF against a reference, taking `-c`/`-b` from the reference
+  manifest (D28); parse the summary into mean KL ± SE, 99th percentile, max, top-1 ± SE, PPL ratio.
+- `ppl.py`: run perplexity with `--ppl-output-type 1`; parse the per-chunk running means and recover
+  per-chunk NLL; check the recovered values reproduce llama.cpp's final perplexity within 0.01%.
+- `record.py`: one JSON record per evaluation in `data/results/<model>/<eval_id>.json` (D33): what was
+  evaluated (assignment sha256, GGUF sha256), how (build, image id, llama.cpp commit, text split,
+  reference, `-c`/`-b`, threads), the metrics, per-chunk NLL and token counts, and wall time. The record
+  carries everything `panther.stats.decision.Evaluation` needs.
+- Unit tests on the parsers, using real llama.cpp output captured from the A1/A2 logs as fixtures.
+
+**A3.2 Validation on 1.5B** (sensitivity and selection text only):
+
+| # | Run | Build | Purpose |
+|---|---|---|---|
+| a | A1 file, KL vs sensitivity and vs selection | CUDA and CPU | End to end on a mixed file; CPU − CUDA difference should be ≈ the build floor (KL 0.00005) |
+| b | All 12 uniform formats, KL + top-1 vs sensitivity | CUDA | Bytes-vs-KL table: first look at which formats are dominated (feeds format pruning, PLAN §6) |
+| c | Perplexity, selection text: A1 file and BF16 | CUDA and CPU | Per-chunk NLL recovery; perplexity pipeline end to end without touching test |
+| d | One KL run repeated | CUDA | Determinism: identical, or differences ≤ the build floor |
+
+Time ≈ 10 min on the GPU and ≈ 12 min on the CPU; results are a few MB.
+
+**Pass:**
+1. every run produces a record that passes its own output checks;
+2. recovered per-chunk NLL reproduces the final perplexity within 0.01% in every perplexity run;
+3. A1's KL lies between uniform Q8_0 and uniform Q2_K; CPU − CUDA difference ≤ 3 × the build floor;
+4. the repeated run is identical or within the build floor;
+5. the uniform sweep's KL increases monotonically as bits per weight fall, *within each family*
+   (K-quants; IQ-quants). Across families, any format that is both larger and worse than another is
+   listed as dominated; that list is input to pruning, not a decision.
 
 ### A4. Task formats for llama-perplexity 📝
 - Convert the split JSONL files into llama.cpp's input formats: HellaSwag text format, WinoGrande CSV,
