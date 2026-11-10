@@ -1,0 +1,65 @@
+# Data sources and split sizes (PLAN.md §3). Revisions are Hugging Face dataset commit SHAs.
+seed: 20261110
+tokenizer_model: Qwen2.5-1.5B-Instruct   # all Qwen2.5 sizes share this tokenizer
+
+sources:
+  fineweb_edu:
+    repo: HuggingFaceFW/fineweb-edu
+    revision: 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
+    files: [sample/10BT/000_00000.parquet]
+  wikitext:
+    repo: Salesforce/wikitext
+    revision: b08601e04326c79dfdd32d625aee71d232d685c3
+    files: [wikitext-2-raw-v1/test-00000-of-00001.parquet]
+  hellaswag:
+    repo: Rowan/hellaswag
+    revision: 218ec52e09a7e7462a5400043bb9a69a41d06b76
+    files: [data/train-00000-of-00001.parquet, data/validation-00000-of-00001.parquet]
+  winogrande:
+    repo: allenai/winogrande
+    revision: 01e74176c63542e6b0bcb004dcdea22d94fb67b5
+    files: [winogrande_xl/train-00000-of-00001.parquet, winogrande_xl/validation-00000-of-00001.parquet]
+  arc_challenge:
+    repo: allenai/ai2_arc
+    revision: 210d026faf9955653af8916fad021475a3f00453
+    files: [ARC-Challenge/train-00000-of-00001.parquet, ARC-Challenge/validation-00000-of-00001.parquet,
+            ARC-Challenge/test-00000-of-00001.parquet]
+  mmlu:
+    repo: cais/mmlu
+    revision: c30699e8356da336a370243923dbaf21066bb9fe
+    files: [all/dev-00000-of-00001.parquet, all/validation-00000-of-00001.parquet,
+            all/test-00000-of-00001.parquet]
+  gsm8k:
+    repo: openai/gsm8k
+    revision: 740312add88f781978c0658806c59bc2815b9866
+    files: [main/train-00000-of-00001.parquet, main/test-00000-of-00001.parquet]
+
+# Web text: FineWeb-Edu documents are hashed into four disjoint shards A-D; each split takes whole
+# documents from its shard, in hash order, until it reaches its token target (Qwen tokenizer).
+web_text:
+  min_doc_tokens: 128
+  max_doc_tokens: 8192
+  tokens:
+    calibration: 300000   # shard A: llama-imatrix (-c 512 -> ~585 chunks), Stage-2 quantizer
+    sensitivity: 100000   # shard B: per-gene KL penalties
+    selection: 150000     # shard C: refinement, shortlist
+    test: 150000          # shard D: with WikiText-2 test (~290k tokens) gives >= 300k test tokens
+
+# Task items. Test = full official sets (PLAN.md §2.1). Selection = items from non-test splits,
+# sampled by seed. Few-shot exemplars come from splits used by neither.
+tasks:
+  test:
+    hellaswag: validation        # 10,042
+    winogrande: validation       # 1,267 (winogrande_xl dev)
+    arc_challenge: test          # 1,172
+    mmlu: test                   # 14,042
+    gsm8k: test                  # 1,319
+  selection:
+    hellaswag: {split: train, n: 1000}
+    winogrande: {split: train, n: 1000}
+    arc_challenge: {split: [train, validation], n: 1000}
+    mmlu: {split: validation, n: all}   # 1,531
+    gsm8k: {split: train, n: 500}
+  fewshot:
+    mmlu: dev                    # the standard 5 per subject
+    gsm8k: {split: train, n: 5}  # disjoint from the gsm8k selection sample

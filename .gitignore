@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+results/
+*.gguf
+*.imatrix
+/data/
+/third_party/

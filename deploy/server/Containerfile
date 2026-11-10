@@ -1,0 +1,67 @@
+# Panther toolchain image: llama.cpp (CPU and CUDA builds at the pinned commit) plus the Python
+# environments. Everything Panther runs on the server runs inside this image; nothing is installed on the host.
+# Built by deploy/server/panther.sh build (rootless Podman). Base images are pinned by digest.
+
+ARG CUDA_IMAGE=docker.io/nvidia/cuda:12.9.1-devel-ubi9@sha256:2fc858685440ab84976792a1a2e0bd3065c3ed3b2b8208240be5b70e161935a3
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.9.5@sha256:f459f6f73a8c4ef5d69f4e6fbbdb8af751d6fa40ec34b39a1ab469acd6e289b7
+
+FROM ${UV_IMAGE} AS uv
+
+FROM ${CUDA_IMAGE}
+ARG LLAMA_COMMIT
+ARG JOBS=16
+RUN test -n "${LLAMA_COMMIT}"
+
+RUN dnf -y install --setopt=install_weak_deps=False python3.12 gcc-c++ git-core make util-linux \
+ && dnf clean all && rm -rf /var/cache/dnf
+
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_PYTHON=/usr/bin/python3.12 UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy UV_CACHE_DIR=/tmp/uv-cache
+
+# Build tools (cmake, ninja) from PyPI into their own venv, so the system repos don't decide versions.
+RUN uv venv /opt/buildtools && uv pip install --python /opt/buildtools/bin/python cmake==3.31.6 ninja==1.11.1.4 \
+ && rm -rf /tmp/uv-cache
+ENV PATH=/opt/buildtools/bin:${PATH}
+
+# llama.cpp at exactly the pinned commit (shallow fetch of that one commit).
+RUN git init -q /opt/llama.cpp && cd /opt/llama.cpp \
+ && git remote add origin https://github.com/ggml-org/llama.cpp \
+ && git fetch -q --depth 1 origin "${LLAMA_COMMIT}" && git checkout -q FETCH_HEAD \
+ && test "$(git rev-parse HEAD)" = "${LLAMA_COMMIT}"
+
+ARG TARGETS="llama-quantize llama-imatrix llama-perplexity llama-server llama-cli llama-bench"
+# CPU build: final quality numbers (PLAN.md §8). GGML_NATIVE targets the build host, which is the server itself.
+RUN cmake -S /opt/llama.cpp -B /opt/llama.cpp/build-cpu -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DGGML_CUDA=OFF -DGGML_NATIVE=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF \
+ && cmake --build /opt/llama.cpp/build-cpu -j "${JOBS}" --target ${TARGETS}
+# CUDA build: importance matrix and screening. sm_120 = RTX PRO 6000 Blackwell.
+RUN cmake -S /opt/llama.cpp -B /opt/llama.cpp/build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DGGML_NATIVE=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF \
+      -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
+ && cmake --build /opt/llama.cpp/build-cuda -j "${JOBS}" --target ${TARGETS}
+
+# HF -> GGUF converter environment, from llama.cpp's own requirements at the same commit.
+RUN uv venv /opt/venv-convert \
+ && uv pip install --python /opt/venv-convert/bin/python --index-strategy unsafe-best-match \
+      -r /opt/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt \
+ && rm -rf /tmp/uv-cache
+
+# Panther's own environment from the lock file. The source is bind-mounted at /work/repo at run time,
+# so code changes don't need an image rebuild; dependency changes do (the image tag hashes uv.lock).
+COPY pyproject.toml uv.lock /opt/panther/
+RUN cd /opt/panther && UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --extra server --no-dev --no-install-project \
+ && rm -rf /tmp/uv-cache
+
+LABEL org.panther.llama_commit="${LLAMA_COMMIT}"
+ENV PANTHER_LLAMA=/opt/llama.cpp \
+    PANTHER_PY=/opt/venv/bin/python \
+    PANTHER_HF=/opt/venv/bin/hf \
+    PANTHER_CONVERT_PY=/opt/venv-convert/bin/python \
+    PANTHER_DATA=/work/data \
+    PYTHONPATH=/work/repo/src \
+    HF_HOME=/work/data/cache/hf \
+    HOME=/tmp
+WORKDIR /work/repo
+# Lower CPU and I/O priority than everything else on the box (GitLab shares the CPUs and /s3).
+ENTRYPOINT ["nice", "-n", "10", "ionice", "-c2", "-n7"]
+CMD ["bash"]

@@ -1,0 +1,25 @@
+# Pinned model revisions (Hugging Face commit SHAs, resolved 2026-11-10).
+# config.json for each is vendored in configs/model_configs/ so geometry checks run offline.
+family: Qwen2.5-Instruct
+models:
+  - name: Qwen2.5-1.5B-Instruct
+    repo: Qwen/Qwen2.5-1.5B-Instruct
+    revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+    role: pilot
+  - name: Qwen2.5-3B-Instruct
+    repo: Qwen/Qwen2.5-3B-Instruct
+    revision: aa8e72537993ba99e69dfaafa59ed015b17504d1
+    role: candidate
+  - name: Qwen2.5-7B-Instruct
+    repo: Qwen/Qwen2.5-7B-Instruct
+    revision: a09a35458c702b33eeacc393d103063234e8bc28
+    role: candidate
+  - name: Qwen2.5-14B-Instruct
+    repo: Qwen/Qwen2.5-14B-Instruct
+    revision: cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8
+    role: main
+
+llama_cpp:
+  repo: https://github.com/ggml-org/llama.cpp
+  tag: v0.9.0
+  commit: cd959bae99ff4bed22bef2604f45241c09bbb8c8

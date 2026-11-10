@@ -1,0 +1,12 @@
+# Candidate GGUF weight formats (PLAN.md §6). Byte sizes come from gguf-py, not from this file.
+formats: [Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0, Q4_0, IQ2_XS, IQ3_XXS, IQ3_S, IQ4_XS, IQ4_NL]
+
+# Formats llama.cpp refuses to quantize without importance-matrix data for the tensor
+# (ggml_quantize_requires_imatrix in ggml/src/ggml.c at the pinned commit; IQ3_* only lose quality).
+# The token embedding is a lookup table, so imatrix collection never sees it: these formats are
+# excluded from the embedding gene (embd / tied embd_head) only.
+requires_imatrix: [IQ2_XS]
+
+# Repacked (fast-path) kernels on Cortex-A76 (dotprod, no i8mm) at the pinned commit.
+# Checked against ggml/src/ggml-cpu/repack.cpp; re-check whenever the commit changes.
+repacked_on_a76: [Q4_0, Q4_K, Q5_K, Q6_K, Q8_0, IQ4_NL]

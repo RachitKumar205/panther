@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Build the per-format tensor store for one model (PLAN.md §6, Stage 1). Runs inside the Panther image:
+#
+#   deploy/server/panther.sh gpujob store-1.5b scripts/server/build_tensor_store.sh Qwen2.5-1.5B-Instruct <calibration.txt>
+#
+# Steps (weights fetched beforehand by fetch_model.sh): convert to BF16 GGUF -> importance matrix on the
+# calibration split -> one uniform GGUF per candidate format, with --pure and explicit embedding and
+# output types so every searched tensor holds exactly that format. Mixed files are then assembled with
+# panther.gguftools.assemble. Each step is skipped if its output already exists.
+set -euo pipefail
+
+MODEL="$1"
+CALIB="$2"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+LLAMA="${PANTHER_LLAMA:?run inside the Panther image}"
+DATA="${PANTHER_DATA:-$ROOT/data}"
+PY="${PANTHER_PY:?}"
+THREADS="${PANTHER_THREADS:-16}"
+BIN="$LLAMA/build-cuda/bin"
+OUT="$DATA/store/$MODEL"
+mkdir -p "$OUT"
+TIMINGS="$OUT/.timings"   # "step seconds" lines, read by store_manifest.py
+timed() { local step="$1" t0=$SECONDS; shift; "$@"; echo "$step $((SECONDS - t0))" >> "$TIMINGS"; }
+
+read -r REPO REV < <("$PY" - "$MODEL" <<'EOF'
+import sys
+from panther.models.inventory import load_registry
+m = next(m for m in load_registry()["models"] if m["name"] == sys.argv[1])
+print(m["repo"], m["revision"])
+EOF
+)
+
+# GPU jobs have no network: the weights must already be fetched (scripts/server/fetch_model.sh, CPU job).
+HF_DIR="$DATA/hf/$MODEL"
+if [ "$(cat "$HF_DIR/.panther-revision" 2>/dev/null)" != "$REPO@$REV" ]; then
+  echo "weights for $REPO@$REV not fetched; run scripts/server/fetch_model.sh $MODEL as a CPU job first" >&2
+  exit 1
+fi
+
+BF16="$OUT/$MODEL-BF16.gguf"
+if [ ! -f "$BF16" ]; then
+  timed convert "$PANTHER_CONVERT_PY" "$LLAMA/convert_hf_to_gguf.py" "$HF_DIR" --outtype bf16 --outfile "$BF16.part"
+  mv "$BF16.part" "$BF16"
+fi
+
+IMAT="$OUT/$MODEL.imatrix.gguf"
+if [ ! -f "$IMAT" ]; then
+  timed imatrix "$BIN/llama-imatrix" -m "$BF16" -f "$CALIB" -o "$IMAT.part.gguf" -c 512 -ngl 99 -t "$THREADS"
+  mv "$IMAT.part.gguf" "$IMAT"
+fi
+
+# Candidate format -> llama-quantize ftype name. With --pure, the *_S mixes are all one type.
+declare -A FTYPE=(
+  [Q2_K]=Q2_K [Q3_K]=Q3_K_S [Q4_K]=Q4_K_S [Q5_K]=Q5_K_S [Q6_K]=Q6_K [Q8_0]=Q8_0 [Q4_0]=Q4_0
+  [IQ2_XS]=IQ2_XS [IQ3_XXS]=IQ3_XXS [IQ3_S]=IQ3_S [IQ4_XS]=IQ4_XS [IQ4_NL]=IQ4_NL
+)
+# One line per format: "<format> <token-embedding format>". The embedding has no imatrix data, so
+# formats that require it (configs/formats.yaml) put a placeholder there; the search never uses it.
+PLAN=$("$PY" - "$MODEL" <<'EOF'
+import sys
+from panther.costs.formats import candidate_formats, source_assignment
+from panther.models.inventory import build_inventory, load_geometry
+inv = build_inventory(load_geometry(sys.argv[1]))
+embd = next(g.gene_id for g in inv.genes if g.kind in ("embd", "embd_head"))
+for f in candidate_formats():
+    print(f, source_assignment(inv, f)[embd])
+EOF
+)
+
+while read -r F E; do
+  DST="$OUT/$MODEL-$F.gguf"
+  [ -f "$DST" ] && continue
+  T="$(echo "$F" | tr 'A-Z' 'a-z')"
+  TE="$(echo "$E" | tr 'A-Z' 'a-z')"
+  timed "quantize_$F" "$BIN/llama-quantize" --pure --imatrix "$IMAT" \
+    --token-embedding-type "$TE" --output-tensor-type "$T" \
+    "$BF16" "$DST.part" "${FTYPE[$F]}" "$THREADS"
+  mv "$DST.part" "$DST"
+done <<< "$PLAN"
+
+# Verify every source (every searched tensor holds exactly its format, no silent fallback) and write
+# store/<model>/manifest.json with inputs, hashes, verification and timings. Fails on any mismatch.
+"$PY" "$ROOT/scripts/server/store_manifest.py" "$MODEL" "$CALIB" --timings "$TIMINGS"
