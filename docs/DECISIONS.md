@@ -403,9 +403,34 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - **Alternative:** follow D36's fallback literally (measure 40 genes, re-analyse with scaling); expected
   to fail the same way, at 2.3 h.
 
-### D25. Task scoring definitions follow llama.cpp's task modes, checked against source first — planned
-- Before converting tasks, read `tools/perplexity` at the pinned commit for the exact input formats and
-  scoring (e.g. HellaSwag length normalisation vs lm-eval `acc_norm`), and record any difference here.
+### D25. Task scoring follows llama.cpp's modes; differences from lm-eval documented and measured — decided (source read 2026-11-11)
+- Read in `tools/perplexity/perplexity.cpp` at the pinned commit:
+  - **HellaSwag / multiple choice:** each answer scored by mean log-prob per token from the first token
+    after the shared prefix; highest wins. lm-eval `acc_norm` divides by byte length instead.
+  - **WinoGrande:** `first + option + second` per option; score = mean log-prob of the tokens after the
+    option (when both continuations have more than 3 tokens), *excluding the last token*. lm-eval's
+    partial scoring sums all continuation tokens.
+  - **MMLU** with single-letter answers: one token per answer, identical to lm-eval's `acc`.
+  - `--hellaswag` always shuffles (fixed seed 1); `--winogrande` and `--multiple-choice` keep file order
+    when all items are used. Defaults use subsets (HellaSwag 400), so the count is always set explicitly.
+- **Why accept the differences:** every configuration is scored identically, so comparisons are unbiased;
+  absolute numbers are not directly comparable with lm-eval leaderboards. A4.4 measures the size of each
+  difference on the same items.
+
+### D38. HellaSwag, ARC-C and MMLU via `--multiple-choice`; WinoGrande via `--winogrande`; prompts per lm-eval — planned (A4)
+- `--multiple-choice` uses the same scoring as `--hellaswag` but keeps file order, so each result maps to
+  a question id (the decision rule's bootstrap pairs questions across configurations). Prompt layouts in
+  PIPELINE.md A4. Task runs use `-c 4096`.
+
+### D39. Independent check of task scoring in transformers — planned (A4)
+- 200 seeded selection items per task, same prompts, llama.cpp's scoring rule reimplemented in Python on
+  the BF16 model; per-question agreement with llama.cpp ≥ 95% per task. Catches converter or prompt errors
+  that a self-consistent pipeline would not.
+
+### D40. Cost of final task accuracy on the CPU build — open, measured in A4
+- MMLU test alone is 14,042 five-shot prompts (~11M tokens); on the CPU build this is hours per
+  configuration for 1.5B and roughly 10× that for 14B. A4 records CPU timings; Phase D's plan (all tasks on
+  CPU, CUDA with a CPU subset, or another design) is decided from the measured numbers before Phase D.
 
 ### D26. Generation-sanity prompts — planned, open
 - Proposal: 50 items drawn by seed from the selection questions of all five tasks, stored with the splits.

@@ -442,13 +442,77 @@ follow-up proposed in D35; the check stays failed.
 - **D37 result: PASS.** The unscaled correction, confirmed on 4 fresh configurations, removes 84–92% of the
   CPU − CUDA gap on each. It is what Phase C's penalty table uses.
 
-### A4. Task formats for llama-perplexity 📝
-- Convert the split JSONL files into llama.cpp's input formats: HellaSwag text format, WinoGrande CSV,
-  and the binary multiple-choice format for ARC-C and MMLU (with 5-shot MMLU prompts).
-- **Verify first** against `tools/perplexity` source at the pinned commit: exact file formats and how
-  each mode scores (e.g. whether HellaSwag is length-normalised like `acc_norm`). Differences from
-  lm-eval's definitions get a decision entry.
-- Sanity check: BF16 1.5B accuracies near Qwen's published numbers.
+### A4. Benchmark tasks through llama-perplexity 📝 planned
+Turns the four log-likelihood benchmarks (HellaSwag, WinoGrande, ARC-Challenge, MMLU 5-shot) into the
+files llama.cpp reads, scores them, and recovers a right/wrong result per question, which the
+pre-registered decision rule (D5) needs for its paired bootstrap. GSM8K is A5.
+
+**What llama.cpp does** (read in `tools/perplexity/perplexity.cpp` at the pinned commit):
+
+| Mode | Input | Order | Score per answer | Per-question result |
+|---|---|---|---|---|
+| `--hellaswag` | text, 6 lines per item | always shuffled (seed 1) | mean log-prob per token of the ending | by position only |
+| `--winogrande` | CSV: index, sentence (with `_`), option 1, option 2, answer | file order if all items are used | mean log-prob per token after the blank, last token excluded | printed per row |
+| `--multiple-choice` | binary: count, offsets, then per item a question, answers and 0/1 labels | file order if all items are used | mean log-prob per token of the answer | from the running count (8 decimals) |
+
+Defaults evaluate subsets (e.g. 400 HellaSwag items), so every run sets the task count to the full file.
+A failed or skipped row is only visible as a missing item, so every run's item count is checked.
+
+**Design (D38):**
+- HellaSwag, ARC-C and MMLU all go through `--multiple-choice` (same scoring rule as `--hellaswag`, but in
+  file order, so every result maps to a question id). WinoGrande goes through `--winogrande`.
+- Prompts follow lm-evaluation-harness conventions:
+  - **HellaSwag:** `activity_label + ": " + ctx_a + " " + ctx_b.capitalize()`, with lm-eval's text clean-up
+    (strip, " [title]" → ". ", drop bracketed tags, collapse double spaces); answers = the 4 endings.
+  - **ARC-C:** `"Question: {question}\nAnswer:"`; answers = the choice texts.
+  - **MMLU 5-shot:** `"The following are multiple choice questions (with answers) about {subject}.\n\n"`,
+    then the subject's 5 dev examples as `"{question}\nA. …\nB. …\nC. …\nD. …\nAnswer: {letter}\n\n"`,
+    then the question in the same layout ending `"Answer:"`; answers = `A`, `B`, `C`, `D`.
+  - **WinoGrande:** the sentence with its `_`, both options, answer 1/2, as llama.cpp's CSV.
+- **Scoring differs from lm-eval in places (D25):** HellaSwag and ARC-C normalise by token count (lm-eval
+  `acc_norm` uses byte length); WinoGrande averages the tokens after the blank and drops the last one
+  (lm-eval sums them all); MMLU with single-letter answers is identical. All configurations are scored the
+  same way, so comparisons are fair; the size of each difference is measured in A4.4.
+- Context `-c 4096` for task runs (MMLU 5-shot prompts reach ~1,500 tokens; llama.cpp packs several items
+  per context).
+
+**A4.1 Converters** (`src/panther/quality/tasks.py`): split JSONL → `tasks/{selection,test}/*.bin|csv`
+plus a manifest (item ids in file order, counts, sha256). Both splits are converted; only selection is
+*evaluated* in Phase A (D34). Checks, in Python:
+- the binary files are read back with a reader that mirrors llama.cpp's `deserialize` exactly;
+- the WinoGrande CSV is read back with a port of llama.cpp's CSV parser (which only understands a quoted
+  sentence and unquoted options); any row it would drop or mis-split is a converter failure.
+
+**A4.2 Runner and parsers:** `panther.quality.run task …` writes a record with per-question results
+(question id, correct 0/1) recovered from the output, and checks the count and that the recovered results
+reproduce llama.cpp's final accuracy exactly.
+
+**A4.3 Validation runs (1.5B, selection items only):**
+
+| Model file | Build | Purpose |
+|---|---|---|
+| BF16 | CUDA | baseline accuracies |
+| Q8_0, Q4_K, A1 | CUDA | behaviour across quality levels |
+| BF16, A1 | CPU | CPU/CUDA agreement on tasks; **timings for the Phase D cost estimate** |
+
+**A4.4 Independent check (D39):** reimplement llama.cpp's scoring rule in transformers (BF16 on the GPU)
+for 200 seeded selection items per task, with the same prompt strings, and compare per-question choices
+with llama.cpp's BF16 CUDA run. The same items are also scored the lm-eval way (byte-normalised; full
+WinoGrande continuation) to report how much the definitions differ.
+
+**Pass:**
+1. converters round-trip exactly; the simulated llama.cpp CSV parser keeps every WinoGrande row;
+2. every run evaluates exactly the file's item count, and per-question results reproduce the final
+   accuracy exactly;
+3. BF16 is at least 10 points above chance on every task (HellaSwag, ARC-C, MMLU: 25%; WinoGrande: 50%),
+   and Q8_0 is within 2 points of BF16 on every task;
+4. the independent check agrees with llama.cpp on ≥ 95% of items for every task;
+5. CPU timings recorded and a Phase D cost estimate written (D40).
+
+**Known cost risk (D40):** final task accuracy is planned on the CPU build (PLAN §2.1). The full MMLU test
+is 14,042 five-shot prompts (~11M tokens). At the 1.5B CPU rate seen so far that is hours per
+configuration, and ~10× more for 14B. A4's CPU timings give the real figure; the Phase D plan is decided
+from it, before Phase D.
 
 ### A5. GSM8K 📝
 - `llama-server` and lm-evaluation-harness (`local-completions`) in the same GPU container, talking over
