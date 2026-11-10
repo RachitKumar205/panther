@@ -306,7 +306,8 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   - **C1 (additivity):** Σ a_g is within ±25% of the measured uniform-Q6_K gap, 0.007145 (D35:
     CPU 0.012955 − CUDA 0.005810).
   - **C2 (prediction):** for a validation set of 5 mixed configurations (A1 and 4 seeded random
-    assignments over each gene's allowed formats), predicted CPU KL = CUDA KL + Σ a_g must satisfy
+    assignments over each gene's allowed formats), predicted CPU KL = CUDA KL + Σ a_g (scaled per
+    format, see the amendment below) must satisfy
     |predicted − measured CPU| ≤ 0.25 × |CUDA − measured CPU| or ≤ 0.0005, for every configuration;
     i.e. the correction removes at least 75% of the gap.
   - **C3 (structure, informative):** how a_g varies with layer and with attention vs MLP, and the error
@@ -327,6 +328,17 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - **Also part of D36 (Phase C design):** the refinement step and the shortlist are scored on the CPU
   build, so every comparison that picks a configuration uses the Pi's arithmetic; final numbers were
   already CPU-only (PLAN §2.1).
+- **Per-format scaling (amendment, 2026-11-11, user; before any validation result existed):** the
+  whole-model CPU − CUDA gap grows as formats get coarser (D35: Q6_K 0.0071 … Q2_K 0.0103, IQ2_XS 0.0121),
+  so a single a_g measured with Q6_K undercharges low-bit formats. The correction becomes
+  a_g(f) = a_g × r_f with r_f = gap(f) / gap(Q6_K) from the D35 uniform sweep, and r_f = 0 for the A32
+  formats (Q8_0, Q4_0, IQ4_NL). Ratios (from D35's records): Q6_K 1.00, Q5_K 1.06, IQ4_XS 1.07,
+  Q4_K 1.08, IQ3_S 1.19, Q3_K 1.23, IQ3_XXS 1.28, Q2_K 1.45, IQ2_XS 1.70. No extra measurement.
+  - **Assumes** each gene's share of the extra error is the same in every A256 format.
+  - **C2 uses the scaled prediction** (primary); the unscaled prediction is reported alongside.
+    C1 is unchanged (it compares Q6_K costs with the Q6_K gap, where r = 1).
+  - When the amendment was made, 5 of the 17 sampled genes and no validation configuration had been
+    measured.
 - **GA ablation (added 2026-11-11):** the GA measures assembled candidates instead of summing prices.
   Its fitness evaluations run on the CUDA build and get the same correction (CUDA KL + Σ a_g over the
   candidate's genes in an A256 format); its best candidates are then re-measured on the CPU build, exactly

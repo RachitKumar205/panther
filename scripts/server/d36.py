@@ -57,6 +57,22 @@ def interpolate(inv, measured: dict[str, float]) -> dict[str, float]:
     return out
 
 
+def format_ratios(recs: list[dict]) -> dict[str, float]:
+    """r_f = (CPU - CUDA) / (CPU - CUDA for Q6_K), whole-model uniform sweeps (A3 CUDA, D35 CPU).
+    0 for A32 formats, whose CPU kernels do not use the coarse activation rounding."""
+    gap = {}
+    for f in A32 | A256:
+        gap[f] = kl_of(recs, f"d35:uniform:{f}", "cpu") - kl_of(recs, f"a3:uniform:{f}", "cuda")
+    return {f: (0.0 if f in A32 else gap[f] / gap[PROBE_FMT]) for f in gap}
+
+
+def predict_cpu(cuda: float, assignment: dict[str, str], a: dict[str, float],
+                ratio: dict[str, float] | None) -> float:
+    """CPU KL predicted from CUDA KL: add each A256 gene's cost, scaled per format if ratios are given."""
+    extra = sum(a[g] * (ratio[f] if ratio else 1.0) for g, f in assignment.items() if f in A256)
+    return cuda + extra
+
+
 def records() -> list[dict]:
     return [json.loads(p.read_text()) for p in (DATA / "results" / MODEL).glob("*.json")]
 
@@ -143,16 +159,21 @@ def cmd_analyze() -> int:
     vals = json.loads((OUT / "validation_assignments.json").read_text())
     a1 = json.loads((DATA / "gate" / "a1" / "assignment.json").read_text())
     configs = [("A1", a1, "a3:a1")] + [(f"val{i}", v, f"d36:val:{i}") for i, v in enumerate(vals)]
+    ratio = format_ratios(recs)
     c2_rows = []
     for name, assignment, label in configs:
         cuda, cpu = kl_of(recs, label, "cuda"), kl_of(recs, label, "cpu")
-        pred = cuda + sum(a[g] for g, f in assignment.items() if f in A256)
-        err, gap = abs(pred - cpu), abs(cuda - cpu)
-        ok = err <= 0.25 * gap or err <= 0.0005
-        c2_rows.append({"config": name, "cuda": cuda, "cpu": cpu, "predicted_cpu": pred,
-                        "abs_error": err, "uncorrected_error": gap,
-                        "gap_removed": 1 - err / gap if gap else None, "ok": ok,
-                        "genes_in_A256": sum(f in A256 for f in assignment.values())})
+        gap = abs(cuda - cpu)
+        row = {"config": name, "cuda": cuda, "cpu": cpu, "uncorrected_error": gap,
+               "genes_in_A256": sum(f in A256 for f in assignment.values())}
+        for variant, r in (("scaled", ratio), ("unscaled", None)):  # scaled is primary (D36 amendment)
+            pred = predict_cpu(cuda, assignment, a, r)
+            err = abs(pred - cpu)
+            row[variant] = {"predicted_cpu": pred, "abs_error": err,
+                            "gap_removed": 1 - err / gap if gap else None,
+                            "ok": err <= 0.25 * gap or err <= 0.0005}
+        row["ok"] = row["scaled"]["ok"]
+        c2_rows.append(row)
     c2 = all(r["ok"] for r in c2_rows)
 
     # C3 (sampled variant): measured values by layer and kind, and each kind's share of the total.
@@ -168,7 +189,9 @@ def cmd_analyze() -> int:
               "a_g": {g: round(v, 7) for g, v in a.items()},
               "C1": {"sum_a_g": total, "uniform_q6k_gap": UNIFORM_Q6K_GAP,
                      "rel_diff": (total - UNIFORM_Q6K_GAP) / UNIFORM_Q6K_GAP, "pass": c1},
-              "C2": {"rows": c2_rows, "pass": c2},
+              "format_ratios": ratio,
+              "C2": {"primary": "scaled", "rows": c2_rows, "pass": c2,
+                     "unscaled_would_pass": all(r["unscaled"]["ok"] for r in c2_rows)},
               "C3": {"by_kind": c3, "embedding_genes": {g: a[g] for g in embd}},
               "pass": c1 and c2}
     (OUT / "report.json").write_text(json.dumps(report, indent=2))
@@ -176,10 +199,13 @@ def cmd_analyze() -> int:
     print(f"base KL: CUDA {base['cuda']:.6f} CPU {base['cpu']:.6f}")
     print(f"C1: sum a_g = {total:.6f} vs uniform-Q6_K gap {UNIFORM_Q6K_GAP:.6f} "
           f"({report['C1']['rel_diff']:+.1%}) {'PASS' if c1 else 'FAIL'}")
+    print("format ratios:", {f: round(v, 3) for f, v in sorted(ratio.items(), key=lambda kv: kv[1])})
     for r in c2_rows:
-        print(f"C2 {r['config']:5s} A256 genes {r['genes_in_A256']:2d}: CUDA {r['cuda']:.5f} CPU {r['cpu']:.5f} "
-              f"pred {r['predicted_cpu']:.5f} err {r['abs_error']:.5f} (uncorrected {r['uncorrected_error']:.5f}) "
-              f"{'ok' if r['ok'] else 'FAIL'}")
+        sc, un = r["scaled"], r["unscaled"]
+        print(f"C2 {r['config']:5s} A256 genes {r['genes_in_A256']:2d}: CUDA {r['cuda']:.5f} CPU {r['cpu']:.5f} | "
+              f"scaled pred {sc['predicted_cpu']:.5f} err {sc['abs_error']:.5f} {'ok' if sc['ok'] else 'FAIL'} | "
+              f"unscaled pred {un['predicted_cpu']:.5f} err {un['abs_error']:.5f} {'ok' if un['ok'] else 'fail'} | "
+              f"uncorrected err {r['uncorrected_error']:.5f}")
     print("C2:", "PASS" if c2 else "FAIL")
     for kind, v in c3.items():
         print(f"C3 {kind}: measured", {L: round(x, 5) for L, x in v["measured_by_layer"].items()},
