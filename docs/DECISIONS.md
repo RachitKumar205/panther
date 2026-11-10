@@ -327,6 +327,10 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - **Also part of D36 (Phase C design):** the refinement step and the shortlist are scored on the CPU
   build, so every comparison that picks a configuration uses the Pi's arithmetic; final numbers were
   already CPU-only (PLAN §2.1).
+- **GA ablation (added 2026-11-11):** the GA measures assembled candidates instead of summing prices.
+  Its fitness evaluations run on the CUDA build and get the same correction (CUDA KL + Σ a_g over the
+  candidate's genes in an A256 format); its best candidates are then re-measured on the CPU build, exactly
+  like the solver's shortlist. Both methods are thus judged on the same scale.
 
 ### D25. Task scoring definitions follow llama.cpp's task modes, checked against source first — planned
 - Before converting tasks, read `tools/perplexity` at the pinned commit for the exact input formats and

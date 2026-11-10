@@ -137,8 +137,9 @@ give the top 20 distinct solutions. Refinement re-measures penalties around the 
 **CPU build** (D36), so the comparisons that pick a configuration use the Pi's arithmetic.
 
 **GA ablation** (not built): NSGA-II on the same per-gene vector, seeded from solver solutions, mutation
-changes one gene's format, crossover swaps runs of genes, fitness measured on assembled files, same
-evaluation budget as the solver pipeline. It tests whether the additivity assumption costs quality.
+changes one gene's format, crossover swaps runs of genes, fitness measured on assembled files (CUDA,
+with the same CPU correction as the solver's prices, D36), same evaluation budget as the solver pipeline;
+its best candidates are re-measured on the CPU build like the solver's shortlist. It tests whether the additivity assumption costs quality.
 
 **Baselines** (built): greedy KL-per-byte (HAWQ-style), random feasible search.
 
