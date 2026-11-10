@@ -170,6 +170,17 @@ history).
 
 Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). Decisions to make there:
 
+### D27. A1 outcome and how its checks work — decided
+- A1 passed (results in PIPELINE.md). Checks: our read-back, llama.cpp's own per-type counts from the
+  loader log (needs `-lv 4` at this commit), exact data-size prediction, byte identity per format,
+  generation on both builds, perplexity ordering on the sensitivity text.
+- Generation uses `llama-cli -st --temp 0` (the CLI is a chat UI at this commit, so the instruct chat
+  template applies). Free-text prompts are checked for form (printable, ≥ 3 words, not repetitive); the
+  arithmetic prompt is checked by its answer.
+- Bugs found and fixed while running: a comment placed before a shell redirect disabled logging, so the
+  first report read stale logs; the coherence rule failed the correct answer "42". The final run was
+  from an emptied output folder.
+
 ### D23. KL reference is the BF16 model, not FP16 — planned
 - PLAN.md §2.1 says "KL(FP16 ‖ quantized)". The models are published in BF16, so BF16 is the unrounded
   reference; converting to FP16 would add its own rounding. To be recorded as a deviation in PLAN.md §15.

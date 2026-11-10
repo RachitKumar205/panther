@@ -170,12 +170,51 @@ A small agreement check confirms server-CPU and Pi perplexity match within 0.5%.
 Gate (PLAN.md §13): *a hand-built mixed GGUF loads with exactly the intended types; all §2 quality
 metrics run.* Steps, in order, all on 1.5B:
 
-### A1. Hand-built mixed file 📝
-- Assignment: every one of the 12 formats used by at least one gene, attention and MLP genes cycling
-  through formats in different orders, `embd_head` at Q8_0. Fixed in a script, so it's reproducible.
-- Assemble from the tensor store (CPU job), verify read-back, then load it in llama.cpp and compare
-  llama.cpp's own per-type tensor counts in its load log with the expected counts.
-- **Pass:** zero type mismatches, counts equal, model generates text.
+### A1. Hand-built mixed file ✅ passed 2026-11-10
+A deliberately scrambled configuration that exercises every format; it tests the plumbing, not quality.
+
+- **Assignment** (fixed in `scripts/server/gate_a1.py`): `attn.i` = format[i mod 12],
+  `mlp.i` = format[(5i + 3) mod 12] (a different order, so the two halves of a layer usually differ),
+  `embd_head` = Q8_0. Format order is the menu order: Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0, Q4_0, IQ2_XS,
+  IQ3_XXS, IQ3_S, IQ4_XS, IQ4_NL. All 12 formats are used. Examples: layer 0 = Q2_K / Q5_K,
+  layer 1 = Q3_K / IQ3_XXS, layer 27 = Q5_K / Q4_0.
+- **Predicted:** 0.90 GiB of tensor data (966,944,768 bytes, of which 579,584 are the F32 norms and biases), 5.01 bits/weight on average (inflated by the
+  8.5-bit embedding, 15% of the parameters), RAM at 4096 context ≈ 1.41 GiB (+ KV 0.11, overhead 0.40).
+- **Expected tensor counts by type**, which llama.cpp prints when it loads a model:
+
+  | F32 | Q2_K | Q3_K | Q4_K | Q5_K | Q6_K | Q8_0 | Q4_0 | IQ2_XS | IQ3_XXS | IQ3_S | IQ4_XS | IQ4_NL |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | 141 | 18 | 21 | 18 | 21 | 14 | 15 | 17 | 14 | 17 | 14 | 14 | 14 |
+
+- **Steps:** assemble from the 1.5B store (CPU container) → our read-back check → load with llama.cpp's
+  **CPU** build (CPU container) and **CUDA** build (GPU container), capturing the load log → generate
+  64 tokens greedily from 3 fixed prompts on each → perplexity on the first 16 chunks of the
+  *sensitivity* text (never test) for the mixed file, uniform Q2_K, uniform Q8_0 and BF16.
+- **Pass:**
+  1. read-back: 0 mismatches, 0 missing tensors;
+  2. llama.cpp's per-type counts equal the table above, on both builds;
+  3. file size = predicted weight bytes + F32 bytes + metadata, and a sample of tensors is byte-identical
+     to the source files;
+  4. coherent text from both builds;
+  5. perplexity ordering BF16 ≤ Q8_0 < mixed < Q2_K (sanity only; not a quality result).
+- **Outputs:** `data/gate/a1/` with the assignment, the GGUF, load logs, generations and a report.json.
+- **Result (all 5 checks pass):**
+  1. read-back: 0 mismatches, 0 missing;
+  2. llama.cpp per-type counts equal the table on both CPU and CUDA builds;
+  3. tensor data 966,944,768 bytes = prediction exactly; file 972,896,416 bytes (5.95 MB header and
+     alignment); first tensor of each of the 12 formats byte-identical to its source;
+  4. both builds: "Three primary colors are red, yellow and blue." / a correct one-sentence CPU
+     description / "42";
+  5. perplexity, sensitivity text, 16 × 2048 tokens:
+
+     | BF16 | Q8_0 | A1 mixed (CUDA) | A1 mixed (CPU) | Q2_K |
+     |---|---|---|---|---|
+     | 10.438 ± 0.212 | 10.449 ± 0.212 | 11.894 ± 0.240 | 11.923 ± 0.241 | 37.016 ± 0.884 |
+
+     CPU and CUDA builds agree on the same file within 0.25%.
+- **Problems found on the way** (all in our checking code, fixed; D27): llama.cpp at this commit only
+  prints the loader's per-type counts at log verbosity ≥ 4 (`-lv 4`); the new `llama-cli` is a chat UI
+  (used with `-st`); the coherence rule wrongly failed the correct one-word answer "42".
 
 ### A2. BF16 reference logits 📝
 - `llama-perplexity --kl-divergence-base` on the BF16 model saves its output distributions, which every
