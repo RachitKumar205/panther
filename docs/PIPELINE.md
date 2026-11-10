@@ -428,13 +428,17 @@ one that matches the Pi. Whether this matters depends on whether the gap is *con
 formats, so that CUDA screening still ranks configurations the way the CPU build would. That is the
 follow-up proposed in D35; the check stays failed.
 
-### A3b. CPU activation correction (D35, D36) 🟡 in progress
+### A3b. CPU activation correction (D35, D36, D37) ⚠️ D36 check failed; D37 proposed
 - **D35 result:** KL on the CPU build vs CUDA, uniform formats (sensitivity text): table in DECISIONS.md D35
   (outcome). Ranking identical on both builds. Rule (b) fails: Q6_K +123%, Q5_K +41%, Q4_K +12%, while Q8_0, Q4_0 ≈ 0%.
   In absolute terms every A256 format gains a similar +0.007 to +0.010.
 - **D36 plan:** measure the activation-rounding cost a_g of 17 sampled genes on 1.5B (`embd_head` and
   layers 0, 4, …, 24, 27; base uniform Q8_0, one gene at a time in Q6_K, both builds), interpolate the rest, scale each gene's cost by its format's ratio from D35 (coarser formats cost more), then check additivity (C1) and prediction on 5 mixed configurations (C2).
   Full design and pass rules in DECISIONS.md D36.
+- **D36 result:** C1 passes (+7.2%); C2 fails with the scaled correction on 2 of 5 configurations, while
+  the unscaled correction would pass all 5. Almost all of the extra CPU error sits in two genes: the
+  output head (`embd_head`, 0.0044) and the last layer's MLP (`mlp.27`, 0.0008). Details and the
+  proposed next step (D37) in DECISIONS.md.
 
 ### A4. Task formats for llama-perplexity 📝
 - Convert the split JSONL files into llama.cpp's input formats: HellaSwag text format, WinoGrande CSV,

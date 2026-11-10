@@ -284,7 +284,7 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   The predictions made before the last four formats finished all held (IQ4_XS, IQ3_S, IQ3_XXS rose by
   0.008–0.009; IQ4_NL unchanged). Handled by D36. Report: `data/gate/d35/report.json`.
 
-### D36. CUDA screening plus a measured CPU activation correction; decisive comparisons on the CPU build — decided by user 2026-11-11, being implemented
+### D36. CUDA screening plus a measured CPU activation correction; decisive comparisons on the CPU build — decided by user 2026-11-11; sampled check run: FAIL (see outcome)
 - **Why:** D35's CPU sweep shows the CPU build adds a roughly *constant* KL (+0.007 to +0.010) to every
   format whose CPU kernel rounds activations to `Q8_K`, and ≈ 0 to the others. CUDA alone would overrate
   high-bit K-quants for the Pi; CPU-only screening of 14B would take 400+ hours.
@@ -339,10 +339,49 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
     C1 is unchanged (it compares Q6_K costs with the Q6_K gap, where r = 1).
   - When the amendment was made, 5 of the 17 sampled genes and no validation configuration had been
     measured.
+- **Outcome of the sampled run (2026-11-11): FAIL, as pre-registered.** Report:
+  `data/gate/d36/report.json`.
+  - **C1 passes:** Σ a_g = 0.007663 vs the uniform-Q6_K gap 0.007145 (+7.2%, limit ±25%).
+  - **C2 fails** with the scaled prediction (the amendment's primary): A1 and val0 miss the limit.
+
+    | Config | Genes in A256 | CUDA KL | CPU KL | Uncorrected error | Scaled: error (gap removed) | Unscaled: error (gap removed) |
+    |---|---|---|---|---|---|---|
+    | A1 | 43 | 0.15425 | 0.15629 | 0.00203 | 0.00059 (71%) ❌ | 0.00008 (96%) |
+    | val0 | 42 | 0.20843 | 0.21077 | 0.00234 | 0.00135 (42%) ❌ | 0.00034 (86%) |
+    | val1 | 46 | 0.38108 | 0.38984 | 0.00876 | 0.00017 (98%) | 0.00142 (84%) |
+    | val2 | 45 | 0.18691 | 0.18955 | 0.00264 | 0.00046 (83%) | 0.00001 (100%) |
+    | val3 | 39 | 0.33544 | 0.34319 | 0.00775 | 0.00114 (85%) | 0.00066 (91%) |
+
+  - The **unscaled** prediction (D36's original C2 formula, before the amendment) would pass on all
+    five, removing 84–100% of the gap. This is an observation after the fact, not a pass: the
+    amendment made the scaled version primary before results existed, and the check is left failed.
+  - **What the failure says:** the per-format scaling assumption (each gene's share of the extra error
+    is the same in every format) is wrong in at least some configurations; it overcorrects A1 and val0.
+    The additive per-gene model itself is supported by C1 and by the unscaled column.
+  - **C3, measured a_g (Q6_K, CPU − CUDA):** `embd_head` 0.004444 (58% of the total); `mlp.27`
+    0.000762 (the last layer's MLP, 10%); every other sampled gene 0.000008–0.000083 (attention:
+    0.000083 at layer 0, then 0.000008–0.000029; MLP: 0.000021–0.000057 for layers 0–24). Nearly all
+    of the extra CPU error comes from the output head and the last MLP.
+  - Next step: D37 (proposed, needs approval).
 - **GA ablation (added 2026-11-11):** the GA measures assembled candidates instead of summing prices.
   Its fitness evaluations run on the CUDA build and get the same correction (CUDA KL + Σ a_g over the
   candidate's genes in an A256 format); its best candidates are then re-measured on the CPU build, exactly
   like the solver's shortlist. Both methods are thus judged on the same scale.
+
+### D37. After D36's failure: revert to the unscaled correction and confirm it on fresh configurations — proposed, needs approval
+- **Situation:** D36's pre-registered fallback says "if C1 or C2 fails, measure the remaining 40 genes".
+  That fallback targets an interpolation problem, but the failure is the scaling assumption: the same
+  sampled a_g values pass every configuration when not scaled. Measuring 40 more genes (≈ 2.3 h) would
+  not test the thing that failed.
+- **Proposal:**
+  1. Drop per-format scaling; the correction is D36's original rule, a_g added once per gene in an A256
+     format.
+  2. Because choosing it now is informed by the results above, confirm it on **4 new seeded random
+     configurations** never measured before (≈ 15 min), with the original C2 rule unchanged:
+     |predicted − CPU| ≤ 0.25 × |CUDA − CPU| or ≤ 0.0005, for every one.
+  3. Pass: adopt it for Phase C. Fail: measure the remaining 40 genes, then a new decision.
+- **Alternative:** follow D36's fallback literally (measure 40 genes, re-analyse with scaling); expected
+  to fail the same way, at 2.3 h.
 
 ### D25. Task scoring definitions follow llama.cpp's task modes, checked against source first — planned
 - Before converting tasks, read `tools/perplexity` at the pinned commit for the exact input formats and
@@ -362,3 +401,4 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - How to handle sensitivity precision for Phase C (D31: accept N = 48, enlarge the split, or a
   solver-based rule).
 - How 14B measures its per-gene activation correction (D36 C3 decides whether a layer sample suffices).
+- Approve D37 (unscaled correction, confirmed on 4 fresh configurations) after D36's failure.
