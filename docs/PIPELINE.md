@@ -116,6 +116,9 @@ For each gene and each format: start from a base configuration near the RAM budg
 gene to that format, assemble, and measure the increase in **KL divergence** from the BF16 model's
 output distribution over the sensitivity text. That number is the gene's price tag in "quality lost".
 
+Penalties are measured on the CUDA build and corrected for the CPU build's activation rounding where a
+change moves a gene between activation groups (D36); the CPU build is what the Pi runs.
+
 Cost: genes × formats measurements (14B: 98 × 11 ≈ 1,000). Measured on 1.5B: ~0.4 s per 2048-token
 chunk on the GPU; 14B ≈ 4 s per chunk, so ≈ 53 GPU-hours at all 48 sensitivity chunks. The A2
 chunk-count study sets how many chunks are needed; pruning formats that are never best on both size and
@@ -130,7 +133,8 @@ Choose one format per gene to minimise the sum of penalties subject to
 
 This is a multiple-choice knapsack, solved exactly by OR-Tools CP-SAT (14B in < 0.1 s). No-good cuts
 give the top 20 distinct solutions. Refinement re-measures penalties around the solution and re-solves
-(≤ 3 rounds) because penalties are not exactly additive.
+(≤ 3 rounds) because penalties are not exactly additive. Refinement and the shortlist are scored on the
+**CPU build** (D36), so the comparisons that pick a configuration use the Pi's arithmetic.
 
 **GA ablation** (not built): NSGA-II on the same per-gene vector, seeded from solver solutions, mutation
 changes one gene's format, crossover swaps runs of genes, fitness measured on assembled files, same
@@ -422,6 +426,14 @@ differently, so a quantized model scores ~1.3% worse KL on the CPU build. The CP
 one that matches the Pi. Whether this matters depends on whether the gap is *consistent* across
 formats, so that CUDA screening still ranks configurations the way the CPU build would. That is the
 follow-up proposed in D35; the check stays failed.
+
+### A3b. CPU activation correction (D35, D36) 🟡 in progress
+- **D35 result:** KL on the CPU build vs CUDA, uniform formats (sensitivity text): table in DECISIONS.md D35
+  (outcome). Ranking identical on both builds. Rule (b) fails: Q6_K +123%, Q5_K +41%, Q4_K +12%, while Q8_0, Q4_0 ≈ 0%.
+  In absolute terms every A256 format gains a similar +0.007 to +0.010.
+- **D36 plan:** measure each gene's activation-rounding cost a_g on 1.5B (base uniform Q8_0, one gene at
+  a time in Q6_K, both builds), then check additivity (C1) and prediction on 5 mixed configurations (C2).
+  Full design and pass rules in DECISIONS.md D36.
 
 ### A4. Task formats for llama-perplexity 📝
 - Convert the split JSONL files into llama.cpp's input formats: HellaSwag text format, WinoGrande CSV,

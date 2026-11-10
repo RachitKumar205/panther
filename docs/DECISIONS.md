@@ -257,7 +257,7 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   perplexity and KL metrics *run* using the selection and sensitivity texts; test-split numbers first
   appear in Phase D.
 
-### D35. CPU vs CUDA gap for quantized models — found in A3; follow-up proposed, needs approval
+### D35. CPU vs CUDA gap for quantized models — check run 2026-11-11: failed, handled by D36
 - **Found:** A1's KL is 1.3% higher on the CPU build than on CUDA (0.15629 vs 0.15425), perplexity
   0.12% higher; BF16 is identical on both. A3's check 3 compared this with the BF16 build floor
   (0.00005), the wrong yardstick for quantized kernels, so it failed. The check is left failed.
@@ -273,6 +273,49 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
     state the measured gap.
   - Fail: screening must use the CPU build or a measured per-format correction; a new decision with
     its cost.
+- **Outcome (2026-11-11): FAIL.** (a) ranking: identical on both builds, no swaps. (b) relative
+  difference: fails, max +123% (Q6_K). CPU − CUDA in absolute KL, sensitivity text, uniform formats:
+
+  | Group | Format: CPU − CUDA |
+  |---|---|
+  | A32 | Q8_0 +0.00001 · IQ4_NL +0.00002 · Q4_0 −0.00012 |
+  | A256 | Q6_K +0.00714 · Q5_K +0.00756 · IQ4_XS +0.00764 · Q4_K +0.00774 · IQ3_S +0.00847 · Q3_K +0.00879 · IQ3_XXS +0.00916 · Q2_K +0.01033 · IQ2_XS +0.01213 |
+
+  The predictions made before the last four formats finished all held (IQ4_XS, IQ3_S, IQ3_XXS rose by
+  0.008–0.009; IQ4_NL unchanged). Handled by D36. Report: `data/gate/d35/report.json`.
+
+### D36. CUDA screening plus a measured CPU activation correction; decisive comparisons on the CPU build — decided by user 2026-11-11, being implemented
+- **Why:** D35's CPU sweep shows the CPU build adds a roughly *constant* KL (+0.007 to +0.010) to every
+  format whose CPU kernel rounds activations to `Q8_K`, and ≈ 0 to the others. CUDA alone would overrate
+  high-bit K-quants for the Pi; CPU-only screening of 14B would take 400+ hours.
+- **Mechanism (from `ggml-cpu.c` at the pinned commit, `vec_dot_type`):**
+  - group **A32** (activations to `Q8_0`, one scale per 32 values): Q8_0, Q4_0, IQ4_NL;
+  - group **A256** (activations to `Q8_K`, one scale per 256 values): Q2_K, Q3_K, Q4_K, Q5_K, Q6_K,
+    IQ2_XS, IQ3_XXS, IQ3_S, IQ4_XS.
+  The coarser activation rounding costs about the same however precise the weights are, so it swamps
+  Q6_K's small weight error but is noise next to Q2_K's. The Pi runs the same CPU code.
+- **Model:** CPU KL(config) ≈ CUDA KL(config) + Σ over genes in an A256 format of a_g, where a_g is gene
+  g's activation-rounding cost. For the penalty table this means a gene's CUDA penalty is corrected only
+  when the change moves it between groups: penalty_cpu(g, f) = penalty_cuda(g, f) + a_g × ([f ∈ A256] −
+  [base format of g ∈ A256]).
+- **Measuring a_g (1.5B, all 57 genes):** base B = uniform Q8_0 (all A32). For each gene, B_g = B with
+  that gene in Q6_K (A256 with the smallest weight error). a_g = [KL_cpu(B_g) − KL_cpu(B)] −
+  [KL_cuda(B_g) − KL_cuda(B)], on the 48 sensitivity chunks. Each B_g is assembled, evaluated on both
+  builds, then deleted (57 × 1.5 GB would not fit comfortably). ≈ 3 CPU-hours.
+- **Checks, fixed before running:**
+  - **C1 (additivity):** Σ a_g is within ±25% of the measured uniform-Q6_K gap, 0.007145 (D35:
+    CPU 0.012955 − CUDA 0.005810).
+  - **C2 (prediction):** for a validation set of 5 mixed configurations (A1 and 4 seeded random
+    assignments over each gene's allowed formats), predicted CPU KL = CUDA KL + Σ a_g must satisfy
+    |predicted − measured CPU| ≤ 0.25 × |CUDA − measured CPU| or ≤ 0.0005, for every configuration;
+    i.e. the correction removes at least 75% of the gap.
+  - **C3 (structure, informative):** how a_g varies with layer and with attention vs MLP, and the error
+    of predicting every gene from every 4th layer by interpolation. Decides whether 14B can be measured
+    on a sample of layers; that is a separate decision.
+  - Pass: C1 and C2. If either fails, the additive model is wrong and the next step is a new decision.
+- **Also part of D36 (Phase C design):** the refinement step and the shortlist are scored on the CPU
+  build, so every comparison that picks a configuration uses the Pi's arithmetic; final numbers were
+  already CPU-only (PLAN §2.1).
 
 ### D25. Task scoring definitions follow llama.cpp's task modes, checked against source first — planned
 - Before converting tasks, read `tools/perplexity` at the pinned commit for the exact input formats and
@@ -291,4 +334,4 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - Whether to pin `torch==2.13.0` on every platform (D13).
 - How to handle sensitivity precision for Phase C (D31: accept N = 48, enlarge the split, or a
   solver-based rule).
-- Approve the CPU-vs-CUDA consistency check (D35) before Phase C screening.
+- How 14B measures its per-gene activation correction (D36 C3 decides whether a layer sample suffices).
