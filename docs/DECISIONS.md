@@ -368,7 +368,7 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   candidate's genes in an A256 format); its best candidates are then re-measured on the CPU build, exactly
   like the solver's shortlist. Both methods are thus judged on the same scale.
 
-### D37. After D36's failure: revert to the unscaled correction and confirm it on fresh configurations — approved by user 2026-11-11, running
+### D37. After D36's failure: revert to the unscaled correction and confirm it on fresh configurations — decided: PASS 2026-11-11
 - **Situation:** D36's pre-registered fallback says "if C1 or C2 fails, measure the remaining 40 genes".
   That fallback targets an interpolation problem, but the failure is the scaling assumption: the same
   sampled a_g values pass every configuration when not scaled. Measuring 40 more genes (≈ 2.3 h) would
@@ -383,6 +383,23 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - **Run details (fixed before running):** `scripts/server/d37.py`; the 4 configurations use seed
   20261112 (D36 used 20261111), each gene drawn uniformly from its allowed formats; the a_g values are
   D36's 17 measured genes with linear interpolation, unchanged; labels `d37:val:0..3`.
+- **Outcome: PASS** (all 4 within the rule). Report: `data/gate/d37/report.json`.
+
+  | Config | Genes in A256 | Head | mlp.27 | CUDA KL | CPU KL | Predicted CPU | Error | Gap removed |
+  |---|---|---|---|---|---|---|---|---|
+  | val0 | 48 | Q3_K | Q5_K | 0.27068 | 0.27884 | 0.27754 | 0.00129 | 84% |
+  | val1 | 42 | IQ3_XXS | Q8_0 | 0.36808 | 0.37508 | 0.37454 | 0.00054 | 92% |
+  | val2 | 44 | Q4_K | IQ3_S | 0.19242 | 0.20068 | 0.19973 | 0.00096 | 88% |
+  | val3 | 39 | Q2_K | IQ3_XXS | 0.76338 | 0.77143 | 0.77048 | 0.00096 | 88% |
+
+  - **Adopted for Phase C:** penalty_cpu(g, f) = penalty_cuda(g, f) + a_g × ([f ∈ A256] − [base_g ∈ A256]),
+    with a_g measured once per gene in Q6_K (no per-format scaling).
+  - **Residual, noted for later:** the prediction is below the CPU value in all four (by 0.0005–0.0013,
+    8–16% of the gap). Coarser formats do cost a little more on the CPU, just not in proportion per gene
+    as D36's scaling assumed. Small next to these configurations' KL (0.19–0.77); the CPU-build
+    refinement and shortlist (D36) measure directly and are unaffected.
+  - **For 7B and 14B:** the same sampled method; the 1.5B result that most of the cost sits in the output
+    head and the last MLP is a hypothesis to check there, not an assumption.
 - **Alternative:** follow D36's fallback literally (measure 40 genes, re-analyse with scaling); expected
   to fail the same way, at 2.3 h.
 
