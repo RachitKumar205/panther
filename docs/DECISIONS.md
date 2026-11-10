@@ -257,6 +257,23 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   perplexity and KL metrics *run* using the selection and sensitivity texts; test-split numbers first
   appear in Phase D.
 
+### D35. CPU vs CUDA gap for quantized models — found in A3; follow-up proposed, needs approval
+- **Found:** A1's KL is 1.3% higher on the CPU build than on CUDA (0.15629 vs 0.15425), perplexity
+  0.12% higher; BF16 is identical on both. A3's check 3 compared this with the BF16 build floor
+  (0.00005), the wrong yardstick for quantized kernels, so it failed. The check is left failed.
+- **Cause (to confirm):** the CPU build quantizes activations to 8 bits for quantized matrix products;
+  the CUDA kernels differ. The Pi runs the same CPU code path, so the CPU build is the faithful one.
+- **Why it matters:** Phase C screens on CUDA (the penalty table would take ~10× longer on the CPU). That
+  is fine if the gap is consistent, i.e. CUDA ranks configurations the same way the CPU build does.
+- **Proposed follow-up (pass rule fixed before running):** KL on the sensitivity text for all 12
+  uniform formats on the CPU build (~35 CPU-minutes), compared with the CUDA sweep. Pass if (a) both
+  builds rank the 12 formats identically, ties allowed only where two formats are within 2% of each
+  other on CUDA, and (b) the CPU − CUDA relative difference lies within ±5% for every format.
+  - Pass: keep CUDA screening; report final numbers on the CPU build (as PLAN §2.1 already says) and
+    state the measured gap.
+  - Fail: screening must use the CPU build or a measured per-format correction; a new decision with
+    its cost.
+
 ### D25. Task scoring definitions follow llama.cpp's task modes, checked against source first — planned
 - Before converting tasks, read `tools/perplexity` at the pinned commit for the exact input formats and
   scoring (e.g. HellaSwag length normalisation vs lm-eval `acc_norm`), and record any difference here.
@@ -274,3 +291,4 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - Whether to pin `torch==2.13.0` on every platform (D13).
 - How to handle sensitivity precision for Phase C (D31: accept N = 48, enlarge the split, or a
   solver-based rule).
+- Approve the CPU-vs-CUDA consistency check (D35) before Phase C screening.

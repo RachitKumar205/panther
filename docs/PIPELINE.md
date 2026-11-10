@@ -326,7 +326,7 @@ run's output is now checked. A polling loop also got this Mac blocked by the ser
 Kept: the two references and their manifest (`data/reference/<model>/`), all logs and `study.json`.
 Deleted as planned: per-chunk references, study files and chunk texts (23 GB), and the probe (1.2 GB).
 
-### A3. KL, perplexity, top-1 📝 planned
+### A3. KL, perplexity, top-1 ⚠️ ran 2026-11-11: 4 of 5 checks pass; check 3 fails (D35)
 A3 builds the **evaluator** that every later stage uses (penalty table, shortlist, finalists), then
 validates it on 1.5B. It does not touch the test split.
 
@@ -370,6 +370,58 @@ Time ≈ 10 min on the GPU and ≈ 12 min on the CPU; results are a few MB.
 5. the uniform sweep's KL increases monotonically as bits per weight fall, *within each family*
    (K-quants; IQ-quants). Across families, any format that is both larger and worse than another is
    listed as dominated; that list is input to pruning, not a decision.
+
+**Result.** Evaluator built as `src/panther/quality/parse.py` (parsers) and `run.py` (runner + record);
+8 parser tests on real llama.cpp output, including a failed run that exited 0. Records in
+`data/results/Qwen2.5-1.5B-Instruct/`, report in `data/gate/a3/report.json`.
+
+| Check | Result |
+|---|---|
+| 1. every record ok | ✅ 21 records (17 CUDA, 4 CPU) |
+| 2. per-chunk NLL recovery ≤ 0.01% | ✅ all four perplexity runs |
+| 3. A1 between Q8_0 and Q2_K; CPU − CUDA ≤ 3 × build floor | ❌ first part passes (0.0019 < 0.154 < 1.254); CPU − CUDA = 0.0020 (sensitivity), 0.0017 (selection) vs limit 0.00015 |
+| 4. repeated run | ✅ bit-identical (KL 0.154253 both times) |
+| 5. monotone within families | ✅ K-quants and IQ-quants |
+
+A1 on both builds:
+
+| | CUDA | CPU | CPU − CUDA |
+|---|---|---|---|
+| KL, sensitivity | 0.15425 | 0.15629 | +1.3% |
+| KL, selection | 0.14361 | 0.14532 | +1.2% |
+| PPL, selection | 12.2656 | 12.2806 | +0.12% |
+| BF16 PPL, selection | 10.7445 | 10.7446 | ≈ 0 |
+
+Uniform formats, KL vs BF16 on the sensitivity text (CUDA; whole model in one format, embedding
+included):
+
+| Format | GiB | bits/weight | KL mean | KL p99 | top-1 |
+|---|---|---|---|---|---|
+| IQ2_XS | 0.430 | 2.31 | 1.599 | 6.03 | 38.4% (embedding is a Q2_K placeholder) |
+| Q2_K | 0.478 | 2.62 | 1.254 | 5.03 | 44.0% |
+| IQ3_XXS | 0.556 | 3.06 | 0.483 | 2.53 | 64.3% |
+| Q3_K | 0.624 | 3.44 | 0.353 | 2.03 | 68.1% |
+| IQ3_S | 0.624 | 3.44 | 0.300 | 1.46 | 69.8% |
+| IQ4_XS | 0.770 | 4.25 | 0.0870 | 0.398 | 82.4% |
+| Q4_K | 0.815 | 4.50 | 0.0638 | 0.317 | 84.8% |
+| Q4_0 | 0.815 | 4.50 | 0.1149 | 0.617 | 80.9% |
+| IQ4_NL | 0.815 | 4.50 | 0.0812 | 0.381 | 83.1% |
+| Q5_K | 0.994 | 5.50 | 0.0184 | 0.086 | 91.4% |
+| Q6_K | 1.185 | 6.56 | 0.0058 | 0.029 | 95.5% |
+| Q8_0 | 1.533 | 8.50 | 0.0019 | 0.009 | 97.4% |
+
+Dominated (another format is no larger and no worse): **Q3_K** (by IQ3_S), **Q4_0** and **IQ4_NL** (by
+Q4_K). Input to pruning only: on the Pi, Q4_0 and IQ4_NL have fast repacked kernels and Q3_K and IQ3_S
+do not, so speed may keep them (PLAN §6). The BF16 reference's own selection perplexity (10.7445, A2)
+equals the evaluator's CUDA BF16 run, a cross-check of both tools.
+
+**Why check 3 fails, and what it means.** The limit used the BF16 build floor, which was the wrong
+yardstick: BF16 does the same arithmetic on both builds, but quantized formats do not. The CPU build
+quantizes activations to 8 bits before each quantized matrix product, and the CUDA kernels work
+differently, so a quantized model scores ~1.3% worse KL on the CPU build. The CPU build is also the
+one that matches the Pi. Whether this matters depends on whether the gap is *consistent* across
+formats, so that CUDA screening still ranks configurations the way the CPU build would. That is the
+follow-up proposed in D35; the check stays failed.
 
 ### A4. Task formats for llama-perplexity 📝
 - Convert the split JSONL files into llama.cpp's input formats: HellaSwag text format, WinoGrande CSV,
