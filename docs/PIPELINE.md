@@ -116,8 +116,10 @@ For each gene and each format: start from a base configuration near the RAM budg
 gene to that format, assemble, and measure the increase in **KL divergence** from the BF16 model's
 output distribution over the sensitivity text. That number is the gene's price tag in "quality lost".
 
-Cost: genes × formats measurements (14B: 98 × 11 ≈ 1,000). Pruning formats that are never best on
-both size and quality, and timing the 1.5B pilot, will give the real figure before 14B starts.
+Cost: genes × formats measurements (14B: 98 × 11 ≈ 1,000). Measured on 1.5B: ~0.4 s per 2048-token
+chunk on the GPU; 14B ≈ 4 s per chunk, so ≈ 53 GPU-hours at all 48 sensitivity chunks. The A2
+chunk-count study sets how many chunks are needed; pruning formats that are never best on both size and
+quality cuts the number of evaluations.
 
 ## 6. Solver ⬜ (code ✅)
 
@@ -216,16 +218,62 @@ A deliberately scrambled configuration that exercises every format; it tests the
   prints the loader's per-type counts at log verbosity ≥ 4 (`-lv 4`); the new `llama-cli` is a chat UI
   (used with `-st`); the coherence rule wrongly failed the correct one-word answer "42".
 
-### A2. BF16 reference logits 📝
-- `llama-perplexity --kl-divergence-base` on the BF16 model saves its output distributions, which every
-  KL and top-1 measurement compares against. Proposed: the sensitivity text and the selection text.
-- **Size concern:** llama.cpp stores ~2 bytes per vocabulary entry per scored token. Qwen's vocabulary
-  is 151,936, and at context 2048 llama-perplexity scores the second half of each chunk, so 100k tokens
-  ≈ 50k scored ≈ 15 GB; sensitivity + selection ≈ 38 GB per model, ~150 GB for four models. Fits on
-  `/s3` (~590 GB free) but is large. Alternative to decide in A2: fewer sensitivity tokens for KL, or
-  generate the reference per model and delete it after that model's search.
-- The reference is BF16 (the models' native precision), not FP16 as PLAN.md §2.1 says (D23).
-- Storage choice: D24.
+### A2. BF16 reference logits 📝 planned (probe done 2026-11-10)
+Every KL and top-1 number compares a quantized model's output distribution with the unquantized model's.
+`llama-perplexity --kl-divergence-base` saves the BF16 model's distributions once; later runs with
+`--kl-divergence` read them back instead of re-running BF16.
+
+**How llama.cpp stores it** (read from `tools/perplexity/perplexity.cpp` at the pinned commit): for every
+scored token, the full log-probability distribution over the vocabulary, quantized to 16 bits, plus 4
+header values: (151,936 + 4) × 2 = 303,880 bytes per token for Qwen2.5. At `-c 2048` only the second half
+of each chunk is scored: 1,023 tokens per chunk ≈ 311 MB per chunk.
+
+**Probe (1.5B, 4 chunks of the sensitivity text)** — sizes and noise floors measured before planning:
+
+| Measurement | Result |
+|---|---|
+| File size | 1,243,509,748 bytes = 310.9 MB per chunk (prediction exact) |
+| Storage floor: BF16 vs its own saved reference | mean KL 0.000000, max 0.00006, top-1 100% |
+| Build floor: BF16 on the CPU build vs the CUDA-build reference | mean KL 0.00005, 99th pct 0.00027, top-1 99.56%, PPL ratio 1.0002 |
+| Signal for scale: uniform Q4_K | mean KL 0.0627, 99th pct 0.285, top-1 85.7%, PPL ratio 1.061 |
+| Signal for scale: uniform Q2_K | mean KL 1.262, 99th pct 4.68, top-1 45.4%, PPL ratio 3.35 |
+| Speed (CUDA, 1.5B) | ~0.4 s per chunk for both the base run and a KL run |
+
+Both floors are ~1,000× below the smallest effect of interest, so a CUDA-built reference is valid for
+CPU-build evaluations too. One gotcha: the KL run must be given the same `-c 2048 -b 2048` as the base
+run, or it fails ("failed to find a memory slot").
+
+**Plan (1.5B):**
+
+1. **Reference files** (GPU job, CUDA build, BF16, `-c 2048 -b 2048`):
+
+   | Text | Tokens | Full chunks | Scored tokens | File |
+   |---|---|---|---|---|
+   | Sensitivity | 100,124 | 48 | 49,104 | 14.9 GB |
+   | Selection | 152,684 | 74 | 75,702 | 23.0 GB |
+
+   ≈ 38 GB per model; ~1 minute of GPU time for 1.5B. Each file gets a manifest entry: text sha256,
+   chunks, context, image id, llama.cpp commit, file sha256, BF16 perplexity.
+2. **Floors on the full sensitivity file:** BF16 against itself (storage) and BF16 on the CPU build
+   (build). Expected ≈ the probe values; recorded as the noise floor for every later KL comparison.
+3. **Chunk-count study** (feeds D24 and the Phase C cost): from a uniform Q6_K base, lower one gene at a
+   time to Q2_K for 6 genes (`embd_head`, `attn.0`, `mlp.0`, `attn.14`, `mlp.14`, `mlp.27`), plus the
+   base itself: 7 assembled files, one KL run each over all 48 sensitivity chunks. llama.cpp prints
+   per-chunk KL, so a bootstrap over chunks gives, for N = 6, 12, 24, 48 chunks:
+   - the standard error of each gene's KL *increase* over the base;
+   - whether the 6 genes keep the same ranking.
+
+   **Decision rule (fixed now):** Phase C uses the smallest N whose relative standard error is ≤ 5%
+   for every gene's increase and whose ranking matches N = 48 in ≥ 95% of bootstrap samples.
+4. **Write `data/reference/<model>/manifest.json`** and record the results here and in D24.
+
+**Why it matters for cost:** the 1.5B speed scales roughly with parameter count, so 14B should be ≈ 4 s
+per chunk. At 48 chunks that is ≈ 3 min per KL evaluation, and the 14B penalty table (≈ 1,000
+evaluations) would take ≈ 53 GPU-hours. Step 3 tells us how far N can safely come down; format pruning
+cuts the evaluation count.
+
+**Pass:** both reference files written with manifests; floors within 2× of the probe values; the
+chunk-count study produces a recommended N with its evidence.
 
 ### A3. KL, perplexity, top-1 📝
 - `llama-perplexity --kl-divergence` on the A1 file against A2: mean KL, 99th percentile, top-1

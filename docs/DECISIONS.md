@@ -185,11 +185,30 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - PLAN.md §2.1 says "KL(FP16 ‖ quantized)". The models are published in BF16, so BF16 is the unrounded
   reference; converting to FP16 would add its own rounding. To be recorded as a deviation in PLAN.md §15.
 
-### D24. Where and how much reference-logit data to store — planned, open
-- llama.cpp's `--kl-divergence-base` file is ~2 bytes × 151,936 vocabulary entries per scored token:
-  ≈ 15 GB per 100k tokens at context 2048, ≈ 38 GB per model for sensitivity + selection.
-- Options: keep all (≈ 150 GB for four models); fewer sensitivity tokens; or generate per model and
-  delete after that model's search. Decide after measuring 1.5B.
+### D24. Reference-logit storage — planned (sizes measured, amounts decided by the A2 study)
+- **Measured** (A2 probe): 303,880 bytes per scored token = 310.9 MB per 2048-token chunk.
+  Sensitivity (48 chunks) 14.9 GB + selection (74 chunks) 23.0 GB ≈ 38 GB per model.
+- **Proposed:** generate a model's reference files when that model's search starts, keep them until its
+  finalists are chosen, then delete them. They are deterministic (same BF16 file, text, commit and
+  context) and take minutes to regenerate, so nothing is lost. Peak disk at 14B: ~130 GB tensor store +
+  ~38 GB references, against 564 GB free on `/s3`.
+- **Alternatives:** keep all four models' references (≈ 150 GB); store top-k logits only (llama.cpp
+  has no such mode; would need our own code and loses the exact full-vocabulary KL).
+- **Final-test KL** (PLAN.md §2.1 lists KL among final metrics): the full test text would need 219
+  chunks ≈ 68 GB per model. Proposed: KL on the test split uses the web-text part only (73 chunks,
+  ≈ 23 GB), generated for finalist models only, deleted after. Perplexity still uses all 449k tokens.
+- How many sensitivity chunks Phase C actually reads is set by the A2 chunk-count study (rule in
+  PIPELINE.md A2, step 3).
+
+### D28. KL runs always repeat the base run's context and batch — decided
+- `--kl-divergence` must be given `-c 2048 -b 2048` like the base run; without it llama.cpp fails to
+  decode (found in the A2 probe). The KL wrapper will take these from the reference manifest, never
+  from defaults.
+
+### D29. One CUDA-built reference serves CPU-build evaluations — decided (from the A2 probe)
+- CPU-vs-CUDA BF16 on the same reference: mean KL 0.00005, top-1 99.56%, PPL ratio 1.0002, about
+  1,000× below uniform Q4_K's KL (0.063). So references are built once on the GPU; final CPU-build
+  evaluations compare against them. The measured build floor is reported alongside final KL numbers.
 
 ### D25. Task scoring definitions follow llama.cpp's task modes, checked against source first — planned
 - Before converting tasks, read `tools/perplexity` at the pinned commit for the exact input formats and
