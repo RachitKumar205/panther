@@ -1,6 +1,6 @@
 """D36 (docs/DECISIONS.md): per-gene CPU activation-rounding cost a_g on 1.5B, and its checks.
 
-  python scripts/server/d36.py measure    # GPU container: base + 57 one-gene configs, both builds
+  python scripts/server/d36.py measure    # GPU container: base + 17 sampled one-gene configs, both builds
   python scripts/server/d36.py validate   # GPU container: 4 seeded random mixes, both builds
   python scripts/server/d36.py analyze    # C1 additivity, C2 prediction, C3 structure -> report.json
 
@@ -34,6 +34,27 @@ A256 = {"Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "IQ2_XS", "IQ3_XXS", "IQ3_S", "I
 BASE_FMT, PROBE_FMT = "Q8_0", "Q6_K"
 UNIFORM_Q6K_GAP = 0.012955 - 0.005810  # D35: CPU - CUDA, uniform Q6_K
 N_VAL, VAL_SEED = 4, 20261111
+SAMPLE_LAYERS = [0, 4, 8, 12, 16, 20, 24, 27]  # D36 sampled variant (1.5B has 28 layers)
+
+
+def sampled_genes(inv) -> list[str]:
+    """Genes measured directly: the embedding gene(s) and attention + MLP of the sampled layers."""
+    out = [g.gene_id for g in inv.genes if g.kind in ("embd", "embd_head", "head")]
+    for L in SAMPLE_LAYERS:
+        out += [f"attn.{L}", f"mlp.{L}"]
+    return out
+
+
+def interpolate(inv, measured: dict[str, float]) -> dict[str, float]:
+    """a_g for every gene: measured where available, else linear in layer index within its kind."""
+    out = dict(measured)
+    n = inv.geometry.n_layers
+    for kind in ("attn", "mlp"):
+        xs = [L for L in SAMPLE_LAYERS if f"{kind}.{L}" in measured]
+        ys = [measured[f"{kind}.{L}"] for L in xs]
+        for L, v in zip(range(n), np.interp(np.arange(n), xs, ys)):
+            out.setdefault(f"{kind}.{L}", float(v))
+    return out
 
 
 def records() -> list[dict]:
@@ -83,8 +104,8 @@ def cmd_measure() -> int:
     inv, store = setup()
     base = uniform(inv, BASE_FMT)
     evaluate(inv, store, base, "d36:base")
-    for g in inv.genes:
-        evaluate(inv, store, {**base, g.gene_id: PROBE_FMT}, f"d36:gene:{g.gene_id}")
+    for g in sampled_genes(inv):
+        evaluate(inv, store, {**base, g: PROBE_FMT}, f"d36:gene:{g}")
     return 0
 
 
@@ -108,11 +129,13 @@ def cmd_analyze() -> int:
     inv, _ = setup()
     recs = records()
     base = {b: kl_of(recs, "d36:base", b) for b in ("cuda", "cpu")}
-    a = {}
-    for g in inv.genes:
-        d_cpu = kl_of(recs, f"d36:gene:{g.gene_id}", "cpu") - base["cpu"]
-        d_cuda = kl_of(recs, f"d36:gene:{g.gene_id}", "cuda") - base["cuda"]
-        a[g.gene_id] = d_cpu - d_cuda
+    measured = {}
+    for g in sampled_genes(inv):
+        d_cpu = kl_of(recs, f"d36:gene:{g}", "cpu") - base["cpu"]
+        d_cuda = kl_of(recs, f"d36:gene:{g}", "cuda") - base["cuda"]
+        measured[g] = d_cpu - d_cuda
+    a = interpolate(inv, measured)
+    assert set(a) == {g.gene_id for g in inv.genes}
     total = sum(a.values())
     c1 = abs(total - UNIFORM_Q6K_GAP) <= 0.25 * UNIFORM_Q6K_GAP
 
@@ -132,19 +155,16 @@ def cmd_analyze() -> int:
                         "genes_in_A256": sum(f in A256 for f in assignment.values())})
     c2 = all(r["ok"] for r in c2_rows)
 
-    # C3: structure by layer and kind; interpolate every gene from every 4th layer.
-    n_layer = inv.geometry.n_layers
+    # C3 (sampled variant): measured values by layer and kind, and each kind's share of the total.
     c3 = {}
     for kind in ("attn", "mlp"):
-        ys = np.array([a[f"{kind}.{i}"] for i in range(n_layer)])
-        sample = sorted(set(list(range(0, n_layer, 4)) + [n_layer - 1]))
-        interp = np.interp(np.arange(n_layer), sample, ys[sample])
-        c3[kind] = {"a_by_layer": ys.round(7).tolist(), "sum": float(ys.sum()),
-                    "sample_layers": sample, "interp_max_abs_error": float(np.max(np.abs(interp - ys))),
-                    "interp_sum_error": float(interp.sum() - ys.sum())}
+        c3[kind] = {"measured_by_layer": {L: round(measured[f"{kind}.{L}"], 7) for L in SAMPLE_LAYERS},
+                    "sum_interpolated": float(sum(v for g, v in a.items() if g.startswith(kind + ".")))}
     embd = [g.gene_id for g in inv.genes if g.kind in ("embd", "embd_head", "head")]
 
     report = {"model": MODEL, "base": f"uniform {BASE_FMT}", "probe": PROBE_FMT, "base_kl": base,
+              "variant": "sampled", "sample_layers": SAMPLE_LAYERS,
+              "a_g_measured": {g: round(v, 7) for g, v in measured.items()},
               "a_g": {g: round(v, 7) for g, v in a.items()},
               "C1": {"sum_a_g": total, "uniform_q6k_gap": UNIFORM_Q6K_GAP,
                      "rel_diff": (total - UNIFORM_Q6K_GAP) / UNIFORM_Q6K_GAP, "pass": c1},
@@ -162,8 +182,8 @@ def cmd_analyze() -> int:
               f"{'ok' if r['ok'] else 'FAIL'}")
     print("C2:", "PASS" if c2 else "FAIL")
     for kind, v in c3.items():
-        print(f"C3 {kind}: sum {v['sum']:.6f}, every-4th-layer interpolation max error {v['interp_max_abs_error']:.6f}")
-        print("   a by layer:", [round(x, 5) for x in v["a_by_layer"]])
+        print(f"C3 {kind}: measured", {L: round(x, 5) for L, x in v["measured_by_layer"].items()},
+              f"| sum incl. interpolated {v['sum_interpolated']:.6f}")
     print("C3 embedding:", {g: round(a[g], 6) for g in embd})
     print("D36:", "PASS" if report["pass"] else "FAIL")
     return 0 if report["pass"] else 1

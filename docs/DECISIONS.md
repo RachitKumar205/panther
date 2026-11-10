@@ -313,6 +313,17 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
     of predicting every gene from every 4th layer by interpolation. Decides whether 14B can be measured
     on a sample of layers; that is a separate decision.
   - Pass: C1 and C2. If either fails, the additive model is wrong and the next step is a new decision.
+- **Change before any gene was measured (2026-11-11, user):** sampled run instead of all 57 genes.
+  14B will have to use a layer sample anyway (≈ 40 CPU-hours for all 98 genes), so the 1.5B pilot tests
+  the sampled method directly:
+  - measured: `embd_head` and attention + MLP of layers 0, 4, 8, 12, 16, 20, 24, 27 (17 genes,
+    ≈ 1 hour instead of ≈ 3.3);
+  - every other layer's a_g is linearly interpolated per kind (attention, MLP) from the measured layers;
+  - C1 and C2 are applied unchanged, using the interpolated values for unmeasured genes;
+  - C3 reports the measured values by layer and kind (its interpolation-error part needs all genes and
+    is dropped);
+  - if C1 or C2 fails, the remaining 40 genes are measured (≈ 2.3 h) before any other conclusion.
+  At the time of the change only the base configuration's CUDA run had finished.
 - **Also part of D36 (Phase C design):** the refinement step and the shortlist are scored on the CPU
   build, so every comparison that picks a configuration uses the Pi's arithmetic; final numbers were
   already CPU-only (PLAN §2.1).

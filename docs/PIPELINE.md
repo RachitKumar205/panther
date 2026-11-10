@@ -431,8 +431,8 @@ follow-up proposed in D35; the check stays failed.
 - **D35 result:** KL on the CPU build vs CUDA, uniform formats (sensitivity text): table in DECISIONS.md D35
   (outcome). Ranking identical on both builds. Rule (b) fails: Q6_K +123%, Q5_K +41%, Q4_K +12%, while Q8_0, Q4_0 ≈ 0%.
   In absolute terms every A256 format gains a similar +0.007 to +0.010.
-- **D36 plan:** measure each gene's activation-rounding cost a_g on 1.5B (base uniform Q8_0, one gene at
-  a time in Q6_K, both builds), then check additivity (C1) and prediction on 5 mixed configurations (C2).
+- **D36 plan:** measure the activation-rounding cost a_g of 17 sampled genes on 1.5B (`embd_head` and
+  layers 0, 4, …, 24, 27; base uniform Q8_0, one gene at a time in Q6_K, both builds), interpolate the rest, then check additivity (C1) and prediction on 5 mixed configurations (C2).
   Full design and pass rules in DECISIONS.md D36.
 
 ### A4. Task formats for llama-perplexity 📝
