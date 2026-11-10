@@ -218,7 +218,7 @@ A deliberately scrambled configuration that exercises every format; it tests the
   prints the loader's per-type counts at log verbosity ≥ 4 (`-lv 4`); the new `llama-cli` is a chat UI
   (used with `-st`); the coherence rule wrongly failed the correct one-word answer "42".
 
-### A2. BF16 reference logits 📝 planned (probe done 2026-11-10)
+### A2. BF16 reference logits ✅ passed 2026-11-11 (chunk-count rule not met → N = 48)
 Every KL and top-1 number compares a quantized model's output distribution with the unquantized model's.
 `llama-perplexity --kl-divergence-base` saves the BF16 model's distributions once; later runs with
 `--kl-divergence` read them back instead of re-running BF16.
@@ -258,13 +258,25 @@ run, or it fails ("failed to find a memory slot").
    (build). Expected ≈ the probe values; recorded as the noise floor for every later KL comparison.
 3. **Chunk-count study** (feeds D24 and the Phase C cost): from a uniform Q6_K base, lower one gene at a
    time to Q2_K for 6 genes (`embd_head`, `attn.0`, `mlp.0`, `attn.14`, `mlp.14`, `mlp.27`), plus the
-   base itself: 7 assembled files, one KL run each over all 48 sensitivity chunks. llama.cpp prints
-   per-chunk KL, so a bootstrap over chunks gives, for N = 6, 12, 24, 48 chunks:
+   base itself: 7 assembled files. Per-chunk KL is needed, but llama.cpp's per-chunk rows are *running
+   means* printed to 5 decimals, so recovering single chunks from them adds up to ~2×10⁻⁴ of rounding
+   error, as large as some single-gene effects. Instead each of the 48 chunks becomes its own text file,
+   with its own BF16 reference, and each of the
+   7 files gets one KL run per chunk; the run's summary prints mean KL to 6 decimals. Each chunk file
+   holds the chunk's 2048 tokens followed by 2048 + 128 more (llama-perplexity refuses texts shorter
+   than 2 × context even with `--chunks 1`; only the first chunk is scored), wrapping to the start of
+   the text for the last chunks. llama-perplexity exits 0 even when it fails, so every run's output is
+   checked (reference file non-empty, KL summary present) and the job stops at the first failure. Check: the mean of
+   the 48 per-chunk values for the Q6_K base must match its single contiguous 48-chunk run within 2%.
+   A bootstrap over chunks of the paired increase (gene file − base, chunk by chunk) then gives, for
+   N = 6, 12, 24, 48 chunks:
    - the standard error of each gene's KL *increase* over the base;
    - whether the 6 genes keep the same ranking.
 
    **Decision rule (fixed now):** Phase C uses the smallest N whose relative standard error is ≤ 5%
-   for every gene's increase and whose ranking matches N = 48 in ≥ 95% of bootstrap samples.
+   for every gene's increase and whose ranking matches N = 48 in ≥ 95% of bootstrap samples. If no N
+   meets it (e.g. two genes are nearly tied), Phase C uses N = 48 and the near-tie is reported.
+   Temporary disk: 48 per-chunk references (~15 GB) and 7 study files (~8 GB), deleted after the study.
 4. **Write `data/reference/<model>/manifest.json`** and record the results here and in D24.
 
 **Why it matters for cost:** the 1.5B speed scales roughly with parameter count, so 14B should be ≈ 4 s
@@ -274,6 +286,45 @@ cuts the evaluation count.
 
 **Pass:** both reference files written with manifests; floors within 2× of the probe values; the
 chunk-count study produces a recommended N with its evidence.
+
+**Result:**
+
+| Item | Value |
+|---|---|
+| Sensitivity reference | 48 chunks, 14.92 GB, BF16 perplexity 9.588 |
+| Selection reference | 74 chunks, 23.00 GB, BF16 perplexity 10.745 |
+| Storage floor (full sensitivity) | mean KL 0.000000, top-1 99.996% |
+| Build floor, CPU vs CUDA (full sensitivity) | mean KL 0.000048, top-1 99.57% |
+| Study base, uniform Q6_K | mean KL 0.00581: per-chunk mean and contiguous run agree within 0.01% |
+
+Chunk-count study, KL increase when one gene drops from Q6_K to Q2_K:
+
+| Gene | Increase (48 chunks) | Relative SE at N = 6 / 12 / 24 / 48 |
+|---|---|---|
+| embd_head | 0.5573 | 6.6% / 4.6% / 3.3% / 2.3% |
+| mlp.27 | 0.0293 | 4.9% / 3.6% / 2.5% / 1.8% |
+| attn.0 | 0.0167 | 36% / 26% / 18% / 12.6% |
+| mlp.0 | 0.0066 | 37% / 26% / 18% / 12.9% |
+| mlp.14 | 0.0062 | 22% / 15% / 11% / 7.5% |
+| attn.14 | 0.0029 | 15% / 11% / 7.5% / 5.3% |
+
+Ranking matches N = 48 in 47% / 60% / 69% / 77% of bootstrap samples. **No N meets the rule** (≤ 5%
+relative SE for every gene and ≥ 95% ranking match), so by the pre-registered fallback **Phase C uses
+N = 48**. The reasons, reported as the rule requires:
+- **Layer-0 genes are heavy-tailed:** mlp.0's per-chunk increase ranges 0.0022–0.0416 (median 0.0047); a
+  few chunks hit layer 0 far harder than the rest. attn.0 behaves the same way.
+- **Near-tie:** mlp.0 (0.0066) vs mlp.14 (0.0062) swap places in many resamples.
+- Every gene's increase is positive on all 48 chunks, so the *direction* of each effect is never in doubt;
+  the uncertainty is in the size of small effects.
+
+What this means for Phase C is an open question for the team (D31).
+
+**Problems found on the way** (fixed): llama-perplexity needs ≥ 2 × context tokens even with
+`--chunks 1`, and it **exits 0 when it fails**, so the first study run silently produced nothing. Every
+run's output is now checked. A polling loop also got this Mac blocked by the server's sshd (D30).
+
+Kept: the two references and their manifest (`data/reference/<model>/`), all logs and `study.json`.
+Deleted as planned: per-chunk references, study files and chunk texts (23 GB), and the probe (1.2 GB).
 
 ### A3. KL, perplexity, top-1 📝
 - `llama-perplexity --kl-divergence` on the A1 file against A2: mean KL, 99th percentile, top-1

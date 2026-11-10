@@ -164,6 +164,34 @@ history).
   ownership"), so the commit read back empty; fixed with `safe.directory`, and the script now fails if the
   commit can't be read.
 
+### D30. Never retry SSH to the server in a loop; wait with `deploy/server/wait-job.sh` — decided (2026-11-11)
+- **What happened:** the SSH control master expired (4 h) while a polling loop on the Mac was waiting
+  for the A2 job. The loop kept connecting every 10 s and every attempt failed authentication. the server's
+  OpenSSH penalises an address after repeated failures (`PerSourcePenalties`; the server answers
+  "Not allowed at this time" before authentication), so the user's own logins with the hardware key were
+  refused too.
+- **Fix:** `deploy/server/wait-job.sh` checks for a live control master before any connection, polls every
+  30 s, and stops at the first SSH failure (exit 255) instead of retrying. All waiting uses it.
+- **Recovery:** stop every automated attempt, wait for the penalty to lapse (OpenSSH's default maximum is
+  10 minutes), then reopen the control master once.
+
+### D31. Sensitivity chunk count: rule not met, so N = 48 — decided by the pre-registered fallback; follow-up open
+- A2 study (PIPELINE.md A2 results): at N = 48, relative SE is 12.6–12.9% for the layer-0 genes and ranking
+  agreement is 77%, against the rule's ≤ 5% and ≥ 95%. By the fallback fixed before the run, Phase C uses
+  all 48 sensitivity chunks.
+- **Consequence:** 48 chunks is the most the current sensitivity split has, and even it isn't precise for
+  small, heavy-tailed effects. The 14B penalty table at 48 chunks is ≈ 53 GPU-hours (estimate).
+- **Options for the team, not decided:**
+  1. Accept N = 48 and the noise: the solver weighs penalties against bytes, and a 13% error on a
+     0.007 penalty is small next to the larger penalties that drive its choices. The shortlist and
+     refinement (PLAN.md §8) re-measure the chosen configurations on more data.
+  2. Enlarge the sensitivity split (e.g. 300k tokens) for more precision. More GPU time per evaluation;
+     the splits would be rebuilt (sensitivity only; calibration, selection and test unchanged).
+  3. Replace the relative-SE criterion with one tied to the solver (e.g. how often the top-k solution
+     changes when penalties are resampled). This would be a new pre-registered rule, set before seeing
+     its outcome.
+- A2's measured numbers stay as they are regardless; any change is a new decision with its own entry.
+
 ---
 
 ## Phase A gate (1.5B) — planned
@@ -185,7 +213,7 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - PLAN.md §2.1 says "KL(FP16 ‖ quantized)". The models are published in BF16, so BF16 is the unrounded
   reference; converting to FP16 would add its own rounding. To be recorded as a deviation in PLAN.md §15.
 
-### D24. Reference-logit storage — planned (sizes measured, amounts decided by the A2 study)
+### D24. Reference-logit storage — decided for 1.5B (references kept until its search is done)
 - **Measured** (A2 probe): 303,880 bytes per scored token = 310.9 MB per 2048-token chunk.
   Sensitivity (48 chunks) 14.9 GB + selection (74 chunks) 23.0 GB ≈ 38 GB per model.
 - **Proposed:** generate a model's reference files when that model's search starts, keep them until its
@@ -225,3 +253,5 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - Team confirmation of task accuracy as primary endpoint and the 0.5-point margin (D5).
 - Whether to keep one Pi energy check (D2 removed energy; question raised, not answered).
 - Whether to pin `torch==2.13.0` on every platform (D13).
+- How to handle sensitivity precision for Phase C (D31: accept N = 48, enlarge the split, or a
+  solver-based rule).

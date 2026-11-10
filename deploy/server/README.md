@@ -79,7 +79,9 @@ deploy/server/panther.sh status       # jobs, GPU, memory, GitLab
 deploy/server/panther.sh logs NAME | stop NAME | clean
 ```
 
-From the Mac: `deploy/server/push.sh` syncs code (not data) to `work/repo`.
+From the Mac: `deploy/server/push.sh` syncs code (not data) to `work/repo`, and
+`deploy/server/wait-job.sh NAME` waits for a job. Never poll the server in an unguarded loop: its sshd
+blocks an address after repeated failed logins (D30), which also locks out the hardware key login.
 
 Resource caps: `PANTHER_CPUS`, `PANTHER_MEM`. Don't run large jobs while the LLM stack (`llm-llama`,
 88 GB) is running; together they exceed RAM.
