@@ -368,7 +368,7 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   candidate's genes in an A256 format); its best candidates are then re-measured on the CPU build, exactly
   like the solver's shortlist. Both methods are thus judged on the same scale.
 
-### D37. After D36's failure: revert to the unscaled correction and confirm it on fresh configurations — proposed, needs approval
+### D37. After D36's failure: revert to the unscaled correction and confirm it on fresh configurations — approved by user 2026-11-11, running
 - **Situation:** D36's pre-registered fallback says "if C1 or C2 fails, measure the remaining 40 genes".
   That fallback targets an interpolation problem, but the failure is the scaling assumption: the same
   sampled a_g values pass every configuration when not scaled. Measuring 40 more genes (≈ 2.3 h) would
@@ -380,6 +380,9 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
      configurations** never measured before (≈ 15 min), with the original C2 rule unchanged:
      |predicted − CPU| ≤ 0.25 × |CUDA − CPU| or ≤ 0.0005, for every one.
   3. Pass: adopt it for Phase C. Fail: measure the remaining 40 genes, then a new decision.
+- **Run details (fixed before running):** `scripts/server/d37.py`; the 4 configurations use seed
+  20261112 (D36 used 20261111), each gene drawn uniformly from its allowed formats; the a_g values are
+  D36's 17 measured genes with linear interpolation, unchanged; labels `d37:val:0..3`.
 - **Alternative:** follow D36's fallback literally (measure 40 genes, re-analyse with scaling); expected
   to fail the same way, at 2.3 h.
 
@@ -401,4 +404,3 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - How to handle sensitivity precision for Phase C (D31: accept N = 48, enlarge the split, or a
   solver-based rule).
 - How 14B measures its per-gene activation correction (D36 C3 decides whether a layer sample suffices).
-- Approve D37 (unscaled correction, confirmed on 4 fresh configurations) after D36's failure.
