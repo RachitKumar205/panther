@@ -27,7 +27,7 @@ contests:
 sensitivity_granularity: block   # measured per block (attn / mlp per layer, embd, head); allocation per matrix
 sensitivity_shared_across_budgets: true
 sensitivity_probe_up_bpw: 3.0    # D47: probe = highest menu format at most this far above the base
-remeasure_rounds: 1              # D48 (was 3, D47): measure the formats each block uses (+-1), re-solve
+remeasure_rounds: 2              # D48: probe + 2 rounds (14B test: 1 round ~11% off optimum, 2 rounds ~2.5%)
 remeasure_neighbours: 1
 top_k: 3
 cross_model_references: accuracy_only

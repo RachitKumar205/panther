@@ -605,10 +605,13 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - **What:** `active_budgets: [7, 1]` in `configs/search.yaml`: only these budgets are searched now (7 GiB is the Pi's
   real budget; 1 GiB because 1.5B is ready and gives an early end-to-end result). 3 and 5 GiB, and 7B's search,
   wait. Menus and sensitivity bases follow the active budgets (14B: base IQ3_S, probe Q5_K; needs only IQ2_S
-  and Q5_K added). One re-measure round instead of three (14B offline test: within ~2.5% of the fully measured
-  optimum after 2 rounds). Up to 10 KL runs at once (GPU memory check still applies). 32B references are made
+  and Q5_K added). Two re-measure rounds instead of three. **Correction (same day):** first set to one round on a misread of
+  the offline test; there one round is still ~11% off the fully measured optimum, two rounds ~2.5%, three ~1.2%,
+  and the second round costs only ~15% more runs (14B: 311 → 360). Up to 10 KL runs at once (GPU memory check still applies). 32B references are made
   right after its BF16 file, before its formats, while the GPU is free. Evaluation per budget: each model's
   winner, its best same-model reference by selection KL, and the cross-model reference.
+- **1.5B sensitivity text:** its phase-A reference was 48 chunks (~98k tokens), 4× the other models' 12; its sweep
+  restarts on a 12-chunk reference like the others (the 48-chunk file is kept as `sensitivity-48chunks.kld`).
 
 ---
 
