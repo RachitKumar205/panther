@@ -11,12 +11,16 @@
 #
 # The script copies itself to a temporary file first, since it deletes the folder it lives in.
 set -Euo pipefail
+# Site settings (host, user, health-check URL) live in the git-ignored deploy/server/local.env.
+export PANTHER_LOCAL_ENV="${PANTHER_LOCAL_ENV:-$(cd "$(dirname "$0")" && pwd)/local.env}"
+# shellcheck source=/dev/null
+[ -f "$PANTHER_LOCAL_ENV" ] && . "$PANTHER_LOCAL_ENV"
 
-USER_NAME="${PANTHER_USER:-svcuser}"
+USER_NAME="${PANTHER_USER:?set PANTHER_USER in deploy/server/local.env}"
 BASE="${PANTHER_BASE:-/s3/panther}"
 W="$BASE/work"
 LEDGER="$BASE/HOST_CHANGES.tsv"
-GITLAB=https://gitlab.example.com
+GITLAB="${PANTHER_HEALTH_URL:?set PANTHER_HEALTH_URL in deploy/server/local.env}"
 DRY=0; YES=0
 for a in "$@"; do case "$a" in --dry-run) DRY=1 ;; --yes) YES=1 ;; esac; done
 

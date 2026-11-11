@@ -15,12 +15,16 @@
 # as it is made; uninstall.sh replays that ledger in reverse. If anything fails, or GitLab stops
 # returning 200, this run's changes are undone.
 set -Eeuo pipefail
+# Site settings (host, user, health-check URL) live in the git-ignored deploy/server/local.env.
+PANTHER_LOCAL_ENV="${PANTHER_LOCAL_ENV:-$(cd "$(dirname "$0")" && pwd)/local.env}"
+# shellcheck source=/dev/null
+[ -f "$PANTHER_LOCAL_ENV" ] && . "$PANTHER_LOCAL_ENV"
 
-USER_NAME="${PANTHER_USER:-svcuser}"
+USER_NAME="${PANTHER_USER:?set PANTHER_USER in deploy/server/local.env}"
 BASE="${PANTHER_BASE:-/s3/panther}"
 W="$BASE/work"
 LEDGER="$BASE/HOST_CHANGES.tsv"
-GITLAB=https://gitlab.example.com
+GITLAB="${PANTHER_HEALTH_URL:?set PANTHER_HEALTH_URL in deploy/server/local.env}"
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 
 die() { echo "host-setup: $*" >&2; exit 1; }

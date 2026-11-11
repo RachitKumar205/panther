@@ -23,6 +23,10 @@
 # Resource caps (env): PANTHER_CPUS (default 20 of 48 threads), PANTHER_MEM (default 64g).
 # Don't run large jobs while the LLM stack (llm-llama, 88g cap) is up: together they would exceed RAM.
 set -euo pipefail
+# Site settings (host, user, health-check URL) live in the git-ignored deploy/server/local.env.
+PANTHER_LOCAL_ENV="${PANTHER_LOCAL_ENV:-$(cd "$(dirname "$0")" && pwd)/local.env}"
+# shellcheck source=/dev/null
+[ -f "$PANTHER_LOCAL_ENV" ] && . "$PANTHER_LOCAL_ENV"
 
 W="${PANTHER_WORK:-/s3/panther/work}"
 REPO="$W/repo"
@@ -30,7 +34,7 @@ DATA="$W/data"
 CPUS="${PANTHER_CPUS:-20}"
 MEM="${PANTHER_MEM:-64g}"
 IMAGE=localhost/panther
-GITLAB=https://gitlab.example.com
+GITLAB="${PANTHER_HEALTH_URL:?set PANTHER_HEALTH_URL in deploy/server/local.env}"
 
 [ -d "$W" ] && [ -w "$W" ] || { echo "$W missing or not writable; run host-setup.sh as root first" >&2; exit 1; }
 mkdir -p "$DATA/logs" "$W/tmp" "$W/containers/storage"

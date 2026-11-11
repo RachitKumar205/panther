@@ -7,3 +7,4 @@ results/
 *.imatrix
 /data/
 /third_party/
+/deploy/server/local.env

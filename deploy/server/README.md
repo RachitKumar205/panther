@@ -4,6 +4,13 @@ How Panther runs on the shared server `the server` (RHEL 10, SELinux enforcing, 
 EPYC 9224 24C/48T, 124 GB RAM), which also hosts production GitLab. Decisions referenced as D-numbers
 are in [docs/DECISIONS.md](../../docs/DECISIONS.md).
 
+## Site settings
+
+Host, account and health-check URL are not in the repository. Copy `local.env.example` to `local.env`
+(git-ignored) next to it and fill it in; `push.sh` and `wait-job.sh` read it on your machine, and
+`push.sh` copies it to the server, where `panther.sh`, `host-setup.sh` and `uninstall.sh` read it.
+Below, `svcuser` stands for that account and "the server" for that host.
+
 ## Principles
 
 - **Nothing installed on the host.** All tools run in one rootless Podman image (D9).

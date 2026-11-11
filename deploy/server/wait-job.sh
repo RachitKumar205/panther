@@ -7,11 +7,15 @@
 # retrying: the server's sshd penalises repeated failed logins from one address (OpenSSH PerSourcePenalties,
 # banner "Not allowed at this time"), and a retry loop locks the user out (D30). Polls every 30 s.
 set -uo pipefail
+# Site settings (host, user, health-check URL) live in the git-ignored deploy/server/local.env.
+PANTHER_LOCAL_ENV="${PANTHER_LOCAL_ENV:-$(cd "$(dirname "$0")" && pwd)/local.env}"
+# shellcheck source=/dev/null
+[ -f "$PANTHER_LOCAL_ENV" ] && . "$PANTHER_LOCAL_ENV"
 
 NAME="$1"
 MAX_MIN="${2:-120}"
-HOST="${PANTHER_HOST:-svcuser@server.example}"
-CP="${PANTHER_SSH_CONTROL:-$HOME/.ssh/cm-panther}"
+HOST="${PANTHER_HOST:?set PANTHER_HOST in deploy/server/local.env}"
+CP="${PANTHER_SSH_CONTROL:?set PANTHER_SSH_CONTROL in deploy/server/local.env}"
 SSH=(ssh -o "ControlPath=$CP" -o BatchMode=yes -o ConnectTimeout=10 "$HOST")
 PODMAN='podman --root /s3/panther/work/containers/storage --runroot /run/user/$(id -u)/panther --events-backend file'
 
@@ -28,4 +32,4 @@ while :; do
   sleep 30
 done
 echo "panther-$NAME: $s"
-"${SSH[@]}" "tail -20 /s3/panther/work/data/logs/$NAME.log; curl -sL -o /dev/null -w 'gitlab %{http_code}\n' https://gitlab.example.com"
+"${SSH[@]}" "tail -20 /s3/panther/work/data/logs/$NAME.log; curl -sL -o /dev/null -w 'health %{http_code}\n' $PANTHER_HEALTH_URL"
