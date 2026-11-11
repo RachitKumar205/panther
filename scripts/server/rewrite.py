@@ -41,7 +41,25 @@ CTX = CFG["context_tokens"]
 OVERHEAD = CFG["overhead_gib"]
 KV_BPE = {"Q8_0": 34 / 32, "F16": 2.0}[CFG["kv_cache_type"]]
 MENU_ALL = CFG["formats"]
-CONCURRENT = 6
+CONCURRENT = int(os.environ.get("PANTHER_KL_CONCURRENT", "6"))
+GPU_HEADROOM_MIB = 4096  # per KL run on top of the file size: compute buffers and logits
+
+
+def wait_for_gpu_memory(need_bytes: int, timeout_s: int = 3600) -> None:
+    """Several lanes share the GPU: start a KL run only when the file plus headroom fits in free memory."""
+    import random
+    import shutil
+    import time
+    if not shutil.which("nvidia-smi"):
+        return
+    need = need_bytes / 2**20 + GPU_HEADROOM_MIB
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout_s:
+        out_ = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                              capture_output=True, text=True).stdout.split()
+        if not out_ or float(out_[0]) >= need:
+            return
+        time.sleep(random.uniform(5, 15))
 CALIB = DATA / "splits" / "calibration.txt"
 REF_MODEL_FORMAT = "Q6_K"  # cross-model references: uniform Q6_K, accuracy only (D45)
 STOCK = ["IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M", "IQ3_XXS", "IQ3_XS", "IQ3_S", "IQ3_M",
@@ -240,6 +258,7 @@ def sens_label(model: str, block: str, fmt: str) -> str:
 def _sens_one(job: tuple[str, str, str]) -> None:
     model, block, fmt = job
     path = build_file(model, block_assignment(model, None if block == "base" else block, fmt))
+    wait_for_gpu_memory(path.stat().st_size)
     try:
         poc.kl(model, path, "sensitivity", sens_label(model, block, fmt))
     finally:

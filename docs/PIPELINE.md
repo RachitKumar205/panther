@@ -699,3 +699,12 @@ Script: `scripts/server/phase0.py` (GPU container; PoC RAM model: f16 KV, 4,096 
   modelled vs measured penalties and measure the modelled solution's selection KL (1 KL run). **Gate:** the two
   solutions' KL within a few percent. Note: this checks per-block prediction; the per-matrix split inside a block
   (D45) has no measured data to check against.
+
+### Rewrite run order (D45–D47) — 2026-11-11
+Per-model lanes, so no model waits for another: `m15` (1.5B error → sensitivity), `m7` (7B formats → error →
+sensitivity), `m14` (14B formats → error → sensitivity), `s32` → `sensB` (32B formats, importance with
+`--process-output`, error, references → sensitivity). Per-budget result chains start as soon as their models are
+ready (user, 2026-11-11): `b1` after m15; `b3` after m7 and the 3B reference; `b5` after m7 and m14; `b7` after
+m14 and sensB. Each runs its contests, then that budget's test-subset evaluation. Lanes share the GPU, so every
+KL run waits until the GPU has its file size + 4 GiB free; `chain.sh` adopts a job that is already running
+instead of replacing it.
