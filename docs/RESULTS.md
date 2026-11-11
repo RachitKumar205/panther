@@ -10,7 +10,8 @@ WinoGrande 1,267, GSM8K 300). KL is the mean KL divergence from the model's own 
 | Model @ 7 GiB | How | Bits/weight | Accuracy | KL | Perplexity | MMLU | HellaSwag | ARC-C | WinoGrande | GSM8K |
 |---|---|---|---|---|---|---|---|---|---|---|
 | **14B, our winner (sol2)** | searched, one type per matrix | ~3.6 | **74.88** | **0.076** | **7.17** | 76.9 | 81.3 | 59.2 | 73.6 | 83.3 |
-| 14B, llama.cpp **Q3_K_S** preset (best existing that fits) | llama.cpp's own mix, same importance matrix | ~3.5 | 74.16 | 0.103 | 7.42 | | | | | |
+| 14B, llama.cpp **IQ3_S** preset (best existing that fits, 7.026 GiB) | llama.cpp's own mix, same importance matrix | ~3.4 | 74.65 | **0.070** | **7.15** | | | | | |
+| 14B, llama.cpp Q3_K_S preset (6.995 GiB) | llama.cpp's own mix, same importance matrix | ~3.5 | 74.16 | 0.103 | 7.42 | | | | | |
 | 14B, IQ3_S everywhere, padded to fill | uniform baseline | ~3.6 | 75.32 | 0.143 | 7.73 | 78.2 | 82.5 | 60.1 | 71.2 | 84.7 |
 | 7B, Q6_K | standard download (reference) | ~6.6 | 70.23 | — | 8.15 | 73.8 | 80.1 | 53.2 | 71.1 | 73.0 |
 | 32B, our winner (sol2) | searched | ~1.6 | 42.51 | 0.962 | 16.86 | 50.0 | 63.5 | 36.9 | 59.5 | 2.7 |
@@ -22,6 +23,7 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
 | Comparison | Accuracy difference | Verdict |
 |---|---|---|
 | 14B ours vs 7B Q6_K | **+4.64** [+3.24, +6.07] | 14B better |
+| 14B ours vs 14B llama.cpp IQ3_S | +0.23 [−0.79, +1.24] | **tied**: accuracy, perplexity (ratio 1.002) equal; the preset's KL is 8% lower (0.070 vs 0.076) |
 | 14B ours vs 14B llama.cpp Q3_K_S | +0.72 [−0.33, +1.80] | tied on accuracy; ours has 26% lower KL and 3.5% lower perplexity |
 | 14B ours vs 14B uniform IQ3_S | −0.44 [−1.48, +0.61] | tied on accuracy; ours has 47% lower KL and 7% lower perplexity |
 | 32B ours vs 32B uniform IQ1_S | **+1.44** [+0.21, +2.64] | ours better; 25% lower perplexity |
@@ -31,8 +33,10 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
 
 - At 7 GiB the best model is a 14B with a searched mix of types (mostly IQ3_S, 4–5 bits in layers 22–43, 2 bits in
   layers 0–8, output layer Q5_K). It beats the best 7B download by 4.6 points.
-- Against the best existing quantization that fits (llama.cpp's Q3_K_S, same importance matrix) it is equal on
-  accuracy and clearly closer to the original model (KL 0.076 vs 0.103).
+- Against the best existing quantization that fits, llama.cpp's own **IQ3_S** mix with the same importance matrix,
+  it is **equal**: accuracy and perplexity tie, and the preset is slightly closer to the original (KL 0.070 vs
+  0.076). Against the other fitting preset (Q3_K_S) ours is equal on accuracy and clearly closer (KL 0.076 vs
+  0.103). So at 14B / 7 GiB, where a good hand-made mix exists, the search matches it but does not beat it.
 - For 32B no existing llama.cpp quantization fits 7 GiB at all; ours does, and beats a uniform IQ1_S. But at ~1.6
   bits per weight 32B has lost most of its ability: GSM8K 2.7% (the 16-bit 32B scores over 90), ARC-C and
   WinoGrande barely above guessing (25 and 50), KL about 12× that of 14B. A bigger model wins only while it keeps
