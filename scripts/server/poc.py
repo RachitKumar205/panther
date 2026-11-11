@@ -113,9 +113,15 @@ def cmd_refs(model: str) -> int:
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {
         "model": model, "built_from": bf16.name, "build": "cuda", "kl_runs_must_use": {"-c": 2048, "-b": 2048},
         "references": {}}
-    store_manifest = json.loads((DATA / "store" / model / "manifest.json").read_text())
-    manifest["bf16_sha256"] = store_manifest["bf16"]["sha256"]
-    manifest["llama_cpp_commit"] = store_manifest["llama_cpp_commit"]
+    sm_path = DATA / "store" / model / "manifest.json"
+    if sm_path.exists():
+        store_manifest = json.loads(sm_path.read_text())
+        manifest["bf16_sha256"] = store_manifest["bf16"]["sha256"]
+        manifest["llama_cpp_commit"] = store_manifest["llama_cpp_commit"]
+    else:  # references made before the store's formats exist (D48): record the commit from the registry
+        from panther.models.inventory import load_registry
+        manifest["llama_cpp_commit"] = load_registry()["llama_cpp"]["commit"]
+        manifest["bf16_sha256"] = None
     for name, chunks in (("sensitivity", SENS_CHUNKS), ("selection", None)):
         kld = ref_dir / f"{name}.kld"
         if name in manifest["references"] and kld.exists():
