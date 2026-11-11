@@ -77,7 +77,7 @@ the data disk has less than 30 GB free.
 | 4 | Part costs | (a) whole model at a starting type: 1 KL test; (b) each part alone raised to a higher type: 1 KL test per part; (c) the solver picks a genotype, then the types it chose for each part (±1 type) are measured; repeated twice | GPU |
 | 5 | Solver list | The solver's 6 best genotypes inside the window (each ≥5% different) + 1 baseline (one type everywhere, raised layer by layer to fill the budget). This is the model's whole solution space; stored in `rewrite/budget-<B>/list-<model>.json` | CPU, seconds |
 | 6 | Tests | Each of the 7 genotypes built once and given every test: KL, perplexity, MMLU (1,000), HellaSwag (2,000), ARC-C (1,172), WinoGrande (1,267), GSM8K (300); all 7 at once | GPU |
-| 7 | Winner | Best mean accuracy (ties: lower KL) | seconds |
+| 7 | Winner | Best mean accuracy. If the paired bootstrap can't separate another genotype from it (the 95% interval of the lead reaches below 0.5 points), they are tied, and the tied one with the lowest KL wins: KL is measured over far more text than the benchmarks have questions | seconds |
 | 8 | Pi | `./panther run` copies each winner to the Pi as soon as it is bundled (one check at a time); the Pi loads it once, checks peak RAM against the budget and measures speed (256-token prompt, 64 tokens out, 4 threads) | Pi |
 | 9 | Comparison | All models' winners and the reference model against each other (paired bootstrap on accuracy) | seconds |
 

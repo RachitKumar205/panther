@@ -873,8 +873,18 @@ def evaluation(model: str, label: str, ram: float, name: str):
     return Evaluation(name, correct, nll, np.full(len(nll), p["tokens"]), int(ram * GIB), 0.0)
 
 
+def choose_winner(rows: dict, evs: dict) -> tuple[str, list[str]]:
+    """Highest mean accuracy, unless the paired bootstrap cannot tell others apart from it (stats.compare's rule: the
+    top one is better only if the 95% interval of its lead lies above 0.5 points). Among those tied, the lowest KL
+    wins: KL is measured over far more tokens than the benchmarks have questions. Returns (winner, tied names)."""
+    from panther.stats import ACC_MARGIN, compare
+    top = max(rows, key=lambda n: rows[n]["mean_accuracy_pct"])
+    tied = [n for n in rows if n == top or compare(evs[top], evs[n]).acc_ci[0] <= ACC_MARGIN]
+    return min(tied, key=lambda n: rows[n]["kl"]), tied
+
+
 def cmd_pick(budget: int) -> int:
-    """Per model: best mean test-subset accuracy (ties: lower KL). Then winner vs its padded-uniform baseline, the
+    """Per model: choose_winner (best accuracy; bootstrap ties go to the lower KL). Then winner vs its padded-uniform baseline, the
     models' winners against each other, and against the cross-model reference."""
     from panther.stats import compare
     items = load_list(budget)
@@ -895,7 +905,7 @@ def cmd_pick(budget: int) -> int:
     winners = {}
     for model in contests()[budget]["searched"]:
         cands = [n for n in items if items[n]["model"] == model]
-        winners[model] = max(cands, key=lambda n: (round(rows[n]["mean_accuracy_pct"], 2), -rows[n]["kl"]))
+        winners[model] = choose_winner({n: rows[n] for n in cands}, evs)[0]
     pairs = {}
     for model, w in winners.items():
         base = next((n for n in items if items[n]["model"] == model and n.endswith("-padded")), None)
@@ -922,21 +932,22 @@ def cmd_pick(budget: int) -> int:
 
 
 def cmd_pick_model(budget: int, model: str) -> int:
-    """One model's winner as soon as its own tests are done: best mean accuracy (ties: lower KL)."""
+    """One model's winner as soon as its own tests are done (choose_winner)."""
     items = json.loads(list_path(budget, model).read_text())
-    rows = {}
+    rows, evs = {}, {}
     for name, it in items.items():
         label = test_label(budget, name, it["assignment"])
-        ev = evaluation(model, label, it["ram_gib"], name)
+        ev = evs[name] = evaluation(model, label, it["ram_gib"], name)
         k = find(records(model), label, reference="selection")["metrics"]
         rows[name] = {"ram_gib": it["ram_gib"], "kl": k["kl_mean"], "mean_accuracy_pct": 100 * ev.mean_accuracy(),
                       "ppl": ev.perplexity(), "per_task_pct": {t: 100 * float(v.mean()) for t, v in ev.task_correct.items()}}
-    win = max(rows, key=lambda n: (round(rows[n]["mean_accuracy_pct"], 2), -rows[n]["kl"]))
+    win, tied = choose_winner(rows, evs)
     for n, r in sorted(rows.items(), key=lambda kv: -kv[1]["mean_accuracy_pct"]):
         print(f"{budget} GiB {n:28s} RAM {r['ram_gib']:.3f} | KL {r['kl']:.4f} | acc {r['mean_accuracy_pct']:.2f} | "
               f"PPL {r['ppl']:.3f} | " + " ".join(f"{t[:4]} {v:.1f}" for t, v in r["per_task_pct"].items())
-              + ("   <- winner" if n == win else ""), flush=True)
-    out(f"budget-{budget}", f"winner-{model}.json").write_text(json.dumps({"winner": win, "rows": rows}, indent=1))
+              + ("   <- winner" if n == win else "   (tied on accuracy)" if n in tied else ""), flush=True)
+    out(f"budget-{budget}", f"winner-{model}.json").write_text(
+        json.dumps({"winner": win, "tied_on_accuracy": tied, "rows": rows}, indent=1))
     return 0
 
 

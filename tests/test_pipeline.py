@@ -110,3 +110,23 @@ def test_one_genotype_gets_every_test_and_counts_as_done(tmp_path, monkeypatch):
     p.run_all_tests("m", tmp_path / "f.gguf", "rw:b7:x", with_kl=True)
     assert sorted(calls) == sorted(["kl", "mmlu", "hellaswag", "arc_challenge", "winogrande", "ppl"])
     assert p.tests_done("m", "rw:b7:x", with_kl=True)
+
+
+def test_accuracy_tie_goes_to_lower_kl():
+    """A 0.1-point accuracy lead is noise on a few hundred questions: the lower KL wins. A 10-point lead is not."""
+    import numpy as np
+    from panther.stats import Evaluation
+    rng = np.random.default_rng(1)
+    base = rng.random(600) < 0.75
+
+    def ev(name, flips):
+        c = base.copy()
+        c[:flips] = ~c[:flips]
+        return Evaluation(name, {"t": c.astype(np.int8)}, np.ones(4), np.ones(4), 0, 0.0)
+    evs = {"a": ev("a", 0), "b": ev("b", 2), "c": ev("c", 60)}
+    rows = {n: {"mean_accuracy_pct": 100 * e.mean_accuracy(), "kl": kl}
+            for (n, e), kl in zip(evs.items(), [0.14, 0.07, 0.01])}
+    win, tied = p.choose_winner({n: rows[n] for n in "ab"}, evs)
+    assert (win, sorted(tied)) == ("b", ["a", "b"])
+    top = max("ac", key=lambda n: rows[n]["mean_accuracy_pct"])
+    assert p.choose_winner({n: rows[n] for n in "ac"}, evs)[0] == top
