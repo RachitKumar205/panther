@@ -39,11 +39,23 @@ SENS_CHUNKS = 12
 CONCURRENT = 3
 A256 = {"Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "IQ2_XS", "IQ3_XXS", "IQ3_S", "IQ4_XS"}
 
+# Smoke mode (PANTHER_POC_SMOKE=1): the same steps on 1.5B with tiny settings, separate outputs and labels,
+# and selection data in place of the test subset, to catch bugs before the real lanes reach a step.
+SMOKE = os.environ.get("PANTHER_POC_SMOKE") == "1"
+L = "pocsmoke" if SMOKE else "poc"
+POC = DATA / ("poc_smoke" if SMOKE else "poc")
+TOPK = 2 if SMOKE else 5
+MAX_PEN_GENES = 3 if SMOKE else None
+V_SPLIT, V_TEXT = ("selection", "selection") if SMOKE else ("poc_test", "test_web")
+BUNDLE_DIR = DATA / ("pi_bundle_smoke" if SMOKE else "pi_bundle")
+
 MENU = {
     "Qwen2.5-7B-Instruct": {"formats": ["Q8_0", "Q6_K", "Q5_K", "Q4_K", "IQ4_XS", "IQ3_S"], "base": "Q6_K"},
     "Qwen2.5-14B-Instruct": {"formats": ["Q6_K", "Q4_K", "IQ4_XS", "IQ3_S", "IQ3_XXS", "Q2_K", "IQ2_XS"],
                              "base": "IQ3_XXS"},
 }
+if SMOKE:
+    MENU = {"Qwen2.5-1.5B-Instruct": {"formats": ["Q8_0", "Q6_K", "Q4_K"], "base": "Q6_K"}}
 
 
 def setup(model: str):
@@ -55,7 +67,7 @@ def setup(model: str):
 
 
 def out_dir(model: str) -> Path:
-    p = DATA / "poc" / model
+    p = POC / model
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -152,15 +164,15 @@ def cmd_correct(model: str) -> int:
     configs = {"base": base} | {g: {**base, g: "Q6_K"} for g in correction_genes(inv)}
     for name, a in configs.items():
         recs = records(model)
-        todo = [b for b in ("cuda", "cpu") if not find(recs, f"poc:corr:{name}", b, reference="sensitivity")]
+        todo = [b for b in ("cuda", "cpu") if not find(recs, f"{L}:corr:{name}", b, reference="sensitivity")]
         if not todo:
             continue
         path = build_file(inv, store, a, "Q8_0", model)
         for b in todo:
-            kl(model, path, "sensitivity", f"poc:corr:{name}", b)
+            kl(model, path, "sensitivity", f"{L}:corr:{name}", b)
         path.unlink()
     recs = records(model)
-    v = {(n, b): find(recs, f"poc:corr:{n}", b, reference="sensitivity")["metrics"]["kl_mean"]
+    v = {(n, b): find(recs, f"{L}:corr:{n}", b, reference="sensitivity")["metrics"]["kl_mean"]
          for n in configs for b in ("cuda", "cpu")}
     a_g = {g: (v[(g, "cpu")] - v[("base", "cpu")]) - (v[(g, "cuda")] - v[("base", "cuda")])
            for g in correction_genes(inv)}
@@ -176,19 +188,20 @@ def cmd_penalties(model: str) -> int:
     base_fmt = menu["base"]
     base = uniform(inv, base_fmt)
     recs = records(model)
-    if not find(recs, "poc:pen:base", reference="sensitivity"):
+    if not find(recs, f"{L}:pen:base", reference="sensitivity"):
         path = build_file(inv, store, base, base_fmt, model)
-        kl(model, path, "sensitivity", "poc:pen:base")
+        kl(model, path, "sensitivity", f"{L}:pen:base")
         path.unlink()
-    jobs = [(g, f) for g, fs in allowed.items() for f in fs if f != base_fmt
-            and not find(recs, f"poc:pen:{g}:{f}", reference="sensitivity")]
+    measured = list(allowed)[:MAX_PEN_GENES] if MAX_PEN_GENES else list(allowed)
+    jobs = [(g, f) for g in measured for f in allowed[g] if f != base_fmt
+            and not find(recs, f"{L}:pen:{g}:{f}", reference="sensitivity")]
     print(f"{len(jobs)} penalty measurements to run", flush=True)
 
     def one(job):
         g, f = job
         path = build_file(inv, store, {**base, g: f}, base_fmt, model)
         try:
-            kl(model, path, "sensitivity", f"poc:pen:{g}:{f}")
+            kl(model, path, "sensitivity", f"{L}:pen:{g}:{f}")
         finally:
             path.unlink(missing_ok=True)
 
@@ -196,10 +209,14 @@ def cmd_penalties(model: str) -> int:
         list(ex.map(one, jobs))
 
     recs = records(model)
-    base_kl = find(recs, "poc:pen:base", reference="sensitivity")["metrics"]["kl_mean"]
-    pen = {g: {f: (0.0 if f == base_fmt else
-                   find(recs, f"poc:pen:{g}:{f}", reference="sensitivity")["metrics"]["kl_mean"] - base_kl)
-               for f in fs} for g, fs in allowed.items()}
+    base_kl = find(recs, f"{L}:pen:base", reference="sensitivity")["metrics"]["kl_mean"]
+    def value(g: str, f: str) -> float:
+        if f == base_fmt:
+            return 0.0
+        if g not in measured:  # smoke mode only: placeholder for unmeasured genes
+            return 0.001 * (len(menu["formats"]) - menu["formats"].index(f))
+        return find(recs, f"{L}:pen:{g}:{f}", reference="sensitivity")["metrics"]["kl_mean"] - base_kl
+    pen = {g: {f: value(g, f) for f in fs} for g, fs in allowed.items()}
     (out_dir(model) / "penalties.json").write_text(json.dumps({"base": base_fmt, "base_kl": base_kl,
                                                                "penalty": pen}, indent=1))
     print(f"penalty table written: {sum(len(v) for v in pen.values())} entries, base KL {base_kl:.5f}")
@@ -225,7 +242,7 @@ def cmd_shortlist(model: str) -> int:
     base_fmt = menu["base"]
     pen = corrected_penalties(model, base_fmt)
     prob = Problem(inv, allowed, pen, R_MAX, CTX, OVERHEAD)
-    sols = solve_top_k(prob, k=5)
+    sols = solve_top_k(prob, k=TOPK)
     a_g = json.loads((out_dir(model) / "correction.json").read_text())["a_g"]
     cands = {f"top{i + 1}": s.assignment for i, s in enumerate(sols)}
     baseline = uniform(inv, base_fmt)
@@ -234,7 +251,7 @@ def cmd_shortlist(model: str) -> int:
     od = out_dir(model)
     rows = {}
     for name, a in cands.items():
-        label = f"poc:short:{name}:{assignment_digest(a)[:12]}"
+        label = f"{L}:short:{name}:{assignment_digest(a)[:12]}"
         recs = records(model)
         need_kl = not find(recs, label, reference="selection")
         need_tasks = [t for t in TASKS if not find(recs, label, task=t, split="selection")]
@@ -319,7 +336,8 @@ def run_gsm8k(model: str, path: Path, label: str) -> dict:
     rec_path = out_dir(model) / f"gsm8k-{label.replace(':', '_')}.json"
     if rec_path.exists():
         return json.loads(rec_path.read_text())
-    items = jsonl(DATA / "splits/llama_tasks/poc_test/gsm8k.jsonl")
+    items = (jsonl(DATA / "splits/tasks/selection/gsm8k.jsonl")[:20] if SMOKE
+             else jsonl(DATA / "splits/llama_tasks/poc_test/gsm8k.jsonl"))
     fewshot = jsonl(DATA / "splits/tasks/fewshot/gsm8k.jsonl")
     with LlamaServer(LLAMA, path, "cuda", parallel=8, ctx_per_slot=2048, threads=THREADS,
                      log=out_dir(model) / "server.log") as srv:
@@ -335,30 +353,30 @@ def evaluate_config(model: str, name: str, a: dict, store, inv, base_fmt: str):
     import numpy as np
 
     from panther.stats.decision import Evaluation
-    label = f"poc:test:{name}:{assignment_digest(a)[:12]}"
+    label = f"{L}:test:{name}:{assignment_digest(a)[:12]}"
     recs = records(model)
-    todo_tasks = [t for t in SUBSET if not find(recs, label, task=t, split="poc_test")]
-    todo_ppl = not find(recs, label, text="test_web")
+    todo_tasks = [t for t in SUBSET if not find(recs, label, task=t, split=V_SPLIT)]
+    todo_ppl = not find(recs, label, text=V_TEXT)
     gsm_path = out_dir(model) / f"gsm8k-{label.replace(':', '_')}.json"
     path = None
     if todo_tasks or todo_ppl or not gsm_path.exists():
         path = build_file(inv, store, a, base_fmt, model)
         for t in todo_tasks:
             if evaluator.main(["task", "--model", model, "--gguf", str(path), "--build", "cuda", "--task", t,
-                               "--split", "poc_test", "--label", label, "--threads", str(THREADS)]) != 0:
+                               "--split", V_SPLIT, "--label", label, "--threads", str(THREADS)]) != 0:
                 raise SystemExit(f"{label} {t} failed")
         if todo_ppl and evaluator.main(["ppl", "--model", model, "--gguf", str(path), "--build", "cuda",
-                                        "--text", "test_web", "--label", label, "--threads", str(THREADS)]) != 0:
+                                        "--text", V_TEXT, "--label", label, "--threads", str(THREADS)]) != 0:
             raise SystemExit(f"{label} ppl failed")
         g = run_gsm8k(model, path, label)
         path.unlink()
     else:
         g = json.loads(gsm_path.read_text())
     recs = records(model)
-    correct = {t: np.array(find(recs, label, task=t, split="poc_test")["per_item"]["correct"], dtype=np.int8)
+    correct = {t: np.array(find(recs, label, task=t, split=V_SPLIT)["per_item"]["correct"], dtype=np.int8)
                for t in SUBSET}
     correct["gsm8k"] = np.array(g["correct"], dtype=np.int8)
-    p = find(recs, label, text="test_web")["per_chunk"]
+    p = find(recs, label, text=V_TEXT)["per_chunk"]
     nll = np.array(p["mean_nll"]) * p["tokens"]
     toks = np.full(len(nll), p["tokens"])
     ram = int(estimate_ram(inv, a, CTX, OVERHEAD).total)
@@ -367,7 +385,7 @@ def evaluate_config(model: str, name: str, a: dict, store, inv, base_fmt: str):
 
 def cmd_verdict(_: str) -> int:
     from panther.stats.decision import compare
-    if not (DATA / "poc" / "APPROVED_TEST_SUBSET").exists():
+    if not SMOKE and not (DATA / "poc" / "APPROVED_TEST_SUBSET").exists():
         raise SystemExit("P7 uses the test subset and needs the user's explicit approval (D42); "
                          "create $PANTHER_DATA/poc/APPROVED_TEST_SUBSET once approved")
     build_test_subset()
@@ -379,11 +397,13 @@ def cmd_verdict(_: str) -> int:
             if name in sl["rows"]:
                 evs[(model, name)] = evaluate_config(model, name, sl["rows"][name]["assignment"], store, inv,
                                                      menu["base"])
-    m7, m14 = list(MENU)
-    w7 = json.loads((out_dir(m7) / "shortlist.json").read_text())["winner"]
-    w14 = json.loads((out_dir(m14) / "shortlist.json").read_text())["winner"]
-    pairs = {"7B winner vs 14B winner": (evs[(m7, w7)], evs[(m14, w14)])}
-    for m, w in ((m7, w7), (m14, w14)):
+    models = list(MENU)
+    winners = {m: json.loads((out_dir(m) / "shortlist.json").read_text())["winner"] for m in models}
+    pairs = {}
+    if len(models) >= 2:
+        m7, m14 = models[:2]
+        pairs["7B winner vs 14B winner"] = (evs[(m7, winners[m7])], evs[(m14, winners[m14])])
+    for m, w in winners.items():
         if (m, "uniform") in evs:
             pairs[f"{m.split('-')[1]} winner vs uniform"] = (evs[(m, w)], evs[(m, "uniform")])
     out = {"configs": {e.name: {"mean_accuracy_pct": 100 * e.mean_accuracy(), "ppl_test_web": e.perplexity(),
@@ -395,7 +415,7 @@ def cmd_verdict(_: str) -> int:
         out["comparisons"][k] = {"winner": c.winner, "decided_by": c.decided_by, "acc_diff_pts": 100 * c.acc_diff,
                                  "acc_ci_pts": [100 * c.acc_ci[0], 100 * c.acc_ci[1]], "ppl_ratio": c.ppl_ratio,
                                  "ppl_ratio_ci": list(c.ppl_ratio_ci)}
-    (DATA / "poc" / "verdict.json").write_text(json.dumps(out, indent=1))
+    (POC / "verdict.json").write_text(json.dumps(out, indent=1))
     for n, v in out["configs"].items():
         print(f"{n:22s} RAM {v['ram_gib']:.2f} GiB  mean acc {v['mean_accuracy_pct']:.2f}%  PPL {v['ppl_test_web']:.3f}  "
               + " ".join(f"{t[:4]} {x:.1f}" for t, x in v["per_task_pct"].items()))
@@ -432,9 +452,9 @@ def type_counts(inv, a: dict[str, str]) -> dict[str, int]:
 
 def cmd_bundle(_: str) -> int:
     import shutil
-    bundle = DATA / "pi_bundle"
+    bundle = BUNDLE_DIR
     bundle.mkdir(exist_ok=True)
-    verdict = json.loads((DATA / "poc" / "verdict.json").read_text())
+    verdict = json.loads((POC / "verdict.json").read_text())
     make_agreement_text(next(iter(MENU)))
     shutil.copy(DATA / "splits/text/agreement.txt", bundle / "agreement.txt")
     files = {}
@@ -451,7 +471,7 @@ def cmd_bundle(_: str) -> int:
             if not dst.exists():
                 src = build_file(inv, store, a, menu["base"], model)
                 src.rename(dst)
-            label = f"poc:bundle:{dst.stem}"
+            label = f"{L}:bundle:{dst.stem}"
             if not find(records(model), label, build="cpu", text="agreement"):
                 if evaluator.main(["ppl", "--model", model, "--gguf", str(dst), "--build", "cpu", "--text",
                                    "agreement", "--label", label, "--threads", str(THREADS)]) != 0:
@@ -469,10 +489,11 @@ def cmd_bundle(_: str) -> int:
                                "expected_type_counts": type_counts(inv, a), "server_cpu_ppl_agreement": ppl}
             print(f"{dst.name}: {dst.stat().st_size / 2**30:.2f} GiB, predicted RAM {ram.total_gib:.3f} GiB, "
                   f"server CPU PPL {ppl:.4f}", flush=True)
-    m7, m14 = list(MENU)
-    cmp = verdict["comparisons"]["7B winner vs 14B winner"]
+    m7 = list(MENU)[0]
+    cmp = verdict["comparisons"].get("7B winner vs 14B winner", {"winner": None, "decided_by": "n/a"})
+    first = next(iter(files))
     recommended = ("qwen2.5-7b-poc-winner.gguf" if cmp["winner"] and cmp["winner"].startswith("7B")
-                   else "qwen2.5-14b-poc-winner.gguf" if cmp["winner"] else "qwen2.5-7b-poc-winner.gguf")
+                   else "qwen2.5-14b-poc-winner.gguf" if cmp["winner"] else first)
     store_manifest = json.loads((DATA / "store" / m7 / "manifest.json").read_text())
     manifest = {"r_max_gib": R_MAX, "context_tokens": CTX, "overhead_gib_assumed": OVERHEAD,
                 "llama_cpp_commit": store_manifest["llama_cpp_commit"], "files": files,
