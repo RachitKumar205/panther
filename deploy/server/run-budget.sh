@@ -21,7 +21,7 @@ R="/opt/venv/bin/python scripts/server/pipeline.py"
 line="$(grep -E "^  $B: " "$ROOT/configs/search.yaml")" || { echo "budget $B not in configs/search.yaml" >&2; exit 1; }
 list() { echo "$line" | sed -E "s/.*$1: \[([^]]*)\].*/\1/" | tr -d ' ' | tr ',' ' '; }
 short() { echo "$1" | sed -E 's/Qwen2\.5-([0-9.]+B).*/\1/' | tr 'A-Z' 'a-z'; }
-running() { local ps_out; ps_out="$(ps -eo args)"; grep -qE "chain.sh $1 |after-chains.sh .* $1 " <<< "$ps_out"; }
+running() { local ps_out; ps_out="$(ps -eo args)"; grep -qE "chain.sh $1 /|after-chains.sh .* $1 /" <<< "$ps_out"; }  # the lane's own runner only
 start() { running "$2" && { echo "lane $2 already running"; return; }
           PANTHER_CPUS="${PANTHER_CPUS:-16}" setsid nohup "${@:3}" >/dev/null 2>&1 < /dev/null & echo "started $2"; }
 lanes=""
