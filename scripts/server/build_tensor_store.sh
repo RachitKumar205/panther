@@ -34,12 +34,12 @@ EOF
 
 # GPU jobs have no network: the weights must already be fetched (scripts/server/fetch_model.sh, CPU job).
 HF_DIR="$DATA/hf/$MODEL"
-if [ "$(cat "$HF_DIR/.panther-revision" 2>/dev/null)" != "$REPO@$REV" ]; then
+BF16="$OUT/$MODEL-BF16.gguf"
+if [ ! -f "$BF16" ] && [ "$(cat "$HF_DIR/.panther-revision" 2>/dev/null)" != "$REPO@$REV" ]; then  # needed only to convert
   echo "weights for $REPO@$REV not fetched; run scripts/server/fetch_model.sh $MODEL as a CPU job first" >&2
   exit 1
 fi
 
-BF16="$OUT/$MODEL-BF16.gguf"
 if [ ! -f "$BF16" ]; then
   # InternLM's tokenizer needs protobuf 7.36 (its generated code); the image has 4.25. A newer one sits in data/pydeps-convert
   # (uv pip install --target, inside the container), used by the converter only.
