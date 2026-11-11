@@ -301,7 +301,7 @@ class Queue:
         meas = [r for r in runs if not r["warmup"]]
         self.log(f"{step} {name} t={threads} {workload}: decode {mean([r['decode_tps'] for r in meas]):.2f} t/s, "
                  f"prefill {mean([r['prefill_tps'] for r in meas]):.2f} t/s, peak RAM {rec['peak_ram_gib']:.3f} GiB "
-                 f"(predicted {f['predicted_ram_gib']:.3f}), {'valid' if rec['valid'] else 'INVALID: ' + ', '.join(rec['invalid_reasons'])}")
+                 f"(predicted {f['predicted_ram_gib']:.3f}), {'not throttled' if rec['valid'] else 'throttled: ' + ', '.join(rec['invalid_reasons'])}")
 
 def fmt(x: float | None, spec: str) -> str:
     """Format a number for the report; missing or NaN values print as n/a instead of crashing."""
@@ -354,7 +354,7 @@ def cmd_check(a: argparse.Namespace) -> int:
             q.measure("Q", name, 4, W_REF, warmup=1, reps=2)
         except (RuntimeError, TimeoutError, OSError) as e:
             q.log(f"{name}: FAILED ({e}); see results/server-Q-*.log")
-    lines = ["| File | Peak RAM GiB (predicted) | Budget GiB | Decode t/s | Prefill t/s | Overhead GiB | Valid |",
+    lines = ["| File | Peak RAM GiB (predicted) | Budget GiB | Decode t/s | Prefill t/s | Overhead GiB | Throttled |",
              "|---|---|---|---|---|---|---|"]
     for line in q.runs_path.read_text().splitlines():
         r = json.loads(line)
@@ -364,7 +364,7 @@ def cmd_check(a: argparse.Namespace) -> int:
         lines.append(f"| {r['file']} | {fmt(r['peak_ram_gib'], '.3f')} ({fmt(r['predicted_ram_gib'], '.3f')}) | "
                      f"{q.r_max:.3f} | {fmt(mean([x['decode_tps'] for x in meas]), '.2f')} | "
                      f"{fmt(mean([x['prefill_tps'] for x in meas]), '.2f')} | {fmt(r['measured_overhead_gib'], '.3f')} | "
-                     f"{'yes' if r['valid'] else 'no: ' + '; '.join(r['invalid_reasons'])} |")
+                     f"{'no' if r['valid'] else 'yes: ' + '; '.join(r['invalid_reasons'])} |")
     (q.out / "report.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
     return 0
