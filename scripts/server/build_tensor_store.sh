@@ -55,7 +55,7 @@ fi
 # Candidate format -> llama-quantize ftype name. With --pure, the *_S mixes are all one type.
 declare -A FTYPE=(
   [Q2_K]=Q2_K [Q3_K]=Q3_K_S [Q4_K]=Q4_K_S [Q5_K]=Q5_K_S [Q6_K]=Q6_K [Q8_0]=Q8_0 [Q4_0]=Q4_0
-  [IQ1_S]=IQ1_S [IQ1_M]=IQ1_M [IQ2_XXS]=IQ2_XXS [IQ2_S]=IQ2_S
+  [IQ1_S]=IQ1_S [IQ1_M]=IQ1_M [IQ2_XXS]=IQ2_XXS [IQ2_S]=IQ2_M  # the IQ2_S ftype's base type is IQ2_XS; IQ2_M's is IQ2_S
   [IQ2_XS]=IQ2_XS [IQ3_XXS]=IQ3_XXS [IQ3_S]=IQ3_S [IQ4_XS]=IQ4_XS [IQ4_NL]=IQ4_NL
 )
 # One line per format: "<format> <token-embedding format> <output-head format>". The embedding has no imatrix data, so
