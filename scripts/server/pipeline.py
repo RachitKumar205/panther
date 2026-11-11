@@ -67,11 +67,16 @@ class gpu_booking:
         self.ledger.parent.mkdir(parents=True, exist_ok=True)
         with open(self.ledger.with_suffix(".lock"), "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
-            book = json.loads(self.ledger.read_text()) if self.ledger.exists() else {}
+            try:  # a job killed mid-write once left this empty, and every run after it failed; never again
+                book = json.loads(self.ledger.read_text())
+            except (OSError, ValueError):
+                book = {}
             now = time.time()
             book = {k: v for k, v in book.items() if v["until"] > now}
             ok = fn(book, now)
-            self.ledger.write_text(json.dumps(book))
+            tmp = self.ledger.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(book))
+            os.replace(tmp, self.ledger)  # atomic: a reader sees the old file or the new one, never half of one
             return ok
 
     def __enter__(self) -> "gpu_booking":
