@@ -523,6 +523,34 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 
 ---
 
+### D45. The rewrite runs the search.yaml table with a minimal number of KL runs (~390) — decided by user 2026-11-11
+- **Why:** the rewrite plan (TODO.md, by icingtea) as written needs 1,800–7,000 KL runs (1–2 per matrix, a
+  separate base per model × budget, up to 3 re-measure rounds). The user: keep KL runs to a minimum and stick to
+  the table; GPU hours themselves are not a constraint.
+- **Contests (unchanged, `configs/search.yaml`):** searched 1.5B@1, 7B@3, 7B@5, 14B@5, 14B@7, 32B@7 GiB;
+  references 3B@3 and 7B@7 (uniform, no search). 32B stays in (user).
+- **What changes against the plan:**
+  1. **Sensitivity per block, allocation per matrix.** One KL run per block (attention and MLP of each layer, plus
+     embedding/head): move that block from the base to a probe format, measure the KL increase ΔKL_b. Each
+     matrix m in block b then gets `penalty(m, f) = s_b × (e(m, f) − e(m, base))` with
+     `s_b = ΔKL_b / Σ_{m∈b} (e(m, probe) − e(m, base))`, where e is the importance-weighted dequantization error
+     computed offline from the weights. The solver still picks one format per matrix. This is the form Phase 0.3
+     can check against the PoC's measured 14B table (which is per block).
+  2. **One sensitivity sweep per model,** shared by its budgets (7B and 14B appear twice).
+  3. **No re-measure loop by default.** The top 3 per contest are measured; only if their measured KL is far from
+     the prediction are blocks re-measured.
+  4. **Scoring per contest:** top 3 + at most 3 same-model references (largest uniform that fits, best stock
+     llama.cpp preset that fits, uniform with head and V raised, padded to the budget).
+  5. **Cross-model references are compared on accuracy only** (KL against different originals is not comparable).
+- **Count:** Phase 0 ~7, sensitivity 343 (1.5B 57, 7B 58, 14B 98, 32B 130), scoring 36: **~390 KL runs, ~1.5 h**.
+- **Kept, against the plan's Phase 1 (user):** `deploy/server/` (anton's rules require containers, the ledger and
+  the guard); `docs/DECISIONS.md` and `docs/PIPELINE.md` (document before doing). Stale markdown is deleted as
+  the rewrite replaces it.
+- **Gate:** Phase 0.1 (beat stock presets at the same RAM) and 0.3 (the penalty model predicts the measured table)
+  run first; if either fails, stop and report before building the rest.
+
+---
+
 ## Open
 
 - Team value for R_max (`configs/budgets.yaml`), required before Phase C.

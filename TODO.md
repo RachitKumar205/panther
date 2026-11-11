@@ -25,19 +25,23 @@ file is the plan for rewriting it by hand: smaller, per-matrix, and across sever
    group when tied).
 4. **Output is a standard GGUF** (per-tensor types, loads in stock llama.cpp), shipped with its recipe: the
    `llama-quantize --tensor-type` overrides and the importance matrix, so stock tools rebuild the same file.
-5. **Penalty model:** `penalty(group, format) ≈ sensitivity[group] × error(group, format)`. The error is computed
-   offline from the weights; only the sensitivity needs model runs (1–2 per group).
+5. **Penalty model:** `penalty(matrix, format) ≈ sensitivity[block] × error(matrix, format)`. The error is computed
+   offline from the weights; the sensitivity is measured **per block** (attention / MLP per layer, embedding,
+   head), one KL run each, one sweep per model shared by its budgets (D45). The solver still chooses per matrix.
 6. **Format menu:** IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, Q4_K, Q5_K, Q6_K, Q8_0.
    Q3_K, Q4_0 and IQ4_NL are dropped (beaten on both size and quality in the PoC).
 7. **Never measure an option that can't fit:** a (group, format) option is dropped if, even with every other
    group at its smallest format, it exceeds the budget. A model is dropped if all-smallest doesn't fit.
 8. **8-bit KV cache** by default, later a choice inside the search. **Real overhead measured on the Pi.**
-9. **Re-measure around the solution** and solve again, 2–3 rounds.
+9. **No re-measure loop by default** (D45): measure the top 3; re-measure blocks only if the measured KL is far
+   from the prediction.
 10. **Decode speed per format** measured on the Pi becomes a constraint.
 11. **Every result is compared at the same RAM** against llama.cpp's stock presets (same importance matrix) and
     against "uniform with head and V raised", padded to the budget.
 
 Settings live in `configs/search.yaml`; `scripts/budget_table.py` prints the table below from them.
+
+**KL budget (D45):** ~390 runs in total (Phase 0 ~7, sensitivity 343, scoring 36), about 1.5 h on the GPU.
 
 ## Budgets and contests
 
@@ -94,10 +98,10 @@ llama.cpp run output checked (it exits 0 on failure); benchmark item count check
       sensitivity, one held out for final scoring (plus benchmark test sets).
 - [ ] Replace per-file SHA-256 manifests and append-only JSON records with one results CSV per model.
 - [ ] Replace `pi/panther_pi.py` and `pi/fetch_bundle.sh` with the job queue in Phase 6.
-- [ ] Server-only infrastructure (`deploy/server/`: container, SELinux, host ledger, guard, `wait-job.sh`):
-      keep only if we stay on that shared server; otherwise run llama.cpp directly.
+- [x] ~~Server-only infrastructure~~: **kept** (D45): we stay on anton, whose rules require it.
 - [ ] Drop unused dependencies: `pydantic` (never imported); `lm-eval`, `torch` (only the deleted checks).
-- [ ] Replace `PLAN.md`, `docs/PIPELINE.md`, `docs/DECISIONS.md` with a short README of what we chose and why.
+- [ ] `docs/DECISIONS.md` and `docs/PIPELINE.md` are **kept** (D45, document before doing); delete stale
+      markdown (e.g. `PLAN.md`) as the rewrite replaces it.
 
 ## Phase 2: core (target about 1,000 lines in total, Pi queue included)
 
@@ -134,15 +138,15 @@ pi/job.py, pi/sync.sh, pi/pi_worker.py, pi_submit.py, pi_collect.py   (Phase 6) 
 
 ## Phase 3: sensitivity
 
-- [ ] **3.1** Per group, raise only that group from a near-budget base and measure the KL increase (1–2 runs per
-      group: 197–450 runs per model; roughly 1 h for 14B at the PoC's rate, 2–3 h for 32B). Fit
-      `sensitivity[group]` against the offline error.
-- [ ] **3.2** Use one base per (model, budget): the uniform format closest to the budget's average bits per weight.
+- [ ] **3.1** Per block, move only that block from the base to a probe format and measure the KL increase (one
+      run per block: 1.5B 57, 7B 58, 14B 98, 32B 130). `s_b = ΔKL_b / Σ_{m∈b}(e(m, probe) − e(m, base))` (D45).
+- [ ] **3.2** One base per model (shared by its budgets): the uniform format closest to the lower budget's
+      average bits per weight.
 
 ## Phase 4: search per contest
 
-- [ ] For each budget in `configs/search.yaml` and each searched model: solve, take the top 5, score them on the
-      CPU build, keep the best.
+- [ ] For each budget in `configs/search.yaml` and each searched model: solve, take the top 3, score them on the
+      CPU build, keep the best (D45).
 - [ ] Score the references: largest uniform format that fits, llama.cpp presets that fit (same importance
       matrix), and "uniform with head and V raised" padded to the budget.
 

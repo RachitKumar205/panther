@@ -22,6 +22,14 @@ contests:
   5: {searched: [Qwen2.5-14B-Instruct, Qwen2.5-7B-Instruct], reference: []}       # 14B ~2.4; 7B ~5.1
   7: {searched: [Qwen2.5-14B-Instruct, Qwen2.5-32B-Instruct], reference: [Qwen2.5-7B-Instruct]}  # 14B ~3.6; 32B ~1.6; 7B ~7.3 (uniform Q6_K)
 
+# --- KL budget (D45) ----------------------------------------------------------------------------------
+sensitivity_granularity: block   # one KL run per block (attn / mlp per layer, embd, head); allocation per matrix
+sensitivity_runs_per_block: 1
+sensitivity_shared_across_budgets: true
+top_k: 3
+remeasure_rounds: 0              # only if measured KL of the top 3 is far from the prediction
+cross_model_references: accuracy_only
+
 # --- Groups ------------------------------------------------------------------------------------------
 # One format per matrix: q, k, v, o, gate, up, down per layer, plus embedding and output head
 # (one combined group for tied models).
