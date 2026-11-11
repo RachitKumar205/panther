@@ -41,7 +41,7 @@ CTX = CFG["context_tokens"]
 OVERHEAD = CFG["overhead_gib"]
 KV_BPE = {"Q8_0": 34 / 32, "F16": 2.0}[CFG["kv_cache_type"]]
 MENU_ALL = CFG["formats"]
-CONCURRENT = int(os.environ.get("PANTHER_KL_CONCURRENT", "6"))
+CONCURRENT = int(os.environ.get("PANTHER_KL_CONCURRENT", "10"))  # D48
 GPU_HEADROOM_MIB = 4096  # per KL run on top of the file size: compute buffers and logits
 
 
@@ -95,7 +95,8 @@ def avg_bpw(model: str, budget: float) -> float:
 
 
 def searched_budgets(model: str) -> list[int]:
-    return sorted(b for b, c in contests().items() if model in c["searched"])
+    active = set(CFG.get("active_budgets", contests()))  # D48: only active budgets are searched for now
+    return sorted(b for b, c in contests().items() if model in c["searched"] and b in active)
 
 
 @lru_cache(maxsize=None)
@@ -166,7 +167,8 @@ def blocks(model: str) -> dict[str, list[str]]:
 def cmd_plan() -> int:
     for b, c in contests().items():
         print(f"{b} GiB: searched {c['searched']}, reference {c['reference']}")
-    models = sorted({m for c in contests().values() for m in c["searched"]}, key=lambda m: inv_of(m).geometry.hidden)
+    models = sorted({m for c in contests().values() for m in c["searched"] if searched_budgets(m)},
+                    key=lambda m: inv_of(m).geometry.hidden)
     for m in models:
         print(f"{m}: budgets {searched_budgets(m)} avg bpw {[round(avg_bpw(m, b), 2) for b in searched_budgets(m)]}"
               f" | menu {menu(m)} | base {base_format(m)} -> probe {probe_format(m)} | blocks {len(blocks(m))}"
@@ -564,7 +566,9 @@ def cmd_eval(budget: int) -> int:
     for model in c["searched"]:
         res = json.loads(out(f"budget-{budget}", model, "contest.json").read_text())
         short = model.split("-")[1]
-        for name in [res["winner"]] + [n for n in res["rows"] if not n.startswith("top")]:
+        refs = [n for n in res["rows"] if not n.startswith("top")]
+        best_ref = min(refs, key=lambda n: res["rows"][n]["kl"]) if refs else None  # D48: one reference
+        for name in [res["winner"]] + ([best_ref] if best_ref else []):
             row = res["rows"][name]
             if name == "preset":
                 pp = Path(res["preset"]["path"])

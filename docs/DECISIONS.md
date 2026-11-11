@@ -599,6 +599,19 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 
 ---
 
+### D48. Fast path: 7 GiB first, one re-measure round, more parallel KL runs — decided by user 2026-11-11
+- **Why:** results were too slow; the user asked to narrow the work and parallelise. Format files (CPU-only
+  quantization) were the bottleneck while the GPU sat mostly idle.
+- **What:** `active_budgets: [7, 1]` in `configs/search.yaml`: only these budgets are searched now (7 GiB is the Pi's
+  real budget; 1 GiB because 1.5B is ready and gives an early end-to-end result). 3 and 5 GiB, and 7B's search,
+  wait. Menus and sensitivity bases follow the active budgets (14B: base IQ3_S, probe Q5_K; needs only IQ2_S
+  and Q5_K added). One re-measure round instead of three (14B offline test: within ~2.5% of the fully measured
+  optimum after 2 rounds). Up to 10 KL runs at once (GPU memory check still applies). 32B references are made
+  right after its BF16 file, before its formats, while the GPU is free. Evaluation per budget: each model's
+  winner, its best same-model reference by selection KL, and the cross-model reference.
+
+---
+
 ## Open
 
 - Team value for R_max (`configs/budgets.yaml`), required before Phase C.
