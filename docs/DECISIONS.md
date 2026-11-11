@@ -461,6 +461,30 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   extraction regexes, exact-match normalisation) is copied from the pinned lm-eval 0.4.13 `gsm8k.yaml` and
   run against `llama-server` over localhost, on our split's items and fixed exemplars.
 - **Primary metric:** strict-match (`#### N`), fixed before any run; flexible-extract reported alongside.
+
+### D42. Proof of concept first: 7B vs 14B at R_max = 7.0 GiB, two independent lanes — decided by user 2026-11-11
+- **Why:** a first end-to-end answer in hours instead of days. At 7.0 GiB, 1.5B and 3B fit unquantized, so
+  the real contest is 7B (≈ 7.2 bits per weight available) against 14B (≈ 3.4).
+- **Budget:** R_max = 7.0 GiB at 4,096 context, 0.40 GiB overhead (`configs/budgets.yaml`); an assumption until
+  the Pi measures its real headroom (7.45 GiB physical, minus the OS).
+- **Two lanes run independently on the server,** each a chain of jobs that starts the next step itself; 7B gets
+  more CPU and memory and is not blocked by 14B. The two meet only for the final comparison.
+- **Shortcuts (all labelled PoC; none of its numbers are final):**
+
+  | Item | Full plan | PoC |
+  |---|---|---|
+  | Formats | 12 | 7B: Q8_0, Q6_K, Q5_K, Q4_K, IQ4_XS, IQ3_S · 14B: Q6_K, Q4_K, IQ4_XS, IQ3_S, IQ3_XXS, Q2_K, IQ2_XS |
+  | Sensitivity text | 48 chunks | 12 chunks |
+  | CPU correction (D37) | sampled genes | 7B: output head and last MLP only; 14B: none needed (every format in its menu rounds activations the same way, so the correction never changes a choice) |
+  | Shortlist | top 20, CPU build | top 5, CUDA + correction, on selection data |
+  | Final scoring | full test split | fixed test subset; **runs only after the user's explicit OK** (test data, D34) |
+  | Pi | 10-hour queue | none; RAM predicted exactly |
+
+- **Penalty base:** the menu format closest to the budget everywhere (7B uniform Q6_K, 14B uniform IQ3_XXS);
+  each gene in each other format is one KL measurement on CUDA.
+- **Expected precision:** configurations within a few percent of the full pipeline's on KL; the 7B-vs-14B
+  verdict is reliable only if they differ by about 2 benchmark points or more, otherwise "too close to call".
+
 ---
 
 ## Open

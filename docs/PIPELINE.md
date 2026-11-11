@@ -591,3 +591,18 @@ pre-registered decision rule (`panther.stats.decision.compare`, paired bootstrap
 **Pass (the Phase A gate's second half):** every metric is present for both configurations; the decision
 rule runs and returns a winner with its deciding criterion; a results manifest lists every record used.
 
+---
+
+## Proof of concept: 7B vs 14B at 7.0 GiB 🟡 started 2026-11-11 (D42)
+
+| # | Stage | 7B lane | 14B lane |
+|---|---|---|---|
+| P1 | Download (CPU job, network) | ~10 min | ~20 min |
+| P2 | Tensor store for the model's formats (GPU job) | ~30 min | ~1.5 h |
+| P3 | BF16 references: sensitivity (12 chunks), selection | ~10 min | ~20 min |
+| P4 | CPU correction (head, last MLP) | ~15 min | not needed |
+| P5 | Penalty table, 12 chunks, 3 KL runs at a time | ~1 h | ~4 h |
+| P6 | Solver at 7.0 GiB, top 5 + uniform baseline scored on selection | ~30 min | ~1 h |
+| P7 | Verdict on a fixed test subset, decision rule (after the user's OK) | ~30 min | ~1 h |
+
+7B result ≈ 2.5–3 h after start; 14B ≈ 7–8 h.

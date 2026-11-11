@@ -1,6 +1,6 @@
 # Budgets (PLAN.md §11). Must be committed before Phase C (sensitivity + solver).
 # Memory in GiB. R_max is evaluated at `context_tokens`.
-r_max_gib: null          # team value: fill in before Phase C
+r_max_gib: 7.0           # user, 2026-11-11 (D42); assumption until the Pi measures its real headroom
 s_min_tokens_per_s: null # optional decode-speed floor; null = off
 context_tokens: 4096
 kv_cache_type: f16
