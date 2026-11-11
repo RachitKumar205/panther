@@ -19,7 +19,7 @@ import os
 import re
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from panther.costs.formats import gene_formats
@@ -36,7 +36,7 @@ LLAMA = Path(os.environ.get("PANTHER_LLAMA", "/opt/llama.cpp"))
 THREADS = int(os.environ.get("PANTHER_THREADS", "16"))
 R_MAX, CTX, OVERHEAD = 7.0, 4096, 0.40
 SENS_CHUNKS = 12
-CONCURRENT = 3
+CONCURRENT = 6  # separate processes: assembly is Python-bound, so threads only used ~2 cores
 A256 = {"Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "IQ2_XS", "IQ3_XXS", "IQ3_S", "IQ4_XS"}
 
 # Smoke mode (PANTHER_POC_SMOKE=1): the same steps on 1.5B with tiny settings, separate outputs and labels,
@@ -183,6 +183,18 @@ def cmd_correct(model: str) -> int:
 
 # --- P5 penalty table --------------------------------------------------------------------------------------
 
+def _penalty_one(job: tuple[str, str, str]) -> None:
+    """One penalty measurement, in its own process: base config with gene g in format f."""
+    model, g, f = job
+    inv, menu, store, _ = setup(model)
+    base_fmt = menu["base"]
+    path = build_file(inv, store, {**uniform(inv, base_fmt), g: f}, base_fmt, model)
+    try:
+        kl(model, path, "sensitivity", f"{L}:pen:{g}:{f}")
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def cmd_penalties(model: str) -> int:
     inv, menu, store, allowed = setup(model)
     base_fmt = menu["base"]
@@ -196,17 +208,9 @@ def cmd_penalties(model: str) -> int:
     jobs = [(g, f) for g in measured for f in allowed[g] if f != base_fmt
             and not find(recs, f"{L}:pen:{g}:{f}", reference="sensitivity")]
     print(f"{len(jobs)} penalty measurements to run", flush=True)
-
-    def one(job):
-        g, f = job
-        path = build_file(inv, store, {**base, g: f}, base_fmt, model)
-        try:
-            kl(model, path, "sensitivity", f"{L}:pen:{g}:{f}")
-        finally:
-            path.unlink(missing_ok=True)
-
-    with ThreadPoolExecutor(CONCURRENT) as ex:
-        list(ex.map(one, jobs))
+    with ProcessPoolExecutor(CONCURRENT) as ex:
+        for _ in ex.map(_penalty_one, [(model, g, f) for g, f in jobs]):
+            pass
 
     recs = records(model)
     base_kl = find(recs, f"{L}:pen:base", reference="sensitivity")["metrics"]["kl_mean"]
