@@ -490,10 +490,15 @@ def cmd_bundle(_: str) -> int:
             print(f"{dst.name}: {dst.stat().st_size / 2**30:.2f} GiB, predicted RAM {ram.total_gib:.3f} GiB, "
                   f"server CPU PPL {ppl:.4f}", flush=True)
     m7 = list(MENU)[0]
+    # Recommendation follows the pre-registered decision rule: first 7B winner vs 14B winner (the smaller
+    # model if indistinguishable), then that model's winner vs its uniform baseline.
     cmp = verdict["comparisons"].get("7B winner vs 14B winner", {"winner": None, "decided_by": "n/a"})
-    first = next(iter(files))
-    recommended = ("qwen2.5-7b-poc-winner.gguf" if cmp["winner"] and cmp["winner"].startswith("7B")
-                   else "qwen2.5-14b-poc-winner.gguf" if cmp["winner"] else first)
+    size = (cmp["winner"].split(":")[0] if cmp["winner"] else list(MENU)[0].split("-")[1]).lower()
+    within = verdict["comparisons"].get(f"{size.upper()} winner vs uniform", {})
+    role = "uniform" if (within.get("winner") or "").endswith(":uniform") else "winner"
+    recommended = f"qwen2.5-{size}-poc-{role}.gguf"
+    if recommended not in files:
+        recommended = f"qwen2.5-{size}-poc-winner.gguf"
     store_manifest = json.loads((DATA / "store" / m7 / "manifest.json").read_text())
     manifest = {"r_max_gib": R_MAX, "context_tokens": CTX, "overhead_gib_assumed": OVERHEAD,
                 "llama_cpp_commit": store_manifest["llama_cpp_commit"], "files": files,
