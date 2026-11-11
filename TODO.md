@@ -93,13 +93,13 @@ llama.cpp run output checked (it exits 0 on failure); benchmark item count check
 - [ ] Data: two texts instead of four splits plus selection questions: one for importance matrix and
       sensitivity, one held out for final scoring (plus benchmark test sets).
 - [ ] Replace per-file SHA-256 manifests and append-only JSON records with one results CSV per model.
-- [ ] Replace `pi/panther_pi.py` with a short script around `llama-bench` and `/usr/bin/time -v`.
+- [ ] Replace `pi/panther_pi.py` and `pi/fetch_bundle.sh` with the job queue in Phase 6.
 - [ ] Server-only infrastructure (`deploy/server/`: container, SELinux, host ledger, guard, `wait-job.sh`):
       keep only if we stay on that shared server; otherwise run llama.cpp directly.
 - [ ] Drop unused dependencies: `pydantic` (never imported); `lm-eval`, `torch` (only the deleted checks).
 - [ ] Replace `PLAN.md`, `docs/PIPELINE.md`, `docs/DECISIONS.md` with a short README of what we chose and why.
 
-## Phase 2: core (target about 800 lines in total)
+## Phase 2: core (target about 1,000 lines in total, Pi queue included)
 
 ```
 src/panther/
@@ -110,7 +110,7 @@ src/panther/
   search.py      penalty model, pruning, CP-SAT with RAM (+ speed), top-k, re-solve  ~150
   run.py         one budget × model, end to end; results CSV                         ~150
 scripts/budget_table.py                                                              (done)
-pi/bench.sh      llama-bench per file/format + peak RAM                              ~50
+pi/job.py, pi/sync.sh, pi/pi_worker.py, pi_submit.py, pi_collect.py   (Phase 6)  ~300
 ```
 
 - [ ] **2.1 inventory.py:** per-matrix groups from `config.json`; allowed formats per group (no
@@ -158,13 +158,48 @@ pi/bench.sh      llama-bench per file/format + peak RAM                         
       format for 7B) → seconds per byte per format → optional minimum-speed constraint in the solver
       (`Problem.s_min` already sketches this).
 
-## Phase 6: Pi
+## Phase 6: Pi (job queue, relayed by the Mac)
 
-- [ ] **6.1** Setup: headless (7 GiB leaves about 0.45 GiB for the OS), swap and zram off, llama.cpp built at the
-      pinned commit.
-- [ ] **6.2** Per budget, the winner and the best reference: peak RAM ≤ budget (`/usr/bin/time -v`), decode and
-      prefill tokens/s (`llama-bench`), no throttling.
-- [ ] **6.3** Perplexity on a short text matches the server's CPU build within 0.5% for one file per model.
+Neither machine can reach the other, so the Mac relays. The server drops self-contained jobs into an outbox, the
+Mac copies them to the Pi and the results back, and a worker on the Pi runs them one at a time. Neither side
+ever runs commands on the other; only folders are copied.
+
+```
+server                     Mac                          Pi (user "bench", no sudo)
+outbox/files/<sha>.gguf ─► pi/sync.sh ─► inbox/files/<sha>.gguf
+outbox/jobs/<id>.json   ─►            ─► inbox/jobs/<id>.json ──► pi_worker.py (one job at a time)
+inbox-results/<id>.json ◄─            ◄─ results/<id>.json    ◄──┘
+```
+
+- [ ] **6.1 Job format** (`pi/job.py`, shared by both sides): JSON with id, GGUF sha256 and size, budget,
+      context, KV type, predicted RAM and tensor-type counts, test names (`ram`, `speed`, `agreement`), thread
+      counts. **Data only: no command strings.** The worker builds every llama.cpp command itself from a fixed
+      list of tests, so writing to the queue never means running arbitrary code on the Pi. GGUFs are stored by
+      sha256, so a file used by several jobs is copied once.
+- [ ] **6.2 Server: `pi_submit.py --budget B --model M`.** Takes the winners and references for that budget from
+      the results CSV, copies each new GGUF into `outbox/files/`, writes `jobs/<id>.json.part` then renames it
+      (a half-written job is never visible). Called by `run.py` at the end of each budget.
+- [ ] **6.3 Mac: `pi/sync.sh SERVER PI`** (replaces `pi/fetch_bundle.sh`). Server outbox → Mac cache → Pi inbox,
+      then Pi results → Mac → server `inbox-results/`. rsync with `--partial` and checksums; files already on
+      the Pi are skipped. Copies jobs only after their GGUFs have arrived. One SSH connection per host per sync,
+      no retry loops (the server bans addresses after repeated failed logins, D30).
+- [ ] **6.4 Pi: `pi_worker.py`** (standard library only, ~150 lines; replaces `pi/panther_pi.py`):
+      - claim the oldest job by moving it to `running/` (survives a crash or reboot), check the GGUF's sha256;
+      - wait until the CPU is below 70 °C and the system is idle;
+      - `ram`: load with `-c 4096` and the job's KV type, short prompt, record peak RSS (`VmHWM`) and minimum
+        `MemAvailable`, compare tensor-type counts from the loader log with the prediction;
+      - `speed`: `llama-bench -p 256 -n 64 -r 3` at each thread count;
+      - `agreement`: perplexity on the shared 4k-token text;
+      - invalid if throttled, out of memory, or over budget; write `results/<id>.json` (`.part` then rename),
+        move the job to `done/`, delete GGUFs no queued job needs.
+      Runs as a user-level systemd service (`systemctl --user`, linger on) so it restarts after a reboot.
+      **Never two jobs at once**: they would spoil each other's RAM and speed numbers.
+- [ ] **6.5 Server: `pi_collect.py`.** Reads `inbox-results/*.json` into the results CSV; flags any run whose
+      peak RAM is more than 2% off the prediction (then re-measure the overhead, step 0.2).
+- [ ] **6.6 Pi setup, once:** headless (7 GiB leaves about 0.45 GiB for the OS), swap and zram off, `bench` user,
+      llama.cpp built natively at the pinned commit, the worker service enabled.
+- [ ] **6.7 What gets submitted per budget:** the winner and the best same-RAM reference for every searched model;
+      for one file per model, perplexity must match the server's CPU build within 0.5%.
 
 ## Phase 7: results
 
