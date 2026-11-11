@@ -80,6 +80,7 @@ EOF
 while read -r F E H; do
   DST="$OUT/$MODEL-$F.gguf"
   [ -f "$DST" ] && continue
+  while [ "$(df --output=avail -B1G "$OUT" | tail -1)" -lt 30 ]; do echo "waiting for 30 GB free disk"; sleep 300; done
   T="$(echo "$F" | tr 'A-Z' 'a-z')"
   TE="$(echo "$E" | tr 'A-Z' 'a-z')"
   TH="$(echo "$H" | tr 'A-Z' 'a-z')"

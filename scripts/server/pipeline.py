@@ -1063,6 +1063,8 @@ def cmd_preset(budget: int, model: str) -> int:
         note(f"{model.split('-')[1]} preset {ftype}: {ram:.3f} GiB ({'fits' if ram <= top else 'too big'})")
         if ram <= top:
             fitting.append((ftype, path, ram))
+        else:
+            path.unlink()  # a preset that doesn't fit is never used; it only takes disk
     if not fitting:
         note(f"{model.split('-')[1]} preset: none of llama.cpp's presets fits {budget} GiB")
         return 0
