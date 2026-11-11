@@ -154,6 +154,10 @@ history).
 - **Why:** keeps IQ2_XS for every other gene. In the IQ2_XS source file the embedding holds a Q2_K
   placeholder that the search never copies; verification accounts for it.
 - **Outcome (1.5B):** all 12 source files verified, every searchable tensor in its intended format.
+- **Extended (2026-11-11, found on 14B):** `llama-imatrix` at the pinned commit does not collect data for the
+  untied output tensor by default either, so the 14B IQ2_XS source aborted the same way. IQ2_XS is now
+  excluded from the `head` gene as well (a placeholder Q2_K head in that source file). The head is the most
+  sensitive gene, so the solver would not choose 2.3 bits for it anyway.
 
 ### D22. Every tensor store gets a manifest — decided
 - `store/<model>/manifest.json` (written by `scripts/server/store_manifest.py` at the end of every build):

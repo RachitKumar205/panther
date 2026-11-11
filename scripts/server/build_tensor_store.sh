@@ -56,7 +56,7 @@ declare -A FTYPE=(
   [Q2_K]=Q2_K [Q3_K]=Q3_K_S [Q4_K]=Q4_K_S [Q5_K]=Q5_K_S [Q6_K]=Q6_K [Q8_0]=Q8_0 [Q4_0]=Q4_0
   [IQ2_XS]=IQ2_XS [IQ3_XXS]=IQ3_XXS [IQ3_S]=IQ3_S [IQ4_XS]=IQ4_XS [IQ4_NL]=IQ4_NL
 )
-# One line per format: "<format> <token-embedding format>". The embedding has no imatrix data, so
+# One line per format: "<format> <token-embedding format> <output-head format>". The embedding has no imatrix data, so
 # formats that require it (configs/formats.yaml) put a placeholder there; the search never uses it.
 PLAN=$("$PY" - "$MODEL" <<'EOF'
 import sys
@@ -64,20 +64,23 @@ from panther.costs.formats import candidate_formats, source_assignment
 from panther.models.inventory import build_inventory, load_geometry
 inv = build_inventory(load_geometry(sys.argv[1]))
 embd = next(g.gene_id for g in inv.genes if g.kind in ("embd", "embd_head"))
+head = next((g.gene_id for g in inv.genes if g.kind == "head"), embd)  # tied models: the same gene
 import os
 wanted = os.environ.get("PANTHER_FORMATS", "").split() or candidate_formats()  # PoC: per-model menus (D42)
 for f in wanted:
-    print(f, source_assignment(inv, f)[embd])
+    sa = source_assignment(inv, f)
+    print(f, sa[embd], sa[head])
 EOF
 )
 
-while read -r F E; do
+while read -r F E H; do
   DST="$OUT/$MODEL-$F.gguf"
   [ -f "$DST" ] && continue
   T="$(echo "$F" | tr 'A-Z' 'a-z')"
   TE="$(echo "$E" | tr 'A-Z' 'a-z')"
+  TH="$(echo "$H" | tr 'A-Z' 'a-z')"
   timed "quantize_$F" "$BIN/llama-quantize" --pure --imatrix "$IMAT" \
-    --token-embedding-type "$TE" --output-tensor-type "$T" \
+    --token-embedding-type "$TE" --output-tensor-type "$TH" \
     "$BF16" "$DST.part" "${FTYPE[$F]}" "$THREADS"
   mv "$DST.part" "$DST"
 done <<< "$PLAN"

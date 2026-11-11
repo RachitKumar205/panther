@@ -38,8 +38,9 @@ def candidate_formats() -> list[str]:
     return list(load_format_config()["formats"])
 
 
-# Genes holding the token embedding, which has no importance-matrix data.
-NO_IMATRIX_GENE_KINDS = frozenset({"embd", "embd_head"})
+# Genes without importance-matrix data: the token embedding (a lookup) and the untied output head
+# (llama-imatrix skips the output tensor by default at the pinned commit). D21.
+NO_IMATRIX_GENE_KINDS = frozenset({"embd", "embd_head", "head"})
 
 
 def gene_formats(inv: Inventory) -> dict[str, list[str]]:
