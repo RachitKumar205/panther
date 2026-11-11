@@ -3,6 +3,8 @@
 #
 #   deploy/server/panther.sh gpujob store-1.5b scripts/server/build_tensor_store.sh Qwen2.5-1.5B-Instruct <calibration.txt>
 #
+# PANTHER_FORMATS="Q8_0 Q6_K ..." limits the formats built (proof of concept, D42); default: all candidates.
+#
 # Steps (weights fetched beforehand by fetch_model.sh): convert to BF16 GGUF -> importance matrix on the
 # calibration split -> one uniform GGUF per candidate format, with --pure and explicit embedding and
 # output types so every searched tensor holds exactly that format. Mixed files are then assembled with
@@ -62,7 +64,9 @@ from panther.costs.formats import candidate_formats, source_assignment
 from panther.models.inventory import build_inventory, load_geometry
 inv = build_inventory(load_geometry(sys.argv[1]))
 embd = next(g.gene_id for g in inv.genes if g.kind in ("embd", "embd_head"))
-for f in candidate_formats():
+import os
+wanted = os.environ.get("PANTHER_FORMATS", "").split() or candidate_formats()  # PoC: per-model menus (D42)
+for f in wanted:
     print(f, source_assignment(inv, f)[embd])
 EOF
 )
@@ -80,4 +84,4 @@ done <<< "$PLAN"
 
 # Verify every source (every searched tensor holds exactly its format, no silent fallback) and write
 # store/<model>/manifest.json with inputs, hashes, verification and timings. Fails on any mismatch.
-"$PY" "$ROOT/scripts/server/store_manifest.py" "$MODEL" "$CALIB" --timings "$TIMINGS"
+"$PY" "$ROOT/scripts/server/store_manifest.py" "$MODEL" "$CALIB" --timings "$TIMINGS" ${PANTHER_FORMATS:+--formats $PANTHER_FORMATS}

@@ -38,6 +38,7 @@ def main() -> int:
     ap.add_argument("calibration", type=Path)
     ap.add_argument("--timings", type=Path)
     ap.add_argument("--note", default="")
+    ap.add_argument("--formats", nargs="+", help="only these formats (default: all candidates)")
     a = ap.parse_args()
 
     store = DATA / "store" / a.model
@@ -47,7 +48,7 @@ def main() -> int:
     splits_manifest = a.calibration.parent / "manifest.json"
 
     formats = {}
-    for f in candidate_formats():
+    for f in a.formats or candidate_formats():
         p = store / f"{a.model}-{f}.gguf"
         sa = source_assignment(inv, f)
         r = verify(inv, sa, p)
