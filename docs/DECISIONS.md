@@ -32,8 +32,13 @@ what is true now.
 - **List:** the solver's 6 best genotypes per model (≥5% apart) + one padded-uniform baseline; stored once.
 - **Tests:** each genotype built once; KL (selection text), MMLU 1,000, HellaSwag 2,000, ARC-C 1,172,
   WinoGrande 1,267, GSM8K 300 (fixed test subset, approved by the user), perplexity; all on the GPU.
-- **Winner:** best mean accuracy (ties: lower KL); models compared by paired bootstrap on accuracy.
-- **Pi:** load the winner once, peak RAM against the budget, speed (256-token prompt, 64 out, 4 threads).
+- **Winner:** best mean accuracy; genotypes the paired bootstrap cannot separate from it (95% interval of the lead
+  reaching below 0.5 points) are tied, and the lowest KL among them wins (2026-11-11: 14B's padded uniform 'won'
+  by 0.08 points with nearly twice the KL). Models compared by paired bootstrap on accuracy.
+- **Baseline:** for every model and budget, the best existing quantization that fits: the better of llama.cpp's two
+  largest fitting presets, same importance matrix (2026-11-12).
+- **Pi:** winners reach it through a private Hugging Face repo per model and budget (the VPN to the server ran at
+  0.5 MB/s). It loads the winner once, peak RAM against the budget, speed (256-token prompt, 64 out, 4 threads).
 
 ## Pipeline
 - One command per budget (`deploy/server/run-budget.sh B`); one lane per model, straight through to its winner
@@ -42,6 +47,12 @@ what is true now.
 - Part-cost files are reflink copies of the starting-type file with the changed part appended, used only after a
   tensor-by-tensor match with a normally built file.
 
+## Models (2026-11-12)
+- Qwen2.5 1.5B–32B; plus InternLM2.5 20B (7 and 5 GiB) and Mistral Small 24B (7 GiB) to place ~20B models.
+  No ~20B model fits 3 GiB (InternLM 20B needs ≥ 4.6 GiB at the lowest types); InternLM2.5 7B stands in.
+  Reka Flash 3.1 dropped: its feed-forward width is not a multiple of 256.
+
 ## Results so far
+- Full results: [RESULTS.md](RESULTS.md).
 - Proof of concept (7 GiB, f16 KV): 14B mixed (75.2% mean accuracy) beat 7B (70.4%) and uniform 14B (73.5%), and
   llama.cpp's IQ3_XXS recipe for 14B (74.1%, 6.68 GiB): +1.05 points, CI [0.00, 2.10], lower KL and perplexity.

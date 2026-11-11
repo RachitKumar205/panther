@@ -2,7 +2,7 @@
 
 For a RAM budget on an 8 GB Raspberry Pi 5, find the Qwen2.5 model and the quantization type for each of its weight
 matrices that gives the best answers. How it works, with every number: [docs/STANDARD.md](docs/STANDARD.md).
-Decisions that stand: [docs/DECISIONS.md](docs/DECISIONS.md). Server setup and rules:
+Results: [docs/RESULTS.md](docs/RESULTS.md). Decisions that stand: [docs/DECISIONS.md](docs/DECISIONS.md). Server setup and rules:
 [deploy/server/README.md](deploy/server/README.md).
 
 ## Layout

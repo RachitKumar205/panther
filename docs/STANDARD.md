@@ -1,4 +1,6 @@
-# How Panther finds the best model for a RAM budget (D49, D50; 2026-11-11)
+# How Panther finds the best model for a RAM budget (D49, D50; 2026-11-11, updated 2026-11-12)
+
+Results so far: [RESULTS.md](RESULTS.md).
 
 ## The question
 
@@ -78,6 +80,7 @@ the data disk has less than 30 GB free.
 | 5 | Solver list | The solver's 6 best genotypes inside the window (each ≥5% different) + 1 baseline (one type everywhere, raised layer by layer to fill the budget). This is the model's whole solution space; stored in `rewrite/budget-<B>/list-<model>.json` | CPU, seconds |
 | 6 | Tests | Each of the 7 genotypes built once and given every test: KL, perplexity, MMLU (1,000), HellaSwag (2,000), ARC-C (1,172), WinoGrande (1,267), GSM8K (300); all 7 at once | GPU |
 | 7 | Winner | Best mean accuracy. If the paired bootstrap can't separate another genotype from it (the 95% interval of the lead reaches below 0.5 points), they are tied, and the tied one with the lowest KL wins: KL is measured over far more text than the benchmarks have questions | seconds |
+| 7b | Best existing quantization | llama.cpp's own mixed presets (Q3_K_S, IQ3_S, IQ2_M, …) built from the same 16-bit file and importance matrix; the two largest that fit the budget are tested like the genotypes and the better one is compared with the winner (paired bootstrap). Presets that don't fit are deleted | CPU + GPU |
 | 8 | Pi | The server uploads each winner to its private Hugging Face repo (`<user>/panther-<size>-<budget>g`, ~2 min) and the Pi downloads it from there (~16 MB/s, ~7 min; the VPN to the server managed 0.5 MB/s); the Pi loads it once, checks peak RAM against the budget and measures speed (256-token prompt, 64 tokens out, 4 threads) | Pi |
 | 9 | Comparison | All models' winners and the reference model against each other (paired bootstrap on accuracy) | seconds |
 
