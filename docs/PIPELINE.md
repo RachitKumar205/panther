@@ -635,3 +635,18 @@ server process), minimum system `MemAvailable`, CPU temperature at start and end
 SoC throttles, or the start temperature is above 70 °C (the queue waits up to 5 minutes to cool first).
 `pi/analyze.py` writes `results/report.md` and `report.json`, including the RAM-prediction check and the
 recommendation: the verdict winner, if it is within budget and valid on the Pi; otherwise the other model's winner.
+
+### PoC run log (2026-11-11, unattended overnight)
+- 00:44 UTC both lanes started. Smoke mode (`PANTHER_POC_SMOKE=1`, 1.5B, tiny settings, selection data)
+  ran every new step end to end before the real lanes reached them: **passed**.
+- Fixed on the way (all pushed):
+  - the Pi recommendation now follows the decision rule (found by the smoke run: the rule preferred 1.5B's
+    uniform baseline, the bundle had recommended the solver's winner);
+  - 14B's IQ2_XS source aborted: llama-imatrix skips the untied output tensor, so IQ2_XS is excluded from the
+    `head` gene too (D21 extended);
+  - the final launcher misread a restarted lane's old failure line; it now judges only each lane's latest run;
+  - penalty measurements ran ~1/min (three Python threads sharing ~2 cores while the GPU idled); now six
+    processes, ~7/min.
+- 7B CPU correction (D37 method, 12 chunks): output head a = 0.00180, last MLP a = 0.00049, the same pattern as
+  1.5B.
+- Expected: 7B shortlist ~03:00 UTC, 14B shortlist ~05:30, Pi bundle ~07:00 UTC.
