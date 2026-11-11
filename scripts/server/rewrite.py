@@ -113,12 +113,11 @@ def base_format(model: str) -> str:
 
 
 def probe_format(model: str) -> str:
-    """D45/D46: base's neighbour in the menu, in the direction Phase 0.3 chose (search.yaml sensitivity_probe)."""
+    """D47: the highest menu format at most `sensitivity_probe_up_bpw` above the base (else the one below)."""
     m = sorted(menu(model), key=bits_per_weight)
-    i = m.index(base_format(model))
-    step = -1 if CFG.get("sensitivity_probe", "down") == "down" else 1
-    j = i + step if 0 <= i + step < len(m) else i - step
-    return m[j]
+    b = bits_per_weight(base_format(model))
+    up = [f for f in m if b < bits_per_weight(f) <= b + CFG["sensitivity_probe_up_bpw"]]
+    return up[-1] if up else m[m.index(base_format(model)) - 1]
 
 
 def store(model: str) -> TensorStore:
@@ -222,69 +221,138 @@ def cmd_error(model: str) -> int:
     return 0
 
 
-# --- sensitivity ---------------------------------------------------------------------------------------------
+# --- sensitivity (D47: adaptive) ------------------------------------------------------------------------------
 
-def sens_assignment(model: str, block: str | None) -> dict[str, str]:
-    base, probe = fill(model, base_format(model)), probe_format(model)
-    if block is None:
-        return base
-    a = dict(base)
-    for g in blocks(model)[block]:
-        if probe in allowed(model)[g]:
-            a[g] = probe
+def block_assignment(model: str, block: str | None, fmt: str | None = None) -> dict[str, str]:
+    """The base, with every matrix of `block` moved to `fmt` where allowed."""
+    a = fill(model, base_format(model))
+    if block is not None:
+        for g in blocks(model)[block]:
+            if fmt in allowed(model)[g]:
+                a[g] = fmt
     return a
 
 
-def _sens_one(job: tuple[str, str]) -> None:
-    model, block = job
-    path = build_file(model, sens_assignment(model, block))
+def sens_label(model: str, block: str, fmt: str) -> str:
+    return f"rw:sens:{base_format(model)}:{block}:{fmt}"
+
+
+def _sens_one(job: tuple[str, str, str]) -> None:
+    model, block, fmt = job
+    path = build_file(model, block_assignment(model, None if block == "base" else block, fmt))
     try:
-        poc.kl(model, path, "sensitivity", f"rw:sens:{base_format(model)}>{probe_format(model)}:{block}")
+        poc.kl(model, path, "sensitivity", sens_label(model, block, fmt))
     finally:
         path.unlink(missing_ok=True)
 
 
-def cmd_sens(model: str) -> int:
-    tag = f"{base_format(model)}>{probe_format(model)}"
-    if not poc.find(poc.records(model), f"rw:sens:{tag}:base", reference="sensitivity"):
-        path = build_file(model, sens_assignment(model, None))
-        poc.kl(model, path, "sensitivity", f"rw:sens:{tag}:base")
-        path.unlink()
-    recs = poc.records(model)
-    todo = [b for b in blocks(model) if not poc.find(recs, f"rw:sens:{tag}:{b}", reference="sensitivity")]
-    print(f"{model}: base {base_format(model)}, probe {probe_format(model)}, {len(todo)} of {len(blocks(model))} "
-          f"blocks to measure", flush=True)
-    with ProcessPoolExecutor(CONCURRENT) as ex:
-        for _ in ex.map(_sens_one, [(model, b) for b in todo]):
-            pass
-    recs = poc.records(model)
-    base_kl = poc.find(recs, f"rw:sens:{tag}:base", reference="sensitivity")["metrics"]["kl_mean"]
-    dkl = {b: poc.find(recs, f"rw:sens:{tag}:{b}", reference="sensitivity")["metrics"]["kl_mean"] - base_kl
-           for b in blocks(model)}
-    out(model, "sens.json").write_text(json.dumps({"base": base_format(model), "probe": probe_format(model),
-                                                   "base_kl": base_kl, "dkl": dkl}, indent=1))
-    print(f"sensitivity written: base KL {base_kl:.5f}", flush=True)
-    return 0
+def measured_table(model: str) -> tuple[float | None, dict[str, dict[str, float]]]:
+    """Base KL and measured dKL per (block, format), from the KL records."""
+    base = base_format(model)
+    pre = f"rw:sens:{base}:"
+    kls = {}
+    for r in poc.records(model):
+        lab = r.get("label") or ""
+        if lab.startswith(pre) and r.get("ok") and r["how"].get("reference") == "sensitivity":
+            kls[lab[len(pre):]] = r["metrics"]["kl_mean"]
+    base_kl = kls.get(f"base:{base}")
+    table: dict[str, dict[str, float]] = {}
+    if base_kl is not None:
+        for k, v in kls.items():
+            b, f = k.rsplit(":", 1)
+            if b != "base":
+                table.setdefault(b, {})[f] = v - base_kl
+    return base_kl, table
 
 
-def penalties(model: str) -> dict[str, dict[str, float]]:
-    """D45: penalty(m, f) = s_b * (e(m, f) - e(m, base)), s_b = dKL_b / sum_m (e(m, probe) - e(m, base))."""
-    sens = json.loads(out(model, "sens.json").read_text())
-    err = json.loads(out(model, "error.json").read_text())
-    base_a = sens_assignment(model, None)
-    probe_a = {}
-    for b in blocks(model):
-        probe_a.update({g: f for g, f in sens_assignment(model, b).items() if g in blocks(model)[b]})
+def block_formats(model: str, block: str) -> list[str]:
+    al = allowed(model)
+    return sorted({f for g in blocks(model)[block] for f in al[g]}, key=bits_per_weight)
+
+
+def penalties(model: str, table: dict[str, dict[str, float]] | None = None,
+              err: dict | None = None) -> dict[str, dict[str, float]]:
+    """D47: per block, dKL as a piecewise-linear function of the block's offline error E through (base, 0) and
+    the measured points; per matrix, penalty(m, f) = r_b(f) * (e(m, f) - e(m, base)), r_b(f) = dKL_b(f) / dE_b(f)."""
+    if table is None:
+        table = measured_table(model)[1]
+    if err is None:
+        err = json.loads(out(model, "error.json").read_text())
     inv = inv_of(model)
     name = {g.gene_id: g.tensors[0].name for g in inv.genes}
+    base_a = block_assignment(model, None)
     pen = {}
     for b, gs in blocks(model).items():
-        d = sum(err[name[g]][probe_a[g]] - err[name[g]][base_a[g]] for g in gs)
-        s = sens["dkl"][b] / d if d else 0.0
+        def E(f: str) -> float:
+            a = block_assignment(model, b, f)
+            return sum(err[name[g]][a[g]] - err[name[g]][base_a[g]] for g in gs)
+        pts = sorted({(0.0, 0.0)} | {(E(f), v) for f, v in table.get(b, {}).items()})
+        xs, ys = np.array([x for x, _ in pts]), np.array([y for _, y in pts])
+        def dkl(x: float) -> float:
+            if len(xs) == 1:
+                return 0.0
+            if x < xs[0]:
+                return ys[0] + (ys[1] - ys[0]) / (xs[1] - xs[0]) * (x - xs[0])
+            if x > xs[-1]:
+                return ys[-1] + (ys[-1] - ys[-2]) / (xs[-1] - xs[-2]) * (x - xs[-1])
+            return float(np.interp(x, xs, ys))
+        ratio = {}
+        for f in block_formats(model, b):
+            x = E(f)
+            ratio[f] = dkl(x) / x if abs(x) > 1e-12 else 0.0
         for g in gs:
             e0 = err[name[g]][base_a[g]]
-            pen[g] = {f: s * (err[name[g]][f] - e0) for f in allowed(model)[g]}
+            pen[g] = {f: ratio[f] * (err[name[g]][f] - e0) for f in allowed(model)[g]}
     return pen
+
+
+def next_measurements(model: str, pen: dict[str, dict[str, float]], measured: set[tuple[str, str]]) -> set[tuple[str, str]]:
+    """Solve every budget of the model; for each block, the formats its matrices use and their menu neighbours."""
+    from panther.search.problem import Problem
+    from panther.search.solver import solve_top_k
+    k = CFG["remeasure_neighbours"]
+    base = base_format(model)
+    want = set()
+    for budget in searched_budgets(model):
+        prob = Problem(inv_of(model), allowed(model), pen, budget, CTX, OVERHEAD, kv_bytes_per_element=KV_BPE)
+        a = solve_top_k(prob, k=1, time_limit_s=60)[0].assignment
+        for b, gs in blocks(model).items():
+            fs = block_formats(model, b)
+            for f in {a[g] for g in gs}:
+                i = fs.index(f)
+                want |= {(b, fs[j]) for j in range(max(0, i - k), min(len(fs), i + k + 1)) if fs[j] != base}
+    return want - measured
+
+
+def cmd_sens(model: str) -> int:
+    base, probe = base_format(model), probe_format(model)
+    stats = []
+    todo = {("base", base)} | {(b, probe) for b in blocks(model)}
+    for rnd in range(CFG["remeasure_rounds"] + 1):
+        base_kl, table = measured_table(model)
+        done = {(b, f) for b, row in table.items() for f in row} | ({("base", base)} if base_kl is not None else set())
+        run = sorted(todo - done)
+        print(f"{model} round {rnd}: {len(run)} KL runs (base {base}, probe {probe}, measured so far {len(done)})",
+              flush=True)
+        if ("base", base) in run:
+            _sens_one((model, "base", base))
+            run.remove(("base", base))
+        with ProcessPoolExecutor(CONCURRENT) as ex:
+            for _ in ex.map(_sens_one, [(model, b, f) for b, f in run]):
+                pass
+        base_kl, table = measured_table(model)
+        measured = {(b, f) for b, row in table.items() for f in row}
+        stats.append({"round": rnd, "runs": len(run), "measured_total": len(measured)})
+        if rnd == CFG["remeasure_rounds"]:
+            break
+        todo = next_measurements(model, penalties(model, table), measured)
+        if not todo:
+            print(f"{model}: converged after round {rnd}", flush=True)
+            break
+    out(model, "sens.json").write_text(json.dumps({"base": base, "probe": probe, "base_kl": base_kl,
+                                                   "table": table, "rounds": stats}, indent=1))
+    print(f"{model}: sensitivity done, {sum(s['runs'] for s in stats)} KL runs, base KL {base_kl:.5f}", flush=True)
+    return 0
 
 
 # --- contest -------------------------------------------------------------------------------------------------

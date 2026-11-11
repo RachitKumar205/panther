@@ -41,7 +41,8 @@ file is the plan for rewriting it by hand: smaller, per-matrix, and across sever
 
 Settings live in `configs/search.yaml`; `scripts/budget_table.py` prints the table below from them.
 
-**KL budget (D45):** ~390 runs in total (Phase 0 ~7, sensitivity 343, scoring 36), about 1.5 h on the GPU.
+**KL budget (D45, revised by D47):** Phase 0.3 showed one probe per block picks an 11% worse solution, so
+sensitivity is adaptive (probe, then measure around the solution, 3 rounds): ~1,300–1,600 runs, 3–4 h.
 
 ## Budgets and contests
 

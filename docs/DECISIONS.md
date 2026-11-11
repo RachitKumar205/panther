@@ -579,6 +579,26 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 
 ---
 
+### D47. Sensitivity is adaptive: one probe per block, then measure around the solution (3 rounds) — decided by user 2026-11-11
+- **Why:** Phase 0.3 failed its gate. On the PoC's measured 14B table, one probe per block scaled by the offline
+  error ranks penalties well (Spearman 0.87) but is ~45% off in value; the 7 GiB solution it picks has 11.4% worse
+  selection KL (0.1039 vs 0.0932). Offline tests on the same table (no KL runs): interpolating from 3 measured
+  formats per block loses ~7% of the achievable gain; **measuring around the solution for 3 rounds comes within
+  ~1.2% of the fully measured optimum with 63% of the measurements.** The user chose this (~1,300–1,600 KL runs,
+  ~3–4 h) over the one-probe plan (~350) and full measurement (~2,750).
+- **What:** per model, at block level (attention / MLP per layer, embedding, head):
+  1. measure every block moved from the base to the probe: the highest menu format at most 3 bits/weight above
+     the base (the up-probe was best in 0.3);
+  2. predict unmeasured (block, format) values by piecewise-linear interpolation in the block's offline error
+     through the measured points and (base, 0), extrapolating with the edge segment's slope;
+  3. solve each of the model's budgets (per matrix); for every block, measure the formats its matrices use and
+     their menu neighbours (±1) that are not yet measured; repeat, 3 rounds; then solve the top 3.
+  Per matrix: `penalty(m, f) = r_b(f) × (e(m, f) − e(m, base))` with `r_b(f) = ΔKL_b(f) / (E_b(f) − E_b(base))`,
+  the block's measured or interpolated ratio, so a block with all matrices at f costs exactly ΔKL_b(f).
+- Supersedes D45 item 1–3 (one probe, no re-measure loop); the rest of D45/D46 stands.
+
+---
+
 ## Open
 
 - Team value for R_max (`configs/budgets.yaml`), required before Phase C.
