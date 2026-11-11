@@ -47,7 +47,7 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
 
 | Budget | Model | Peak RAM (predicted) | Writing tok/s | Prompt tok/s | Clock | Notes |
 |---|---|---|---|---|---|---|
-| 7 GiB | 14B ours | **6.76 GiB** (7.04) | 0.76 | 1.09 | capped 1.8 GHz | weak supply; free RAM fell to 216 MB once. Full-clock rerun running |
+| 7 GiB | 14B ours | **6.70 GiB** (7.04) | **1.00** | 1.46 | 2.4 GHz, heat-limited | good supply. Capped at 1.8 GHz on the weak supply: 0.76 / 1.09 |
 | 7 GiB | 32B ours | **6.78 GiB** (7.04) | 0.49 | 0.61 | 2.4 GHz, heat-limited (83–84 °C) | supply 5.02–5.04 V, no under-voltage |
 | 7 GiB | 7B Q6_K | **6.07 GiB** (6.34) | 1.74 | 7.98 | 2.4 GHz, throttled | first (weak) supply |
 | 3 GiB | 3B Q6_K | **2.78 GiB** (2.83) | 3.41 | 17.3 | 2.4 GHz, throttled | |
