@@ -41,7 +41,9 @@ fi
 
 BF16="$OUT/$MODEL-BF16.gguf"
 if [ ! -f "$BF16" ]; then
-  timed convert "$PANTHER_CONVERT_PY" "$LLAMA/convert_hf_to_gguf.py" "$HF_DIR" --outtype bf16 --outfile "$BF16.part"
+  # InternLM's tokenizer needs protobuf >= 5.26; the image has 4.25. A newer one sits in data/pydeps-convert
+  # (uv pip install --target, inside the container), used by the converter only.
+  PYTHONPATH="$DATA/pydeps-convert${PYTHONPATH:+:$PYTHONPATH}" timed convert "$PANTHER_CONVERT_PY" "$LLAMA/convert_hf_to_gguf.py" "$HF_DIR" --outtype bf16 --outfile "$BF16.part"
   mv "$BF16.part" "$BF16"
   rm -rf "$HF_DIR"   # the 16-bit GGUF is the original from here on (docs/STANDARD.md)
 fi
