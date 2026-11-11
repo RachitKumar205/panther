@@ -6,8 +6,8 @@ one sensitivity KL run per block. Runs in the GPU container; every step is resum
   rewrite.py refs    MODEL        # BF16 KL references: sensitivity (12 chunks) and selection
   rewrite.py error   MODEL        # importance-weighted dequantization error per matrix and format
   rewrite.py sens    MODEL        # one KL run per block: the block moved from base to probe format
-  rewrite.py list    BUDGET       # the solution space: top genotypes per model inside the RAM window (D49)
-  rewrite.py test    BUDGET       # each listed genotype assembled once; KL, tasks, perplexity, GSM8K on it
+  rewrite.py list    BUDGET MODEL # the model's solution space: top genotypes inside the RAM window (D49)
+  rewrite.py test    BUDGET MODEL # each listed genotype assembled once; KL, tasks, perplexity, GSM8K on it
   rewrite.py pick    BUDGET       # best per model, then against its baseline, each other and the reference
   rewrite.py bundle  BUDGET       # the winners as GGUF files and a manifest for the Pi
 
@@ -157,6 +157,64 @@ def build_file(model: str, a: dict[str, str]) -> Path:
     return path
 
 
+_SRC_READERS: dict[Path, dict] = {}
+
+
+def base_file(model: str) -> Path:
+    """The sensitivity base, assembled once per model and kept for the whole sweep."""
+    a = fill(model, base_format(model))
+    path = out(model, f"base-{base_format(model)}.gguf")
+    if not path.exists():
+        part = path.with_suffix(".part")
+        assemble(inv_of(model), a, store(model), part, base_format=base_format(model))
+        part.rename(path)
+    return path
+
+
+def fast_probe(model: str, a: dict[str, str]) -> Path:
+    """A probe file without rewriting the model: reflink-copy the base file (instant on XFS), point the changed
+    tensors' table entries at their new data, and append only that data. Every tensor's bytes are identical to a
+    normally assembled file; only the order inside the file differs (D50)."""
+    import gguf
+    base = base_file(model)
+    base_a = fill(model, base_format(model))
+    inv = inv_of(model)
+    changed = {t.name: a[g.gene_id] for g in inv.genes for t in g.tensors if a[g.gene_id] != base_a[g.gene_id]}
+    dst = out(model, "tmp", f"{assignment_digest(a)[:16]}.gguf")
+    if dst.exists():
+        return dst
+    part = dst.with_suffix(".part")
+    subprocess.run(["cp", "--reflink=always", str(base), str(part)], check=True)
+    r = gguf.GGUFReader(part, "r+")
+    tens = {t.name: t for t in r.tensors}
+    t0 = r.tensors[0]
+    data_start = int(t0.data_offset) - int(t0.field.parts[-1][0])
+    al = r.fields.get("general.alignment")
+    alignment = int(al.parts[-1][0]) if al else 32
+    pos = part.stat().st_size
+    plan = []
+    for name, fmt in changed.items():
+        src_path = DATA / "store" / model / f"{model}-{fmt}.gguf"
+        if src_path not in _SRC_READERS:
+            _SRC_READERS[src_path] = {t.name: t for t in gguf.GGUFReader(src_path).tensors}
+        src = _SRC_READERS[src_path][name]
+        pos += (-(pos - data_start)) % alignment
+        plan.append((name, src, pos))
+        tens[name].field.parts[-2][0] = int(src.tensor_type)
+        tens[name].field.parts[-1][0] = pos - data_start
+        pos += int(src.n_bytes)
+    r.data.flush()
+    del r
+    with open(part, "ab") as f:
+        for name, src, at in plan:
+            f.write(b"\0" * (at - f.tell()))
+            f.write(src.data.tobytes())
+    part.rename(dst)
+    if not verify(inv, a, dst).ok:
+        raise SystemExit(f"fast probe read-back failed for {dst.name}")
+    return dst
+
+
 def blocks(model: str) -> dict[str, list[str]]:
     b: dict[str, list[str]] = {}
     for g in inv_of(model).genes:
@@ -261,7 +319,7 @@ def sens_label(model: str, block: str, fmt: str) -> str:
 
 def _sens_one(job: tuple[str, str, str]) -> None:
     model, block, fmt = job
-    path = build_file(model, block_assignment(model, None if block == "base" else block, fmt))
+    path = fast_probe(model, block_assignment(model, None if block == "base" else block, fmt))
     wait_for_gpu_memory(path.stat().st_size)
     try:
         poc.kl(model, path, "sensitivity", sens_label(model, block, fmt))
@@ -426,11 +484,11 @@ def padded_uniform(model: str, budget: float) -> tuple[str, dict[str, str]] | No
     return None
 
 
-def solution_list(budget: int, pen_fn=None) -> dict[str, dict]:
+def solution_list(budget: int, pen_fn=None, models: list[str] | None = None) -> dict[str, dict]:
     from panther.search.problem import Problem
     from panther.search.solver import solve_top_k
     items = {}
-    for model in contests()[budget]["searched"]:
+    for model in models or contests()[budget]["searched"]:
         inv = inv_of(model)
         short = model.split("-")[1]
         prob = Problem(inv, allowed(model), (pen_fn or penalties)(model), budget * (1 + WINDOW[1]), CTX, OVERHEAD,
@@ -451,13 +509,25 @@ def solution_list(budget: int, pen_fn=None) -> dict[str, dict]:
     return items
 
 
-def cmd_list(budget: int) -> int:
-    """The entire solution space for a budget, written once and never extended (D49)."""
-    path = out(f"budget-{budget}", "list.json")
+def list_path(budget: int, model: str) -> Path:
+    return out(f"budget-{budget}", f"list-{model}.json")
+
+
+def load_list(budget: int) -> dict[str, dict]:
+    """The budget's whole solution space: the union of its models' lists."""
+    items = {}
+    for model in contests()[budget]["searched"]:
+        items.update(json.loads(list_path(budget, model).read_text()))
+    return items
+
+
+def cmd_list(budget: int, model: str) -> int:
+    """One model's solution space for a budget, written once and never extended (D49)."""
+    path = list_path(budget, model)
     if path.exists():
         print(f"list exists: {path}")
         return 0
-    items = solution_list(budget)
+    items = solution_list(budget, models=[model])
     for name, it in items.items():
         print(f"{budget} GiB {name:28s} RAM {it['ram_gib']:.3f} GiB", flush=True)
     path.write_text(json.dumps(items, indent=1))
@@ -519,16 +589,16 @@ def _test_ref(job: tuple[int, str]) -> str:
     return name
 
 
-def cmd_test(budget: int) -> int:
-    """All listed genotypes and the cross-model reference, TEST_CONCURRENT at once on the GPU."""
-    items = json.loads(out(f"budget-{budget}", "list.json").read_text())
-    refs = contests()[budget]["reference"]
-    print(f"{len(items)} genotypes + {len(refs)} reference(s), up to {TEST_CONCURRENT} at once", flush=True)
-    with ProcessPoolExecutor(TEST_CONCURRENT) as ex:
-        futs = [ex.submit(_test_one, (budget, n, it)) for n, it in items.items()]
-        futs += [ex.submit(_test_ref, (budget, m)) for m in refs]
-        for f in futs:
-            print(f"  tested {f.result()}", flush=True)
+def cmd_test(budget: int, model: str) -> int:
+    """One model's listed genotypes (or, for a reference model, its uniform Q6_K file), all at once on the GPU."""
+    if model in contests()[budget]["reference"]:
+        print(f"tested {_test_ref((budget, model))}", flush=True)
+        return 0
+    items = json.loads(list_path(budget, model).read_text())
+    print(f"{model}: {len(items)} genotypes, all at once", flush=True)
+    with ProcessPoolExecutor(len(items)) as ex:
+        for n in ex.map(_test_one, [(budget, n, it) for n, it in items.items()]):
+            print(f"  tested {n}", flush=True)
     return 0
 
 
@@ -566,7 +636,7 @@ def cmd_pick(budget: int) -> int:
     """Per model: best mean test-subset accuracy (ties: lower KL). Then winner vs its padded-uniform baseline, the
     models' winners against each other, and against the cross-model reference."""
     from panther.stats.decision import compare
-    items = json.loads(out(f"budget-{budget}", "list.json").read_text())
+    items = load_list(budget)
     rows, evs = {}, {}
     for name, it in items.items():
         label = test_label(budget, name, it["assignment"])
@@ -617,7 +687,7 @@ def cmd_bundle(budget: int) -> int:
     import hashlib
     import shutil
     pick = json.loads(out(f"budget-{budget}", "pick.json").read_text())
-    items = json.loads(out(f"budget-{budget}", "list.json").read_text())
+    items = load_list(budget)
     bundle = DATA / "pi_bundle" / f"budget-{budget}"
     bundle.mkdir(parents=True, exist_ok=True)
     poc.make_agreement_text("Qwen2.5-1.5B-Instruct")
@@ -653,10 +723,32 @@ def main() -> int:
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == "plan":
         return cmd_plan()
+    if cmd == "probecheck":  # D50: a fast probe must hold the same bytes as a normally assembled file
+        import gguf
+        model = args[0]
+        b0 = sorted(blocks(model))[len(blocks(model)) // 2]
+        a = block_assignment(model, b0, probe_format(model))
+        fast, slow = fast_probe(model, a), build_file(model, a)
+        rf = {t.name: t for t in gguf.GGUFReader(fast).tensors}
+        rs = {t.name: t for t in gguf.GGUFReader(slow).tensors}
+        same = rf.keys() == rs.keys() and all(rf[n].tensor_type == rs[n].tensor_type and
+                                              np.array_equal(rf[n].data, rs[n].data) for n in rs)
+        print(f"{model} block {b0} -> {probe_format(model)}: identical tensors: {same}")
+        for name, path in (("fast", fast), ("slow", slow)):
+            poc.kl(model, path, "sensitivity", f"rw:probecheck:{name}:{b0}")
+        recs = poc.records(model)
+        k = {n: poc.find(recs, f"rw:probecheck:{n}:{b0}", reference="sensitivity")["metrics"]["kl_mean"]
+             for n in ("fast", "slow")}
+        print(f"KL fast {k['fast']:.6f} slow {k['slow']:.6f}")
+        slow.unlink()
+        fast.unlink()
+        return 0 if same and abs(k["fast"] - k["slow"]) <= 1e-4 * k["slow"] else 1
     if cmd in ("store", "refs", "error", "sens"):
         return {"store": cmd_store, "refs": poc.cmd_refs, "error": cmd_error, "sens": cmd_sens}[cmd](args[0])
-    if cmd in ("list", "test", "pick", "bundle"):
-        return {"list": cmd_list, "test": cmd_test, "pick": cmd_pick, "bundle": cmd_bundle}[cmd](int(args[0]))
+    if cmd in ("list", "test"):
+        return {"list": cmd_list, "test": cmd_test}[cmd](int(args[0]), args[1])
+    if cmd in ("pick", "bundle"):
+        return {"pick": cmd_pick, "bundle": cmd_bundle}[cmd](int(args[0]))
     raise SystemExit(__doc__)
 
 
