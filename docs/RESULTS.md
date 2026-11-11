@@ -49,8 +49,8 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
 |---|---|---|---|---|---|---|
 | 7 GiB | 14B ours | **6.70 GiB** (7.04) | **1.00** | 1.46 | 2.4 GHz, heat-limited | good supply. Capped at 1.8 GHz on the weak supply: 0.76 / 1.09 |
 | 7 GiB | 32B ours | **6.78 GiB** (7.04) | 0.49 | 0.61 | 2.4 GHz, heat-limited (83–84 °C) | supply 5.02–5.04 V, no under-voltage |
-| 7 GiB | 7B Q6_K | **6.07 GiB** (6.34) | 1.74 | 7.98 | 2.4 GHz, throttled | first (weak) supply |
-| 3 GiB | 3B Q6_K | **2.78 GiB** (2.83) | 3.41 | 17.3 | 2.4 GHz, throttled | |
+| 7 GiB | 7B Q6_K | **6.07 GiB** (6.34) | 1.75 | 7.83 | 2.4 GHz, heat-limited | good supply; same as on the weak one (1.74 / 7.98): memory-bound |
+| 3 GiB | 3B Q6_K | **2.78 GiB** (2.83) | **4.11** | 21.1 | 2.4 GHz | good supply; 3.41 / 17.3 on the weak one |
 
 - Every model fits its budget. The RAM prediction is always a little high (0.05–0.28 GiB): the real runtime overhead
   is ~0.13 GiB, not the 0.40 GiB assumed.
