@@ -35,6 +35,9 @@ From 1.5 bits/weight below to 2.5 above what the budget allows on average:
 | Model @ budget | Average bits/weight the budget allows | Quantization types |
 |---|---|---|
 | 1.5B @ 1 GiB | 3.0 | IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, Q4_K, Q5_K |
+| 7B @ 3 GiB | 2.8 | IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, Q4_K |
+| 7B @ 5 GiB | 5.1 | IQ4_XS, Q4_K, Q5_K, Q6_K |
+| 14B @ 5 GiB | 2.4 | IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, Q4_K |
 | 14B @ 7 GiB | 3.6 | IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, Q4_K, Q5_K |
 | 32B @ 7 GiB | 1.6 | IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S |
 
@@ -61,7 +64,10 @@ level; measuring which parts matter reaches ~97%.
 
 ## The steps (one command per budget: `deploy/server/run-budget.sh <budget>`)
 
-Each model runs in its own lane, straight through, without waiting for the other models.
+Each model runs in its own lane, straight through, without waiting for the other models. Every step takes the budget
+as an argument and checks the disk first: work already there is skipped. Several budgets can run at once: steps that
+write a model's shared files take a lock per model (the second run waits, then skips), and heavy steps wait while
+the data disk has less than 30 GB free.
 
 | # | Step | What happens | Where |
 |---|---|---|---|
@@ -86,7 +92,7 @@ such file is compared tensor by tensor with a normally built file; if anything d
 | **7 GiB** | 14B, 32B | 7B at Q6_K | 14B: 450 (done) + 7; 32B: ~600 + 7 | 15 |
 | 1 GiB | 1.5B | — | ~260 + 7 | 7 |
 | 3 GiB | 7B | 3B at Q6_K | ~270 + 7 | 8 |
-| 5 GiB | 14B, 7B | — | 14B needs a new sweep at its 5 GiB types (~450) + 7; 7B shared with 3 GiB + 7 | 14 |
+| 5 GiB | 14B, 7B | — | 14B ~450 + 7; 7B ~270 + 7 (each budget has its own starting type, so its own sweep) | 14 |
 
 ## Timeline (IST, 11 Nov; estimates from measured rates)
 

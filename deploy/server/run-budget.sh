@@ -7,7 +7,10 @@
 #   format files -> offline error -> references -> part costs -> solver list -> tests -> winner -> Pi bundle
 # without waiting for the other models. A reference model only needs its uniform Q6_K file, then its tests.
 # When every lane is done: pick the winners, bundle them for the Pi.
-# Idempotent: finished steps are skipped, a step already running is adopted, so rerunning it is always safe.
+# Idempotent: every step checks the disk and skips work that is already there; a step already running is adopted.
+# Several budgets can run at the same time: steps are named per budget, and steps that write a model's shared files
+# (quantized copies, offline error, references, part costs) take a lock per model, so the second waits and skips.
+# Heavy steps wait while the data disk has less than 30 GB free.
 set -euo pipefail
 B="${1:?usage: run-budget.sh BUDGET_GIB}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -25,15 +28,15 @@ lanes=""
 for m in $(list searched); do
   s="$(short "$m")"; c="b$B-$s"; lanes="$lanes $c"
   running "$c" && { echo "lane $c already running"; continue; }  # never rewrite a running lane's steps
-  printf "%s\n" "gpu rw-store-$s $R store $m" "gpu rw-err-$s $R error $m" "gpu rw-refs-$s $R refs $m" \
-    "gpu rw-sens-$s $R sens $m" "gpu rw-list$B-$s $R list $B $m" "gpu rw-test$B-$s $R test $B $m" \
+  printf "%s\n" "gpu rw-store$B-$s $R store $B $m" "gpu rw-err$B-$s $R error $B $m" "gpu rw-refs-$s $R refs $m" \
+    "gpu rw-sens$B-$s $R sens $B $m" "gpu rw-list$B-$s $R list $B $m" "gpu rw-test$B-$s $R test $B $m" \
     "gpu rw-pick$B-$s $R pick $B $m" "gpu rw-bundle$B-$s $R bundle $B $m" > "$P/$c.steps"
   start x "$c" "$HERE/chain.sh" "$c" "$P/$c.steps"
 done
 for m in $(list reference); do
   s="$(short "$m")"; c="b$B-ref-$s"; lanes="$lanes $c"
   running "$c" && { echo "lane $c already running"; continue; }
-  printf "%s\n" "gpu rw-store-$s $R store $m" "gpu rw-test$B-ref-$s $R test $B $m" > "$P/$c.steps"
+  printf "%s\n" "gpu rw-store$B-$s $R store $B $m" "gpu rw-test$B-ref-$s $R test $B $m" > "$P/$c.steps"
   start x "$c" "$HERE/chain.sh" "$c" "$P/$c.steps"
 done
 running "b$B" || printf "%s\n" "gpu rw-pick$B $R pick $B" > "$P/b$B.steps"  # comparison across models

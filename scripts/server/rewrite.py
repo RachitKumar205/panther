@@ -2,10 +2,10 @@
 one sensitivity KL run per block. Runs in the GPU container; every step is resumable.
 
   rewrite.py plan                 # print menus, bases, probes and contests (no work)
-  rewrite.py store   MODEL        # BF16 + importance matrix (new models) and the missing menu formats
-  rewrite.py refs    MODEL        # BF16 KL references: sensitivity (12 chunks) and selection
-  rewrite.py error   MODEL        # importance-weighted dequantization error per matrix and format
-  rewrite.py sens    MODEL        # one KL run per block: the block moved from base to probe format
+  rewrite.py store   BUDGET MODEL # the quantized copies the model needs for this budget (missing ones only)
+  rewrite.py refs    MODEL        # the 16-bit model's predictions: sensitivity (12 chunks) and selection texts
+  rewrite.py error   BUDGET MODEL # importance-weighted quantization error per matrix and type
+  rewrite.py sens    BUDGET MODEL # part costs: KL per part at the budget's starting type, then 2 rounds
   rewrite.py list    BUDGET MODEL # the model's solution space: top genotypes inside the RAM window (D49)
   rewrite.py test    BUDGET MODEL # each listed genotype assembled once; KL, tasks, perplexity, GSM8K on it
   rewrite.py pick    BUDGET       # best per model, then against its baseline, each other and the reference
@@ -96,9 +96,49 @@ def avg_bpw(model: str, budget: float) -> float:
     return 8 * room / sum(g.n_weights for g in inv.genes)
 
 
+BUDGET: int | None = None  # D51: set from the command line; every step then works for exactly this budget
+
+
 def searched_budgets(model: str) -> list[int]:
-    active = set(CFG.get("active_budgets", contests()))  # D48: only active budgets are searched for now
+    if BUDGET is not None:
+        return [BUDGET] if model in contests()[BUDGET]["searched"] else []
+    active = set(CFG.get("active_budgets", contests()))  # without a budget argument: the active budgets (D48)
     return sorted(b for b, c in contests().items() if model in c["searched"] and b in active)
+
+
+class locked:
+    """D51: an exclusive lock per (model, step), so runs for different budgets never write the same files at once;
+    the second one waits, then finds the work done and skips it."""
+
+    def __init__(self, name: str) -> None:
+        self.path = DATA / "locks" / f"{name}.lock"
+
+    def __enter__(self) -> "locked":
+        import fcntl
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.f = open(self.path, "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        import fcntl
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+MIN_FREE_GB = 30
+
+
+def need_disk(timeout_s: int = 3600) -> None:
+    """D51: heavy steps wait while the data disk has less than MIN_FREE_GB free, then fail clearly."""
+    import shutil
+    import time
+    t0 = time.monotonic()
+    while shutil.disk_usage(DATA).free < MIN_FREE_GB * 1e9:
+        if time.monotonic() - t0 > timeout_s:
+            raise SystemExit(f"less than {MIN_FREE_GB} GB free on {DATA} for an hour; free space and rerun")
+        print(f"waiting: less than {MIN_FREE_GB} GB free on {DATA}", flush=True)
+        time.sleep(60)
 
 
 @lru_cache(maxsize=None)
@@ -219,7 +259,7 @@ def reflink_ok(model: str) -> bool:
     """D50: reflink-copied probe files are used only if, for a test block, every tensor (type and bytes) matches a
     normally assembled file. Checked once per model; the answer is stored."""
     import gguf
-    flag = out(model, "reflink-check.json")
+    flag = out(model, f"reflink-check-{base_format(model)}.json")
     if flag.exists():
         return json.loads(flag.read_text())["identical"]
     b0 = sorted(blocks(model))[len(blocks(model)) // 2]
@@ -270,13 +310,15 @@ def cmd_plan() -> int:
 
 def cmd_store(model: str) -> int:
     fmts = menu(model) if searched_budgets(model) else [REF_MODEL_FORMAT]
-    missing = [f for f in fmts if not (DATA / "store" / model / f"{model}-{f}.gguf").exists()]
-    print(f"{model}: menu {fmts}; to build {missing}", flush=True)
-    if not missing and (DATA / "store" / model / f"{model}-BF16.gguf").exists():
-        return 0
-    env = dict(os.environ, PANTHER_FORMATS=" ".join(missing))
-    return subprocess.run(["bash", str(REPO_ROOT / "scripts/server/build_tensor_store.sh"), model, str(CALIB)],
-                          env=env).returncode
+    with locked(f"{model}-store"):
+        missing = [f for f in fmts if not (DATA / "store" / model / f"{model}-{f}.gguf").exists()]
+        print(f"{model}: types {fmts}; to build {missing}", flush=True)
+        if not missing and (DATA / "store" / model / f"{model}-BF16.gguf").exists():
+            return 0
+        need_disk()
+        env = dict(os.environ, PANTHER_FORMATS=" ".join(missing))
+        return subprocess.run(["bash", str(REPO_ROOT / "scripts/server/build_tensor_store.sh"), model, str(CALIB)],
+                              env=env).returncode
 
 
 # --- error ---------------------------------------------------------------------------------------------------
@@ -312,6 +354,11 @@ def _error_one(job: tuple[str, str, list[str]]) -> tuple[str, dict[str, float]]:
 
 
 def cmd_error(model: str) -> int:
+    with locked(f"{model}-error"):
+        return _cmd_error(model)
+
+
+def _cmd_error(model: str) -> int:
     dst = out(model, "error.json")
     done = json.loads(dst.read_text()) if dst.exists() else {}
     jobs = []
@@ -435,6 +482,11 @@ def next_measurements(model: str, pen: dict[str, dict[str, float]], measured: se
 
 
 def cmd_sens(model: str) -> int:
+    with locked(f"{model}-sens-{base_format(model)}"):
+        return _cmd_sens(model)
+
+
+def _cmd_sens(model: str) -> int:
     base, probe = base_format(model), probe_format(model)
     stats = []
     todo = {("base", base)} | {(b, probe) for b in blocks(model)}
@@ -459,7 +511,7 @@ def cmd_sens(model: str) -> int:
         if not todo:
             print(f"{model}: converged after round {rnd}", flush=True)
             break
-    out(model, "sens.json").write_text(json.dumps({"base": base, "probe": probe, "base_kl": base_kl,
+    out(model, f"sens-{base}.json").write_text(json.dumps({"base": base, "probe": probe, "base_kl": base_kl,
                                                    "table": table, "rounds": stats}, indent=1))
     print(f"{model}: sensitivity done, {sum(s['runs'] for s in stats)} KL runs, base KL {base_kl:.5f}", flush=True)
     return 0
@@ -598,6 +650,7 @@ def _test_one(job: tuple[int, str, dict]) -> str:
     label = test_label(budget, name, a)
     if tests_done(model, label, kl=True):
         return name
+    need_disk()
     path = build_file(model, a)
     wait_for_gpu_memory(2 * path.stat().st_size)
     try:
@@ -804,28 +857,16 @@ def main() -> int:
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == "plan":
         return cmd_plan()
-    if cmd == "probecheck":  # D50: a fast probe must hold the same bytes as a normally assembled file
-        import gguf
-        model = args[0]
-        b0 = sorted(blocks(model))[len(blocks(model)) // 2]
-        a = block_assignment(model, b0, probe_format(model))
-        fast, slow = fast_probe(model, a), build_file(model, a)
-        rf = {t.name: t for t in gguf.GGUFReader(fast).tensors}
-        rs = {t.name: t for t in gguf.GGUFReader(slow).tensors}
-        same = rf.keys() == rs.keys() and all(rf[n].tensor_type == rs[n].tensor_type and
-                                              np.array_equal(rf[n].data, rs[n].data) for n in rs)
-        print(f"{model} block {b0} -> {probe_format(model)}: identical tensors: {same}")
-        for name, path in (("fast", fast), ("slow", slow)):
-            poc.kl(model, path, "sensitivity", f"rw:probecheck:{name}:{b0}")
-        recs = poc.records(model)
-        k = {n: poc.find(recs, f"rw:probecheck:{n}:{b0}", reference="sensitivity")["metrics"]["kl_mean"]
-             for n in ("fast", "slow")}
-        print(f"KL fast {k['fast']:.6f} slow {k['slow']:.6f}")
-        slow.unlink()
-        fast.unlink()
-        return 0 if same and abs(k["fast"] - k["slow"]) <= 1e-4 * k["slow"] else 1
-    if cmd in ("store", "refs", "error", "sens"):
-        return {"store": cmd_store, "refs": poc.cmd_refs, "error": cmd_error, "sens": cmd_sens}[cmd](args[0])
+    global BUDGET
+    if cmd == "refs":
+        with locked(f"{args[-1]}-refs"):
+            return poc.cmd_refs(args[-1])
+    if cmd in ("store", "error", "sens"):  # "store B MODEL" (D51), or "store MODEL" for the active budgets
+        if len(args) == 2:
+            BUDGET = int(args[0])
+        return {"store": cmd_store, "error": cmd_error, "sens": cmd_sens}[cmd](args[-1])
+    if cmd in ("list", "test", "pick", "bundle"):
+        BUDGET = int(args[0])
     if cmd in ("list", "test"):
         return {"list": cmd_list, "test": cmd_test}[cmd](int(args[0]), args[1])
     if cmd in ("pick", "bundle") and len(args) == 2:

@@ -640,6 +640,16 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 
 ---
 
+### D51. Every step is per budget; budgets can run at the same time — decided by user 2026-11-11
+- **Why:** the user wants one script that runs with arguments for each budget independently, skips work already on
+  disk, and can run alongside other instances.
+- **What:** every model-level step takes the budget (`store/error/sens BUDGET MODEL`): types and starting type
+  follow that budget only, so 7B at 3 and 5 GiB and 14B at 5 and 7 GiB get their own part-cost sweeps. Job names
+  include the budget. Quantized copies, offline error, references and part costs take an exclusive lock per model
+  (`data/locks/`). Heavy steps wait while less than 30 GB is free on the data disk.
+
+---
+
 ## Open
 
 - Team value for R_max (`configs/budgets.yaml`), required before Phase C.
