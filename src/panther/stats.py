@@ -1,10 +1,4 @@
-"""Pre-registered decision rule (PLAN.md §2.1).
-
-A beats B if the paired-bootstrap 95% CI of (mean task accuracy A − B) lies entirely above +0.5
-percentage points. Otherwise the tie is broken by perplexity (A wins if its perplexity is lower by ≥ 1%
-relative with the CI excluding 0), then by lower peak RAM, then by higher decode throughput.
-Holm correction is applied when one configuration is compared against several.
-"""
+"""Paired bootstrap comparison of two configurations on the same test items."""
 
 from __future__ import annotations
 
@@ -12,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
 
 ACC_MARGIN = 0.005  # 0.5 percentage points
 PPL_REL_MARGIN = 0.01  # 1% relative
@@ -108,16 +103,3 @@ def compare(a: Evaluation, b: Evaluation, seed: int = 0, n_boot: int = N_BOOT,
         w = a.name if a.decode_tps > b.decode_tps else b.name
         return Comparison(w, "speed", **common)
     return Comparison(None, "tie", **common)
-
-
-def holm(pvalues: dict[str, float], alpha: float = ALPHA) -> dict[str, bool]:
-    """Holm step-down: returns name -> rejected (i.e. significant) for each hypothesis."""
-    order = sorted(pvalues, key=pvalues.get)
-    m = len(order)
-    out = {k: False for k in pvalues}
-    for i, k in enumerate(order):
-        if pvalues[k] <= alpha / (m - i):
-            out[k] = True
-        else:
-            break
-    return out

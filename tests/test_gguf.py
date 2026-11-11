@@ -4,11 +4,8 @@ import gguf
 import numpy as np
 import pytest
 
-from panther.costs.ram import gene_bytes
-from panther.gguftools.assemble import TensorStore, assemble
-from panther.gguftools.patterns import tensor_pattern, tensor_type_file
-from panther.gguftools.verify import verify
-from panther.models.inventory import ModelGeometry, build_inventory
+from panther.gguf_files import TensorStore, assemble, verify
+from panther.model import ModelGeometry, build_inventory, gene_bytes
 
 TINY = ModelGeometry(
     name="tiny", n_layers=12, hidden=256, intermediate=512, n_heads=4, n_kv_heads=2,
@@ -41,21 +38,6 @@ def store(tmp_path):
     inv = build_inventory(TINY)
     srcs = {f: _write_source(inv, f, tmp_path / f"{f}.gguf", seed=i) for i, f in enumerate(["Q8_0", "Q4_0"])}
     return inv, TensorStore(srcs)
-
-
-def test_patterns_are_anchored():
-    p = tensor_pattern("blk.1.attn_q.weight")
-    assert re.search(p, "blk.1.attn_q.weight")
-    assert not re.search(p, "blk.11.attn_q.weight")
-    assert not re.search(p, "blk.1.attn_q.weight.extra")
-
-
-def test_tensor_type_file_covers_every_tensor():
-    inv = build_inventory(TINY)
-    a = {g.gene_id: ("Q4_0" if g.kind == "mlp" else "Q8_0") for g in inv.genes}
-    lines = tensor_type_file(inv, a).strip().splitlines()
-    assert len(lines) == sum(len(g.tensors) for g in inv.genes)
-    assert r"^blk\.10\.ffn_down\.weight$=q4_0" in lines
 
 
 def test_assemble_and_verify_mixed(store, tmp_path):

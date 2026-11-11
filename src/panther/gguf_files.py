@@ -1,23 +1,27 @@
-"""Assemble a mixed-precision GGUF from per-format source files (the "tensor store").
-
-Each source is the same model quantized uniformly to one format with llama-quantize
-(`--pure --imatrix ... --token-embedding-type F --output-tensor-type F`). With explicit per-tensor
-types, llama.cpp quantizes every tensor independently, so copying a tensor's bytes from the source of
-its assigned format gives the same result as quantizing the mixed file directly, in seconds instead of
-minutes.
-"""
+"""Build a mixed GGUF by copying tensors from per-type quantized copies, and check it."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from pathlib import Path
 import hashlib
 import json
-from dataclasses import dataclass
-from pathlib import Path
+import re
 
 import gguf
 
-from panther.gguftools.patterns import tensor_assignment
-from panther.models.inventory import Inventory
+from panther.model import Inventory
+
+
+def tensor_assignment(inv: Inventory, assignment: dict[str, str]) -> dict[str, str]:
+    """Expand gene_id -> format into tensor name -> format."""
+    out: dict[str, str] = {}
+    for g in inv.genes:
+        fmt = assignment[g.gene_id]
+        for t in g.tensors:
+            out[t.name] = fmt
+    return out
+
 
 ASSIGNMENT_KEY = "panther.assignment_sha256"
 
@@ -98,3 +102,27 @@ def assemble(
         writer.write_tensor_data(src.data, tensor_endianess=base.endianess)
     writer.close()
     return out_path
+
+
+@dataclass
+class VerifyReport:
+    path: Path
+    mismatches: list[tuple[str, str, str]] = field(default_factory=list)  # name, expected, actual
+    missing: list[str] = field(default_factory=list)
+    file_bytes: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return not self.mismatches and not self.missing
+
+
+def verify(inv: Inventory, assignment: dict[str, str], path: Path) -> VerifyReport:
+    reader = gguf.GGUFReader(path)
+    actual = {t.name: t.tensor_type.name for t in reader.tensors}
+    report = VerifyReport(path=Path(path), file_bytes=Path(path).stat().st_size)
+    for name, fmt in tensor_assignment(inv, assignment).items():
+        if name not in actual:
+            report.missing.append(name)
+        elif actual[name] != fmt:
+            report.mismatches.append((name, fmt, actual[name]))
+    return report

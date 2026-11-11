@@ -17,7 +17,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 W="${PANTHER_WORK:-/s3/panther/work}"
 P="$W/data/rewrite/chains"; mkdir -p "$P"
-R="/opt/venv/bin/python scripts/server/rewrite.py"
+R="/opt/venv/bin/python scripts/server/pipeline.py"
 line="$(grep -E "^  $B: " "$ROOT/configs/search.yaml")" || { echo "budget $B not in configs/search.yaml" >&2; exit 1; }
 list() { echo "$line" | sed -E "s/.*$1: \[([^]]*)\].*/\1/" | tr -d ' ' | tr ',' ' '; }
 short() { echo "$1" | sed -E 's/Qwen2\.5-([0-9.]+B).*/\1/' | tr 'A-Z' 'a-z'; }

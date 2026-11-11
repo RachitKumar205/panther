@@ -11,7 +11,7 @@ PY="${PANTHER_PY:?run inside the Panther image}"
 
 read -r REPO REV < <("$PY" - "$MODEL" <<'EOF'
 import sys
-from panther.models.inventory import load_registry
+from panther.model import load_registry
 m = next(m for m in load_registry()["models"] if m["name"] == sys.argv[1])
 print(m["repo"], m["revision"])
 EOF

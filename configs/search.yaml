@@ -1,55 +1,26 @@
-# Search settings for the rewrite (see TODO.md). One file: budgets, contests, groups, formats, runtime.
-# Byte sizes always come from gguf-py; nothing here restates them.
+# Settings for the pipeline (docs/STANDARD.md). Byte sizes always come from gguf-py; nothing here restates them.
 
-# --- Budgets -------------------------------------------------------------------------------------------
-# Total RAM on the Pi (weights + KV cache + runtime overhead), GiB, at `context_tokens`. The solver fills each.
-budgets_gib: [1, 3, 5, 7]
-active_budgets: [7, 1]       # D48: searched now, in priority order; the others wait
+# RAM model: total RAM on the Pi = weights + KV cache + runtime overhead, at `context_tokens`.
 context_tokens: 4096
-kv_cache_type: Q8_0          # in the search later (TODO.md step 5.3); Q8_0 is the default for planning
-overhead_gib: 0.40           # PLACEHOLDER: not measured. Measure on the Pi first (TODO.md step 0.2)
+kv_cache_type: Q8_0
+overhead_gib: 0.40            # placeholder until the Pi measures it
 
-# A model is searched only if it lands in the range where mixing pays off. Above `search_max_bpw` it is
-# near lossless: it is scored as the largest uniform format that fits, no search. Below `min_bpw` it is
-# not worth running.
-search_max_bpw: 6.0
-min_bpw: 1.5
-
-# Contests per budget (bits/weight available, from scripts/budget_table.py with the settings above).
-# "searched" get the full pipeline; "reference" are uniform files scored for comparison only.
+# Budgets: which models are searched, and which are compared as uniform Q6_K references (accuracy only).
 contests:
-  1: {searched: [Qwen2.5-1.5B-Instruct], reference: []}                           # 1.5B ~3.0 bpw; 3B does not fit
-  3: {searched: [Qwen2.5-7B-Instruct], reference: [Qwen2.5-3B-Instruct]}          # 7B ~2.8; 3B ~7.0 (uniform Q6_K)
-  5: {searched: [Qwen2.5-14B-Instruct, Qwen2.5-7B-Instruct], reference: []}       # 14B ~2.4; 7B ~5.1
-  7: {searched: [Qwen2.5-14B-Instruct, Qwen2.5-32B-Instruct], reference: [Qwen2.5-7B-Instruct]}  # 14B ~3.6; 32B ~1.6; 7B ~7.3 (uniform Q6_K)
+  1: {searched: [Qwen2.5-1.5B-Instruct], reference: []}
+  3: {searched: [Qwen2.5-7B-Instruct], reference: [Qwen2.5-3B-Instruct]}
+  5: {searched: [Qwen2.5-14B-Instruct, Qwen2.5-7B-Instruct], reference: []}
+  7: {searched: [Qwen2.5-14B-Instruct, Qwen2.5-32B-Instruct], reference: [Qwen2.5-7B-Instruct]}
+active_budgets: [7, 1]        # only for commands run without a budget argument
 
-# --- KL budget (D45) ----------------------------------------------------------------------------------
-sensitivity_granularity: block   # measured per block (attn / mlp per layer, embd, head); allocation per matrix
-sensitivity_shared_across_budgets: true
-sensitivity_probe_up_bpw: 3.0    # D47: probe = highest menu format at most this far above the base
-remeasure_rounds: 2              # D48: probe + 2 rounds (14B test: 1 round ~11% off optimum, 2 rounds ~2.5%)
-remeasure_neighbours: 1
-top_k: 3
-cross_model_references: accuracy_only
-
-# --- Groups ------------------------------------------------------------------------------------------
-# One format per matrix: q, k, v, o, gate, up, down per layer, plus embedding and output head
-# (one combined group for tied models).
-group_granularity: matrix
-
-# --- Formats -----------------------------------------------------------------------------------------
-# Dominated in the PoC (beaten on both size and quality): Q3_K, Q4_0, IQ4_NL. Dropped.
+# Quantization types. A model's list for a budget is those from 1.5 bits/weight below to 2.5 above the average the
+# budget allows. Types that need importance-matrix data are never used where there is none (token embedding; the
+# output layer unless configs/models.yaml sets imatrix_process_output).
 formats: [IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, Q4_K, Q5_K, Q6_K, Q8_0]
-
-# Need importance-matrix data, so not allowed for the token embedding (a lookup, never seen by
-# llama-imatrix). IQ1_M is listed conservatively: verify against ggml_quantize_requires_imatrix and
-# quantize_iq1_m at the pinned commit (TODO.md step 2.1).
 requires_imatrix: [IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS]
 
-# Output head gets imatrix data via `llama-imatrix --process-output`, so it may use every format.
-# Tied embedding/head (1.5B, 3B) is treated as an embedding (conservative).
-imatrix_flags: [--process-output]
-
-# Fast repacked kernels on the Pi's Cortex-A76 at the pinned commit (re-check when the commit changes).
-# Speed per format is measured on the Pi and becomes a constraint (TODO.md step 5.4).
-repacked_on_a76: [Q4_K, Q5_K, Q6_K, Q8_0]
+# Part costs: starting type = the type closest to the budget's average; probe = the highest type at most this many
+# bits/weight above it; then this many rounds measuring the types the solver uses and their neighbours.
+sensitivity_probe_up_bpw: 3.0
+remeasure_rounds: 2
+remeasure_neighbours: 1

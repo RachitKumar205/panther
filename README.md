@@ -1,57 +1,30 @@
 # Panther
 
-Find the best model, and its best mixed-precision quantization, that fits a RAM budget on an 8 GB
-Raspberry Pi 5. See [PLAN.md](PLAN.md).
+For a RAM budget on an 8 GB Raspberry Pi 5, find the Qwen2.5 model and the quantization type for each of its weight
+matrices that gives the best answers. How it works, with every number: [docs/STANDARD.md](docs/STANDARD.md).
+Decisions that stand: [docs/DECISIONS.md](docs/DECISIONS.md). Server setup and rules:
+[deploy/server/README.md](deploy/server/README.md).
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `configs/` | Pinned model revisions and llama.cpp commit, format menu, budgets |
-| `src/panther/models` | Model geometry, tensor/gene inventory, divisibility checks |
-| `src/panther/costs` | Exact format byte sizes (from gguf-py) and the RAM price-tag model |
-| `src/panther/gguftools` | Anchored `--tensor-type` files, mixed-GGUF assembly from a per-format tensor store, type read-back |
-| `src/panther/search` | Allocation problem, CP-SAT solver with top-k shortlist, greedy and random baselines |
-| `src/panther/stats` | Pre-registered decision rule (paired bootstrap, Holm) |
-| `scripts/ram_fit_table.py` | Writes `docs/ram_fit_table.md` |
-| `scripts/server/` | Server jobs (run inside the container), e.g. tensor-store build |
-| `deploy/server/` | Container image, rootless run wrapper, root host-setup and uninstall for the server ([details](deploy/server/README.md)) |
-| `docs/PIPELINE.md` | How the whole method works, stage by stage, with current status and numbers |
-| `docs/DECISIONS.md` | Every decision with alternatives and reasons; steps are logged here before they run |
+| `configs/` | Pinned model revisions and llama.cpp commit, model shapes, budgets and quantization types (`search.yaml`) |
+| `src/panther/model.py` | Layers, parts and matrices of a model; quantization types and their byte sizes; the RAM model |
+| `src/panther/gguf_files.py` | Build a mixed GGUF by copying tensors from per-type quantized copies; check every tensor's type |
+| `src/panther/solver.py` | One type per matrix under a RAM budget (CP-SAT), top-k distinct solutions that fill the budget |
+| `src/panther/evaluate.py` | KL, perplexity, benchmarks and GSM8K with llama.cpp on the GPU; output parsing; run records |
+| `src/panther/stats.py` | Paired bootstrap comparison of two configurations |
+| `scripts/server/pipeline.py` | The pipeline steps (store, refs, error, sens, list, test, pick, bundle) |
+| `scripts/server/` | Model download, quantized copies (llama-quantize) and their check |
+| `deploy/server/` | Container image, job runner, `run-budget.sh` (one command per budget), host setup/uninstall |
+| `pi/` | Pi setup, the Pi check (`panther_pi.py`), copying bundles to the Pi (`fetch_bundle.sh`, `relay.sh`) |
 
-## Local (dev machine)
-
-```bash
-uv sync
-uv run pytest
-uv run python scripts/ram_fit_table.py
-```
-
-## Server (the server)
-
-Everything runs in one rootless Podman image (CUDA 12.9 UBI9 base, llama.cpp CPU + CUDA builds at the
-pinned commit, Python envs from `uv.lock`). Nothing is installed on the host. All of Panther's files,
-images and containers live under `/s3/panther`.
+## Run
 
 ```bash
-# once, as root: creates /s3/panther, SELinux label equivalence for container storage, linger for svcuser.
-# Every change is logged with its undo in /s3/panther/HOST_CHANGES.tsv.
-bash host-setup.sh
-
-deploy/server/push.sh                                     # from the Mac: rsync code to /s3/panther/work/repo
-/s3/panther/work/repo/deploy/server/panther.sh build      # on the server, as svcuser
-/s3/panther/work/repo/deploy/server/panther.sh smoke
-/s3/panther/work/repo/deploy/server/panther.sh job fetch-1.5b scripts/server/fetch_model.sh Qwen2.5-1.5B-Instruct
-/s3/panther/work/repo/deploy/server/panther.sh gpujob store-1.5b \
-  scripts/server/build_tensor_store.sh Qwen2.5-1.5B-Instruct /work/data/splits/calibration.txt
-
-# remove everything, as root (asks before deleting /s3/panther)
-bash /s3/panther/work/repo/deploy/server/uninstall.sh
+uv sync && uv run pytest                    # Mac: tests
+deploy/server/push.sh                       # Mac: copy the code to the server
+deploy/server/run-budget.sh 7               # server: the whole 7 GiB budget, unattended, safe to rerun
+pi/relay.sh 7 14b                           # Mac: when 14B's 7 GiB winner is ready, check it on the Pi
 ```
-
-GPU jobs (`gpujob`, `gpurun`) get the NVIDIA devices with SELinux labelling off and no network; CPU jobs
-(`job`, `run`) are fully confined and have the network, so downloads happen there first.
-Jobs run at lower CPU/IO priority, capped at 20 CPUs and 64 GB (`PANTHER_CPUS`, `PANTHER_MEM`), and
-refuse to start unless GitLab returns 200.
-
-Not built yet: data splits, quality pipeline (KL / perplexity / tasks), sensitivity, Pi driver and agent.

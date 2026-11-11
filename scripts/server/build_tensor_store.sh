@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the per-format tensor store for one model (PLAN.md §6, Stage 1). Runs inside the Panther image:
+# Build the per-format tensor store for one model . Runs inside the Panther image:
 #
 #   deploy/server/panther.sh gpujob store-1.5b scripts/server/build_tensor_store.sh Qwen2.5-1.5B-Instruct <calibration.txt>
 #
@@ -8,7 +8,7 @@
 # Steps (weights fetched beforehand by fetch_model.sh): convert to BF16 GGUF -> importance matrix on the
 # calibration split -> one uniform GGUF per candidate format, with --pure and explicit embedding and
 # output types so every searched tensor holds exactly that format. Mixed files are then assembled with
-# panther.gguftools.assemble. Each step is skipped if its output already exists.
+# panther.gguf_files. Each step is skipped if its output already exists.
 set -euo pipefail
 
 MODEL="$1"
@@ -26,7 +26,7 @@ timed() { local step="$1" t0=$SECONDS; shift; "$@"; echo "$step $((SECONDS - t0)
 
 read -r REPO REV < <("$PY" - "$MODEL" <<'EOF'
 import sys
-from panther.models.inventory import load_registry
+from panther.model import load_registry
 m = next(m for m in load_registry()["models"] if m["name"] == sys.argv[1])
 print(m["repo"], m["revision"])
 EOF
@@ -47,7 +47,7 @@ fi
 
 IMAT="$OUT/$MODEL.imatrix.gguf"
 if [ ! -f "$IMAT" ]; then
-  PO="$("$PY" -c "import sys; from panther.costs.formats import head_has_imatrix; print('--process-output' if head_has_imatrix(sys.argv[1]) else '')" "$MODEL")"
+  PO="$("$PY" -c "import sys; from panther.model import head_has_imatrix; print('--process-output' if head_has_imatrix(sys.argv[1]) else '')" "$MODEL")"
   timed imatrix "$BIN/llama-imatrix" -m "$BF16" -f "$CALIB" -o "$IMAT.part.gguf" -c 512 -ngl 99 -t "$THREADS" $PO
   mv "$IMAT.part.gguf" "$IMAT"
 fi
@@ -62,8 +62,7 @@ declare -A FTYPE=(
 # formats that require it (configs/formats.yaml) put a placeholder there; the search never uses it.
 PLAN=$("$PY" - "$MODEL" <<'EOF'
 import sys
-from panther.costs.formats import candidate_formats, source_assignment
-from panther.models.inventory import build_inventory, load_geometry
+from panther.model import build_inventory, candidate_formats, load_geometry, source_assignment
 inv = build_inventory(load_geometry(sys.argv[1]))
 embd = next(g.gene_id for g in inv.genes if g.kind in ("embd", "embd_head"))
 head = next((g.gene_id for g in inv.genes if g.kind == "head"), embd)  # tied models: the same gene

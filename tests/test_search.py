@@ -2,10 +2,8 @@ import itertools
 
 import pytest
 
-from panther.costs.ram import GIB
-from panther.models.inventory import ModelGeometry, build_inventory, load_geometry
-from panther.search.problem import Problem, SpeedModel
-from panther.search.solver import solve_top_k
+from panther.model import GIB, ModelGeometry, build_inventory, load_geometry
+from panther.solver import Problem, solve_top_k
 
 FMTS = ["Q2_K", "Q3_K", "Q4_K"]
 BASE_PEN = {"Q2_K": 1.0, "Q3_K": 0.3, "Q4_K": 0.1}
@@ -64,19 +62,6 @@ def test_top_k_distinct_and_ordered():
     assert len({tuple(sorted(s.assignment.items())) for s in sols}) == 5
     pens = [s.penalty for s in sols]
     assert pens == sorted(pens)
-
-
-def test_speed_floor_binds():
-    inv = build_inventory(SMALL)
-    spb = {"Q2_K": 1e-9, "Q3_K": 3e-9, "Q4_K": 3e-9}  # Q3_K/Q4_K slow per byte
-    p0 = _problem(inv, 100.0, speed=SpeedModel(0.0, spb))
-    fast = solve_top_k(p0, k=1)[0]
-    assert set(fast.assignment.values()) == {"Q4_K"}  # no floor: best quality
-    secs = p0.decode_seconds({g: "Q2_K" for g in p0.formats})
-    p1 = _problem(inv, 100.0, speed=SpeedModel(0.0, spb), s_min=1.0 / (secs * 1.5))
-    sol = solve_top_k(p1, k=1)[0]
-    assert p1.feasible(sol.assignment)
-    assert p1.decode_seconds(sol.assignment) <= secs * 1.5 + 1e-12
 
 
 def test_fill_window_and_distance():

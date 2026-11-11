@@ -6,14 +6,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from panther.quality.parse import (
+from panther.evaluate import (
     ParseError,
     parse_kl,
     parse_ppl_type1,
     parse_type_counts,
     scored_tokens_per_chunk,
 )
-from panther.stats.decision import Evaluation
+from panther.stats import Evaluation
 
 FIX = Path(__file__).parent / "fixtures" / "llama"
 

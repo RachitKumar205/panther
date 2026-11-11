@@ -1,13 +1,8 @@
-"""Raspberry Pi 5 measurement queue for the Panther proof of concept (docs/PIPELINE.md, Phase E).
+"""Raspberry Pi 5 check of a Panther bundle: sha256, one load, peak RAM against the budget, speed.
 
-Standard library only. Runs as an ordinary user. Uses llama.cpp built on the Pi at the pinned commit.
+Standard library only; runs as an ordinary user with llama.cpp built on the Pi (pi/setup.sh).
 
-    python3 pi/panther_pi.py run     --bundle ~/panther-pi/bundle --llama ~/panther-pi/llama.cpp
-    python3 pi/panther_pi.py run --quick   # ~15 min: recommended file only, RAM + one speed measurement (D44)
-    python3 pi/panther_pi.py analyze --bundle ~/panther-pi/bundle
-
-Results go to <bundle>/results/: runs.jsonl (one line per measured run), log files, report.md, report.json.
-The queue is resumable: runs already in runs.jsonl are skipped.
+    python3 pi/panther_pi.py --bundle ~/panther-pi/budget-7-14b
 """
 
 from __future__ import annotations
@@ -34,9 +29,7 @@ COOL_WAIT_S = 300
 PORT = 8090
 
 # Workloads (PLAN.md §9): prompt tokens / generated tokens.
-W_SHORT = (128, 32)
 W_REF = (256, 64)
-W_GEN = [(128, 32), (1024, 128)]
 
 
 # --- small helpers -----------------------------------------------------------------------------------------
@@ -310,25 +303,6 @@ class Queue:
                  f"prefill {mean([r['prefill_tps'] for r in meas]):.2f} t/s, peak RAM {rec['peak_ram_gib']:.3f} GiB "
                  f"(predicted {f['predicted_ram_gib']:.3f}), {'valid' if rec['valid'] else 'INVALID: ' + ', '.join(rec['invalid_reasons'])}")
 
-    def agreement(self, name: str, threads: int) -> None:
-        key = f"E6:{name}:t{threads}"
-        if key in self.done:
-            return
-        self.cool_down()
-        cmd = [str(self.llama / "build/bin/llama-perplexity"), "-m", str(self.bundle / name), "-f",
-               str(self.bundle / self.manifest["agreement_text"]), "-c", "2048", "-b", "2048", "-t", str(threads)]
-        out = subprocess.run(cmd, capture_output=True, text=True)
-        text = out.stdout + out.stderr
-        (self.out / f"agreement-{Path(name).stem}.log").write_text(text)
-        ppl = parse_final_ppl(text)
-        ref = self.manifest["files"][name]["server_cpu_ppl_agreement"]
-        rel = None if ppl is None else abs(ppl - ref) / ref
-        self.record({"run_key": key, "step": "E6", "file": name, "threads": threads, "pi_ppl": ppl,
-                     "server_cpu_ppl": ref, "rel_diff": rel, "pass": rel is not None and rel <= 0.005})
-        diff = "n/a" if rel is None else "%.3f%%" % (100 * rel)
-        self.log(f"E6 {name}: Pi PPL {ppl} vs server CPU {ref:.4f} ({diff})")
-
-
 def fmt(x: float | None, spec: str) -> str:
     """Format a number for the report; missing or NaN values print as n/a instead of crashing."""
     return "n/a" if x is None or x != x else format(x, spec)
@@ -351,16 +325,6 @@ def parse_type_counts(text: str) -> dict[str, int]:
     return out
 
 
-def parse_final_ppl(text: str) -> float | None:
-    for line in text.splitlines():
-        if "Final estimate: PPL =" in line:
-            try:
-                return float(line.split("PPL =", 1)[1].split()[0])
-            except (IndexError, ValueError):
-                return None
-    return None
-
-
 def validity(rec: dict) -> tuple[bool, list[str]]:
     reasons = []
     r_max = rec.get("r_max_gib", R_MAX_GIB)
@@ -380,155 +344,43 @@ def validity(rec: dict) -> tuple[bool, list[str]]:
     return (not reasons), reasons
 
 
-def fallback_file(manifest: dict) -> str | None:
-    """The other model's file the server verdict prefers (its within-model comparison), if any."""
-    rec = manifest["files"][manifest["recommended_file"]]
-    comps = manifest["verdict"]["comparisons"]
-    others = {f["role"]: n for n, f in manifest["files"].items() if f["model"] != rec["model"]}
-    if not others:
-        return None
-    size = next(iter(others.values())).split("-")[1].upper()  # qwen2.5-7b-poc-... -> 7B
-    within = comps.get(f"{size} winner vs uniform", {})
-    role = "uniform" if (within.get("winner") or "").endswith(":uniform") else "winner"
-    return others.get(role) or next(iter(others.values()))
-
-
-def cmd_quick(a: argparse.Namespace) -> int:
-    """D44: the recommended file only (fallback if it is invalid): sha256, one load, W_ref 1 warm-up + 2."""
+def cmd_check(a: argparse.Namespace) -> int:
+    """Every file in the bundle: sha256, one load, peak RAM vs the budget, speed (256-token prompt, 64 out,
+    1 warm-up + 2 measured, 4 threads). Writes results/report.md."""
     q = Queue(a.bundle, a.llama)
-    rec = q.manifest["recommended_file"]
-    order = [rec] + [f for f in [fallback_file(q.manifest)] if f]
-    q.log(f"quick check start: {rec} (fallback {order[1] if len(order) > 1 else 'none'})")
-    for name in order:
-        if not (a.bundle / name).exists():
-            q.log(f"Q {name}: not copied; run pi/fetch_bundle.sh PI_HOST (full) to get it")
-            break
+    for name in q.manifest["files"]:
         q.verify_bundle([name])
         try:
             q.measure("Q", name, 4, W_REF, warmup=1, reps=2)
         except (RuntimeError, TimeoutError, OSError) as e:
-            q.log(f"Q {name}: FAILED ({e}); see results/server-Q-*.log")
-            continue
-        last = [json.loads(x) for x in q.runs_path.read_text().splitlines()
-                if json.loads(x)["run_key"] == f"Q:{name}:t4:{W_REF[0]}/{W_REF[1]}"]
-        if last and last[-1]["valid"]:
-            q.log(f"quick check done: {name} is valid on this Pi")
-            break
-    return analyze(a.bundle)
-
-
-def cmd_run(a: argparse.Namespace) -> int:
-    if a.quick:
-        return cmd_quick(a)
-    q = Queue(a.bundle, a.llama)
-    deadline = time.monotonic() + a.hours * 3600
-    files = q.manifest["files"]
-    winners = [n for n, f in files.items() if f["role"] == "winner"]
-    q.log(f"queue start: {len(files)} files, budget {a.hours} h")
-    q.verify_bundle()  # E2
-    for name in files:  # E3: loads, generates, RAM vs prediction
-        q.measure("E3", name, 4, W_SHORT, warmup=0, reps=1)
-    best = {}
-    for name in winners:  # E4: thread sweep
-        for t in (2, 3, 4):
-            if time.monotonic() > deadline:
-                break
-            q.measure("E4", name, t, W_SHORT, warmup=1, reps=2)
-        best[name] = best_threads(q, name)
-    t_best = max(set(best.values()), key=list(best.values()).count) if best else 4
-    q.log(f"E4 best threads: {best} -> using {t_best}")
-    for name in files:  # E5: confirmation
-        if time.monotonic() < deadline:
-            q.measure("E5", name, t_best, W_REF, warmup=1, reps=3)
-    for name in winners:  # E6: agreement with the server CPU build
-        if time.monotonic() < deadline:
-            q.agreement(name, t_best)
-    rec = q.manifest["recommended_file"]
-    for w in W_GEN:  # E7: generalisation, recommended file only
-        if time.monotonic() < deadline:
-            q.measure("E7", rec, t_best, w, warmup=1, reps=3)
-    q.log("queue done" if time.monotonic() < deadline else "queue stopped: time budget used")
-    return analyze(a.bundle)
-
-
-def best_threads(q: Queue, name: str) -> int:
-    best, best_tps = 4, -1.0
+            q.log(f"{name}: FAILED ({e}); see results/server-Q-*.log")
+    lines = ["| File | Peak RAM GiB (predicted) | Budget GiB | Decode t/s | Prefill t/s | Overhead GiB | Valid |",
+             "|---|---|---|---|---|---|---|"]
     for line in q.runs_path.read_text().splitlines():
         r = json.loads(line)
-        if r.get("step") == "E4" and r.get("file") == name and r.get("valid"):
-            tps = mean([x["decode_tps"] for x in r["runs"] if not x["warmup"]])
-            if tps > best_tps:
-                best, best_tps = r["threads"], tps
-    return best
-
-
-def analyze(bundle: Path) -> int:
-    manifest = json.loads((bundle / "manifest.json").read_text())
-    out = bundle / "results"
-    recs = [json.loads(x) for x in (out / "runs.jsonl").read_text().splitlines()] if (out / "runs.jsonl").exists() else []
-    rows, ram_checks, agree = [], [], []
-    for r in recs:
-        if r.get("step") in ("E3", "E5", "E7", "Q") and "runs" in r:
-            meas = [x for x in r["runs"] if not x["warmup"]] or r["runs"]
-            dec = [x["decode_tps"] for x in meas if x["decode_tps"]]
-            rows.append({"step": r["step"], "file": r["file"], "threads": r["threads"], "workload": r["workload"],
-                         "prefill_tps": mean([x["prefill_tps"] for x in meas]), "decode_tps": mean(dec),
-                         "decode_range": [min(dec), max(dec)] if dec else None,
-                         "itl_p50_ms": mean([x["itl_p50_ms"] for x in meas]),
-                         "itl_p95_ms": mean([x["itl_p95_ms"] for x in meas]),
-                         "e2e_s": mean([x["e2e_s"] for x in meas]), "peak_ram_gib": r["peak_ram_gib"],
-                         "predicted_ram_gib": r["predicted_ram_gib"], "ram_error_pct": r["ram_error_pct"],
-                         "measured_overhead_gib": r["measured_overhead_gib"], "valid": r["valid"],
-                         "invalid_reasons": r["invalid_reasons"]})
-            if r["ram_error_pct"] is not None:
-                ram_checks.append(abs(r["ram_error_pct"]) <= 2.0)
-        if r.get("step") == "E6":
-            agree.append(r)
-    rec_file = manifest["recommended_file"]
-    rec_rows = [x for x in rows if x["file"] == rec_file and x["step"] in ("E5", "Q")]
-    rec_ok = bool(rec_rows) and all(x["valid"] and x["peak_ram_gib"] <= manifest.get("r_max_gib", R_MAX_GIB)
-                                    for x in rec_rows)
-    report = {"recommended_file": rec_file, "recommended_reason": manifest["recommended_reason"],
-              "recommended_confirmed_on_pi": rec_ok, "ram_prediction_within_2pct": all(ram_checks) if ram_checks else None,
-              "rows": rows, "agreement": agree, "verdict": manifest["verdict"]}
-    (out / "report.json").write_text(json.dumps(report, indent=1))
-    lines = ["# Panther proof of concept: Raspberry Pi 5 results", "",
-             f"Recommended: **{rec_file}** ({manifest['recommended_reason']}); confirmed on the Pi: "
-             f"**{'yes' if rec_ok else 'no'}**.", "",
-             "| Step | File | Threads | Prompt/gen | Prefill t/s | Decode t/s (range) | ITL p50/p95 ms | E2E s | "
-             "Peak RAM GiB (pred.) | RAM err % | Valid |", "|---|---|---|---|---|---|---|---|---|---|---|"]
-    for x in rows:
-        rng = f" ({x['decode_range'][0]:.2f}–{x['decode_range'][1]:.2f})" if x["decode_range"] else ""
-        lines.append(f"| {x['step']} | {x['file']} | {x['threads']} | {x['workload'][0]}/{x['workload'][1]} | "
-                     f"{fmt(x['prefill_tps'], '.2f')} | {fmt(x['decode_tps'], '.2f')}{rng} | "
-                     f"{fmt(x['itl_p50_ms'], '.0f')}/{fmt(x['itl_p95_ms'], '.0f')} | {fmt(x['e2e_s'], '.1f')} | "
-                     f"{fmt(x['peak_ram_gib'], '.3f')} ({fmt(x['predicted_ram_gib'], '.3f')}) | "
-                     f"{fmt(x['ram_error_pct'], '+.2f')} | {'yes' if x['valid'] else 'no: ' + '; '.join(x['invalid_reasons'])} |")
-    lines += ["", "## Agreement with the server CPU build (4,096-token text)", ""]
-    for g in agree:
-        diff = "n/a" if g["rel_diff"] is None else "%.3f%%" % (100 * g["rel_diff"])
-        verdict = "pass" if g["pass"] else "FAIL"
-        lines.append(f"- {g['file']}: Pi PPL {g['pi_ppl']}, server CPU {g['server_cpu_ppl']:.4f}, "
-                     f"difference {diff} ({verdict}, limit 0.5%)")
-    lines += ["", "## Server verdict (test subset)", "", "```", json.dumps(manifest["verdict"], indent=1), "```"]
-    (out / "report.md").write_text("\n".join(lines) + "\n")
-    print("\n".join(lines[:4 + len(rows) + 2]))
-    print(f"\nreport: {out / 'report.md'}")
+        if "runs" not in r:
+            continue
+        meas = [x for x in r["runs"] if not x["warmup"]] or r["runs"]
+        lines.append(f"| {r['file']} | {fmt(r['peak_ram_gib'], '.3f')} ({fmt(r['predicted_ram_gib'], '.3f')}) | "
+                     f"{q.r_max:.3f} | {fmt(mean([x['decode_tps'] for x in meas]), '.2f')} | "
+                     f"{fmt(mean([x['prefill_tps'] for x in meas]), '.2f')} | {fmt(r['measured_overhead_gib'], '.3f')} | "
+                     f"{'yes' if r['valid'] else 'no: ' + '; '.join(r['invalid_reasons'])} |")
+    (q.out / "report.md").write_text("\n".join(lines) + "\n")
+    print("\n".join(lines))
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["run", "analyze"])
+    ap.add_argument("cmd", nargs="?", default="run")  # "run" (older relay calls also pass --quick)
+    ap.add_argument("--quick", action="store_true")
     ap.add_argument("--bundle", type=Path, default=Path.home() / "panther-pi" / "bundle")
     ap.add_argument("--llama", type=Path, default=Path.home() / "panther-pi" / "llama.cpp")
-    ap.add_argument("--hours", type=float, default=10.0)
-    ap.add_argument("--quick", action="store_true", help="recommended file only, ~15 min (D44)")
     a = ap.parse_args(argv)
     a.bundle, a.llama = a.bundle.expanduser(), a.llama.expanduser()
     if os.geteuid() == 0:
         sys.exit("run this as an ordinary user, not root")
-    return cmd_run(a) if a.cmd == "run" else analyze(a.bundle)
+    return cmd_check(a)
 
 
 if __name__ == "__main__":
