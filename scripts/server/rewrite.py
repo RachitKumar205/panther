@@ -709,7 +709,59 @@ def cmd_pick(budget: int) -> int:
     return 0
 
 
+def cmd_pick_model(budget: int, model: str) -> int:
+    """One model's winner as soon as its own tests are done: best mean accuracy (ties: lower KL)."""
+    items = json.loads(list_path(budget, model).read_text())
+    rows = {}
+    for name, it in items.items():
+        label = test_label(budget, name, it["assignment"])
+        ev = evaluation(model, label, it["ram_gib"], name)
+        k = poc.find(poc.records(model), label, reference="selection")["metrics"]
+        rows[name] = {"ram_gib": it["ram_gib"], "kl": k["kl_mean"], "mean_accuracy_pct": 100 * ev.mean_accuracy(),
+                      "ppl": ev.perplexity(), "per_task_pct": {t: 100 * float(v.mean()) for t, v in ev.task_correct.items()}}
+    win = max(rows, key=lambda n: (round(rows[n]["mean_accuracy_pct"], 2), -rows[n]["kl"]))
+    for n, r in sorted(rows.items(), key=lambda kv: -kv[1]["mean_accuracy_pct"]):
+        print(f"{budget} GiB {n:28s} RAM {r['ram_gib']:.3f} | KL {r['kl']:.4f} | acc {r['mean_accuracy_pct']:.2f} | "
+              f"PPL {r['ppl']:.3f} | " + " ".join(f"{t[:4]} {v:.1f}" for t, v in r["per_task_pct"].items())
+              + ("   <- winner" if n == win else ""), flush=True)
+    out(f"budget-{budget}", f"winner-{model}.json").write_text(json.dumps({"winner": win, "rows": rows}, indent=1))
+    return 0
+
+
 # --- bundle for the Pi ---------------------------------------------------------------------------------------
+
+def cmd_bundle_model(budget: int, model: str) -> int:
+    """One model's winner as a Pi bundle (pi_bundle/budget-B-<size>), ready as soon as that model is picked."""
+    import hashlib
+    import shutil
+    name = json.loads(out(f"budget-{budget}", f"winner-{model}.json").read_text())["winner"]
+    a = json.loads(list_path(budget, model).read_text())[name]["assignment"]
+    short = model.split("-")[1].lower()
+    bundle = DATA / "pi_bundle" / f"budget-{budget}-{short}"
+    bundle.mkdir(parents=True, exist_ok=True)
+    poc.make_agreement_text("Qwen2.5-1.5B-Instruct")
+    shutil.copy(DATA / "splits/text/agreement.txt", bundle / "agreement.txt")
+    dst = bundle / f"qwen2.5-{short}-b{budget}-winner.gguf"
+    if not dst.exists():
+        build_file(model, a).rename(dst)
+    h = hashlib.sha256()
+    with open(dst, "rb") as f:
+        for c in iter(lambda: f.read(1 << 24), b""):
+            h.update(c)
+    r = estimate_ram(inv_of(model), a, CTX, OVERHEAD, KV_BPE)
+    files = {dst.name: {"model": model, "role": "winner", "list_name": name, "sha256": h.hexdigest(),
+                        "bytes": dst.stat().st_size, "predicted_ram_gib": r.total_gib,
+                        "predicted": {"weights": r.weights, "kv_cache": r.kv_cache, "overhead": r.overhead},
+                        "expected_type_counts": poc.type_counts(inv_of(model), a), "server_cpu_ppl_agreement": None}}
+    manifest = {"r_max_gib": float(budget) * (1 + WINDOW[1]), "context_tokens": CTX,
+                "kv_cache_type": CFG["kv_cache_type"], "overhead_gib_assumed": OVERHEAD, "files": files,
+                "agreement_text": "agreement.txt", "verdict": {"comparisons": {}}, "recommended_file": dst.name,
+                "recommended_reason": f"{model} winner at {budget} GiB"}
+    (bundle / "manifest.json").write_text(json.dumps(manifest, indent=1))
+    print(f"bundle ready: {bundle} ({dst.name}, predicted RAM {r.total_gib:.3f} GiB)", flush=True)
+    return 0
+
+
 
 def cmd_bundle(budget: int) -> int:
     """Each model's winner for the Pi, with a manifest for pi/panther_pi.py (recommended = best accuracy)."""
@@ -776,6 +828,8 @@ def main() -> int:
         return {"store": cmd_store, "refs": poc.cmd_refs, "error": cmd_error, "sens": cmd_sens}[cmd](args[0])
     if cmd in ("list", "test"):
         return {"list": cmd_list, "test": cmd_test}[cmd](int(args[0]), args[1])
+    if cmd in ("pick", "bundle") and len(args) == 2:
+        return {"pick": cmd_pick_model, "bundle": cmd_bundle_model}[cmd](int(args[0]), args[1])
     if cmd in ("pick", "bundle"):
         return {"pick": cmd_pick, "bundle": cmd_bundle}[cmd](int(args[0]))
     raise SystemExit(__doc__)

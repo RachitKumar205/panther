@@ -4,7 +4,7 @@
 #   deploy/server/run-budget.sh 7
 #
 # One lane per model, all in parallel. A searched model goes straight through:
-#   format files -> offline error -> references -> part costs -> solver list -> tests
+#   format files -> offline error -> references -> part costs -> solver list -> tests -> winner -> Pi bundle
 # without waiting for the other models. A reference model only needs its uniform Q6_K file, then its tests.
 # When every lane is done: pick the winners, bundle them for the Pi.
 # Idempotent: finished steps are skipped, a step already running is adopted, so rerunning it is always safe.
@@ -24,15 +24,18 @@ start() { running "$2" && { echo "lane $2 already running"; return; }
 lanes=""
 for m in $(list searched); do
   s="$(short "$m")"; c="b$B-$s"; lanes="$lanes $c"
+  running "$c" && { echo "lane $c already running"; continue; }  # never rewrite a running lane's steps
   printf "%s\n" "gpu rw-store-$s $R store $m" "gpu rw-err-$s $R error $m" "gpu rw-refs-$s $R refs $m" \
-    "gpu rw-sens-$s $R sens $m" "gpu rw-list$B-$s $R list $B $m" "gpu rw-test$B-$s $R test $B $m" > "$P/$c.steps"
+    "gpu rw-sens-$s $R sens $m" "gpu rw-list$B-$s $R list $B $m" "gpu rw-test$B-$s $R test $B $m" \
+    "gpu rw-pick$B-$s $R pick $B $m" "gpu rw-bundle$B-$s $R bundle $B $m" > "$P/$c.steps"
   start x "$c" "$HERE/chain.sh" "$c" "$P/$c.steps"
 done
 for m in $(list reference); do
   s="$(short "$m")"; c="b$B-ref-$s"; lanes="$lanes $c"
+  running "$c" && { echo "lane $c already running"; continue; }
   printf "%s\n" "gpu rw-store-$s $R store $m" "gpu rw-test$B-ref-$s $R test $B $m" > "$P/$c.steps"
   start x "$c" "$HERE/chain.sh" "$c" "$P/$c.steps"
 done
-printf "%s\n" "gpu rw-pick$B $R pick $B" "gpu rw-bundle$B $R bundle $B" > "$P/b$B.steps"
+running "b$B" || printf "%s\n" "gpu rw-pick$B $R pick $B" > "$P/b$B.steps"  # comparison across models
 start x "b$B" "$HERE/after-chains.sh" "${lanes# }" "b$B" "$P/b$B.steps"
 echo "budget $B: lanes${lanes}; then pick + bundle (chain b$B). Logs: $W/data/logs/chain-*.log"
