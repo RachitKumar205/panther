@@ -28,6 +28,7 @@ case "$cmd" in
     ssh_s "cd /s3/panther/work/data/logs && grep -E 'STOPPED|FAILED' progress-b$B.log 2>/dev/null | tail -n 3 | sed 's/^/!! /'; tail -n 12 progress-b$B.log 2>/dev/null; echo; for f in chain-b$B-*.log chain-b$B.log; do [ -f \$f ] && printf '%-20s %s\n' \"\${f#chain-}\" \"\$(tail -n 1 \$f | cut -c1-110)\"; done; true"
     tail -n 3 "$HOME/panther-logs/pi-budget-$B.log" 2>/dev/null || true ;;
   watch)  # a step table per model, refreshed every minute; stops (does not retry) if the server is unreachable
+    prev=""
     while :; do
       snap="$(ssh_s "cd /s3/panther/work/data/logs && for f in chain-b$B-*.log; do echo \"LANE \${f#chain-b$B-} \$(tail -n 1 \$f)\"; done; tail -n 300 progress-b$B.log")" ||
         { echo "server unreachable; re-run ./panther watch $B once the SSH session is back"; exit 1; }
@@ -50,6 +51,31 @@ case "$cmd" in
           when[key] = $1 }
         END { for (i = 1; i <= n; i++) { l = lanes[i]; mdl = toupper(l); sub(/^REF-/, "", mdl)
                 printf "%-8s %-17s %-12s %s\n", mdl, laneStep[l], prog[mdl], when[mdl] } }'
+      echo
+      echo "Copies to the Pi (server -> Mac, then Mac -> Pi):"
+      prev="$(python3 - "$B" "$prev" <<'PY'
+import json, glob, os, sys, time
+B, prev = sys.argv[1], dict(x.split("=") for x in sys.argv[2].split() if "=" in x)
+now, out = time.time(), []
+for man in sorted(glob.glob(os.path.expanduser(f"~/panther-bundle/budget-{B}-*/manifest.json"))):
+    d = os.path.dirname(man)
+    for name, f in json.load(open(man))["files"].items():
+        total, done = f["bytes"], os.path.join(d, name)
+        part = glob.glob(os.path.join(d, f".{name}.*"))
+        have = os.path.getsize(done) if os.path.exists(done) else (os.path.getsize(part[0]) if part else 0)
+        line = f"  {os.path.basename(d):14} {have/1e9:5.2f} / {total/1e9:.2f} GB  {100*have/total:3.0f}%"
+        if have >= total:
+            line += "  on the Mac"
+        elif name in prev:
+            t0, s0 = map(float, prev[name].split(","))
+            rate = (have - s0) / max(now - t0, 1)
+            line += f"  {rate/1e6:.1f} MB/s" + (f", ~{(total-have)/rate/60:.0f} min left" if rate > 0 else "")
+        print(line, file=sys.stderr)
+        out.append(f"{name}={now},{have}")
+print(" ".join(out))
+PY
+)"
+      for f in "$HOME"/panther-logs/pi-*.log; do [ -f "$f" ] && printf '  %-14s %s\n' "$(basename "$f" .log)" "$(tail -n 1 "$f" | sed -E 's/.*no such object: "panther-rw-bundle[0-9]+-([0-9a-z.]+)".*/waiting for the \1 bundle/' | cut -c1-90)"; done
       echo
       echo "Latest:"
       echo "$snap" | grep -v '^LANE ' | tail -n 6
