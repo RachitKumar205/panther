@@ -570,7 +570,14 @@ def penalties(model: str, table: dict[str, dict[str, float]] | None = None,
         def E(f: str) -> float:
             a = block_assignment(model, b, f)
             return sum(err[name[g]][a[g]] - err[name[g]][base_a[g]] for g in gs)
-        pts = sorted({(0.0, 0.0)} | {(E(f), v) for f, v in table.get(b, {}).items()})
+        # The start is (0, 0) by definition; a measured format with the same error as the start (the start type
+        # itself, re-measured) is noise around it, and two points at one x would make the slope infinite.
+        at: dict[float, list[float]] = {}
+        for f, v in table.get(b, {}).items():
+            x = E(f)
+            if abs(x) > 1e-12:
+                at.setdefault(x, []).append(v)
+        pts = sorted([(0.0, 0.0)] + [(x, float(np.mean(vs))) for x, vs in at.items()])
         xs, ys = np.array([x for x, _ in pts]), np.array([y for _, y in pts])
         def dkl(x: float) -> float:
             if len(xs) == 1:

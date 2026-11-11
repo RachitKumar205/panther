@@ -1,5 +1,6 @@
 """The pipeline's decisions that need no server: types per budget, the RAM window, the baseline, part costs."""
 
+import math
 import sys
 from pathlib import Path
 
@@ -56,6 +57,11 @@ def test_part_costs_reproduce_measurements_and_are_zero_at_the_start(budget):
     for b, row in table.items():  # a whole part moved to the probe costs exactly what was measured
         a = p.block_assignment(M15, b, probe)
         assert sum(pen[g][a[g]] for g in p.blocks(M15)[b]) == pytest.approx(row[probe])
+    # the start type re-measured (KL noise around 0) must not create a second point at the start: costs stay finite
+    table2 = {b: {**row, p.base_format(M15): 0.002} for b, row in table.items()}
+    pen2 = p.penalties(M15, table2, err)
+    assert all(math.isfinite(v) for d in pen2.values() for v in d.values())
+    assert all(pen2[g][start[g]] == 0 for g in pen2)
 
 
 def test_probe_file_matches_normal_assembly_and_llama_layout(tmp_path, monkeypatch):
