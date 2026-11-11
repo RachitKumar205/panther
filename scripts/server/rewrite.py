@@ -215,6 +215,34 @@ def fast_probe(model: str, a: dict[str, str]) -> Path:
     return dst
 
 
+def reflink_ok(model: str) -> bool:
+    """D50: reflink-copied probe files are used only if, for a test block, every tensor (type and bytes) matches a
+    normally assembled file. Checked once per model; the answer is stored."""
+    import gguf
+    flag = out(model, "reflink-check.json")
+    if flag.exists():
+        return json.loads(flag.read_text())["identical"]
+    b0 = sorted(blocks(model))[len(blocks(model)) // 2]
+    a = block_assignment(model, b0, probe_format(model))
+    try:
+        fast = fast_probe(model, a)
+        slow = out(model, "tmp", "reflink-check-slow.gguf")
+        assemble(inv_of(model), a, store(model), slow, base_format=base_format(model))
+        rf = {t.name: t for t in gguf.GGUFReader(fast).tensors}
+        rs = {t.name: t for t in gguf.GGUFReader(slow).tensors}
+        same = rf.keys() == rs.keys() and all(rf[n].tensor_type == rs[n].tensor_type and
+                                              np.array_equal(rf[n].data, rs[n].data) for n in rs)
+        fast.unlink()
+        slow.unlink()
+    except Exception as e:  # noqa: BLE001  (any failure means: build files the normal way)
+        print(f"reflink check failed: {e}", flush=True)
+        same = False
+    flag.write_text(json.dumps({"block": b0, "identical": bool(same)}))
+    print(f"{model}: reflink-copied probe files {'match' if same else 'DO NOT match; using normal assembly'}",
+          flush=True)
+    return bool(same)
+
+
 def blocks(model: str) -> dict[str, list[str]]:
     b: dict[str, list[str]] = {}
     for g in inv_of(model).genes:
@@ -319,7 +347,8 @@ def sens_label(model: str, block: str, fmt: str) -> str:
 
 def _sens_one(job: tuple[str, str, str]) -> None:
     model, block, fmt = job
-    path = fast_probe(model, block_assignment(model, None if block == "base" else block, fmt))
+    a = block_assignment(model, None if block == "base" else block, fmt)
+    path = fast_probe(model, a) if reflink_ok(model) else build_file(model, a)
     wait_for_gpu_memory(path.stat().st_size)
     try:
         poc.kl(model, path, "sensitivity", sens_label(model, block, fmt))
