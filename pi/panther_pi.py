@@ -120,11 +120,12 @@ class MemSampler(threading.Thread):
 # --- llama-server ------------------------------------------------------------------------------------------
 
 class Server:
-    def __init__(self, llama: Path, gguf: Path, threads: int, log: Path, port: int = PORT) -> None:
+    def __init__(self, llama: Path, gguf: Path, threads: int, log: Path, port: int = PORT,
+                 extra: tuple[str, ...] = (), ctx: int = CTX) -> None:
         self.url = f"http://127.0.0.1:{port}"
         self.cmd = [str(llama / "build" / "bin" / "llama-server"), "-m", str(gguf), "--host", "127.0.0.1",
-                    "--port", str(port), "-c", str(CTX), "-np", "1", "-t", str(threads), "--load-mode", "none",
-                    "--no-webui", "-lv", "4"]
+                    "--port", str(port), "-c", str(ctx), "-np", "1", "-t", str(threads), "--load-mode", "none",
+                    "--no-webui", "-lv", "4", *extra]
         self.log_path = log
         self.proc: subprocess.Popen | None = None
         self.load_seconds: float | None = None
@@ -227,6 +228,11 @@ class Queue:
                 r = json.loads(line)
                 self.done.add(r["run_key"])
         self.agreement_text = (bundle / self.manifest["agreement_text"]).read_text()
+        self.r_max = float(self.manifest.get("r_max_gib", R_MAX_GIB))
+        self.ctx = int(self.manifest.get("context_tokens", CTX))
+        kv = self.manifest.get("kv_cache_type", "F16").lower()
+        # A quantized V cache needs flash attention in llama.cpp.
+        self.server_extra = () if kv == "f16" else ("-ctk", kv, "-ctv", kv, "-fa", "on")
 
     def log(self, msg: str) -> None:
         line = f"{time.strftime('%H:%M:%S')} {msg}"
@@ -268,7 +274,7 @@ class Queue:
         temp_start = self.cool_down()
         logf = self.out / f"server-{step}-{Path(name).stem}-t{threads}.log"
         throttle_start = throttled()
-        with Server(self.llama, self.bundle / name, threads, logf) as srv:
+        with Server(self.llama, self.bundle / name, threads, logf, extra=self.server_extra, ctx=self.ctx) as srv:
             ids = srv.tokenize(self.agreement_text)
             prompt = ids[:workload[0]]
             sampler = MemSampler(srv.pid)
@@ -295,7 +301,7 @@ class Queue:
             "temp_start_c": temp_start, "temp_end_c": cpu_temp_c(),
             "throttled_start": throttle_start, "throttled_end": throttled(),
             "type_counts": parse_type_counts(logf.read_text(errors="replace")),
-            "expected_type_counts": f["expected_type_counts"],
+            "expected_type_counts": f["expected_type_counts"], "r_max_gib": self.r_max,
         }
         rec["valid"], rec["invalid_reasons"] = validity(rec)
         self.record(rec)
@@ -357,8 +363,9 @@ def parse_final_ppl(text: str) -> float | None:
 
 def validity(rec: dict) -> tuple[bool, list[str]]:
     reasons = []
-    if rec["peak_ram_gib"] > R_MAX_GIB:
-        reasons.append(f"peak RAM {rec['peak_ram_gib']:.3f} GiB > {R_MAX_GIB}")
+    r_max = rec.get("r_max_gib", R_MAX_GIB)
+    if rec["peak_ram_gib"] > r_max:
+        reasons.append(f"peak RAM {rec['peak_ram_gib']:.3f} GiB > {r_max}")
     if rec["min_mem_available_mib"] is not None and rec["min_mem_available_mib"] < MEM_FLOOR_MIB:
         reasons.append(f"MemAvailable fell to {rec['min_mem_available_mib']:.0f} MiB")
     if rec["temp_start_c"] is not None and rec["temp_start_c"] > TEMP_START_MAX_C:
@@ -479,7 +486,8 @@ def analyze(bundle: Path) -> int:
             agree.append(r)
     rec_file = manifest["recommended_file"]
     rec_rows = [x for x in rows if x["file"] == rec_file and x["step"] in ("E5", "Q")]
-    rec_ok = bool(rec_rows) and all(x["valid"] and x["peak_ram_gib"] <= R_MAX_GIB for x in rec_rows)
+    rec_ok = bool(rec_rows) and all(x["valid"] and x["peak_ram_gib"] <= manifest.get("r_max_gib", R_MAX_GIB)
+                                    for x in rec_rows)
     report = {"recommended_file": rec_file, "recommended_reason": manifest["recommended_reason"],
               "recommended_confirmed_on_pi": rec_ok, "ram_prediction_within_2pct": all(ram_checks) if ram_checks else None,
               "rows": rows, "agreement": agree, "verdict": manifest["verdict"]}

@@ -8,6 +8,7 @@ one sensitivity KL run per block. Runs in the GPU container; every step is resum
   rewrite.py sens    MODEL        # one KL run per block: the block moved from base to probe format
   rewrite.py contest BUDGET MODEL # solve top 3; references; selection KL for all; winner = lowest KL of top 3
   rewrite.py eval    BUDGET       # test-subset evaluation of winners and references, paired comparisons
+  rewrite.py bundle  BUDGET       # winners + best references as GGUF files and a manifest for the Pi
 
 Outputs: $PANTHER_DATA/rewrite/<model>/ and $PANTHER_DATA/rewrite/budget-<B>/; KL/task records in
 $PANTHER_DATA/results/<model>/ (labels rw:...).
@@ -619,6 +620,74 @@ def cmd_eval(budget: int) -> int:
     return 0
 
 
+# --- bundle for the Pi ---------------------------------------------------------------------------------------
+
+def cmd_bundle(budget: int) -> int:
+    """Winners of a budget (+ each model's best reference) as GGUF files and a manifest for pi/panther_pi.py."""
+    import hashlib
+    import shutil
+    ev = json.loads(out(f"budget-{budget}", "eval.json").read_text())
+    bundle = DATA / "pi_bundle" / f"budget-{budget}"
+    bundle.mkdir(parents=True, exist_ok=True)
+    poc.make_agreement_text("Qwen2.5-1.5B-Instruct")
+    shutil.copy(DATA / "splits/text/agreement.txt", bundle / "agreement.txt")
+    files = {}
+    for model in contests()[budget]["searched"]:
+        res = json.loads(out(f"budget-{budget}", model, "contest.json").read_text())
+        short = model.split("-")[1].lower()
+        refs = [n for n in res["rows"] if not n.startswith("top")]
+        best_ref = min(refs, key=lambda n: res["rows"][n]["kl"]) if refs else None
+        for role, name in (("winner", res["winner"]), ("reference", best_ref)):
+            if name is None:
+                continue
+            dst = bundle / f"qwen2.5-{short}-b{budget}-{role}.gguf"
+            if name == "preset":
+                src, a = Path(res["preset"]["path"]), None
+                if not dst.exists():
+                    shutil.copy(src, dst)
+                import gguf
+                tc: dict[str, int] = {}
+                for t in gguf.GGUFReader(dst).tensors:
+                    k = t.tensor_type.name.lower()
+                    tc[k] = tc.get(k, 0) + 1
+                ram = file_ram_gib(model, dst)
+                weights = dst.stat().st_size
+            else:
+                a = res["candidates"][name]["assignment"]
+                if not dst.exists():
+                    build_file(model, a).rename(dst)
+                tc = poc.type_counts(inv_of(model), a)
+                ram = ram_gib(model, a)
+                weights = estimate_ram(inv_of(model), a, CTX, OVERHEAD, KV_BPE).weights
+            h = hashlib.sha256()
+            with open(dst, "rb") as f:
+                for c in iter(lambda: f.read(1 << 24), b""):
+                    h.update(c)
+            kv = inv_of(model).geometry.kv_cache_bytes(CTX, KV_BPE)
+            files[dst.name] = {"model": model, "role": role, "contest_name": name, "sha256": h.hexdigest(),
+                               "bytes": dst.stat().st_size, "predicted_ram_gib": ram,
+                               "predicted": {"weights": weights, "kv_cache": kv, "overhead": int(OVERHEAD * GIB)},
+                               "expected_type_counts": dict(sorted(tc.items())), "server_cpu_ppl_agreement": None,
+                               "kl_selection": res["rows"][name]["kl"]}
+            print(f"{dst.name}: predicted RAM {ram:.3f} GiB", flush=True)
+    # Recommended: the winner with the best test-subset accuracy among models (smaller model if tied).
+    wins = [k for k in ev["configs"] if k.endswith(":winner")]
+    rec = max(wins, key=lambda k: ev["configs"][k]["mean_accuracy_pct"])
+    for k in wins:
+        c = ev["comparisons"].get(f"{rec} vs {k}") or ev["comparisons"].get(f"{k} vs {rec}")
+        if c and c["winner"] is None and inv_of(f"Qwen2.5-{k.split(':')[0]}-Instruct").geometry.hidden < \
+                inv_of(f"Qwen2.5-{rec.split(':')[0]}-Instruct").geometry.hidden:
+            rec = k
+    recommended = f"qwen2.5-{rec.split(':')[0].lower()}-b{budget}-winner.gguf"
+    manifest = {"r_max_gib": float(budget), "context_tokens": CTX, "kv_cache_type": CFG["kv_cache_type"],
+                "overhead_gib_assumed": OVERHEAD, "files": files, "agreement_text": "agreement.txt",
+                "verdict": {"comparisons": ev["comparisons"], "configs": ev["configs"]},
+                "recommended_file": recommended, "recommended_reason": f"best test-subset accuracy at {budget} GiB"}
+    (bundle / "manifest.json").write_text(json.dumps(manifest, indent=1))
+    print(f"bundle ready: {bundle} (recommended {recommended})", flush=True)
+    return 0
+
+
 def main() -> int:
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == "plan":
@@ -629,6 +698,8 @@ def main() -> int:
         return cmd_contest(int(args[0]), args[1])
     if cmd == "eval":
         return cmd_eval(int(args[0]))
+    if cmd == "bundle":
+        return cmd_bundle(int(args[0]))
     raise SystemExit(__doc__)
 
 
