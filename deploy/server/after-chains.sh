@@ -13,10 +13,13 @@ echo "$(date -u +%FT%TZ) waiting for: $WAIT_FOR" >> "$LOG"
 while :; do
   done_all=1
   for c in $WAIT_FOR; do
-    if grep -q "chain $c stopped" "$LOGS/chain-$c.log" 2>/dev/null; then
+    # Only the latest run of each chain counts (a chain may have been restarted after a fix).
+    latest="$(awk -v s="chain $c start" 'index($0, s) {buf=""} {buf = buf $0 "\n"} END {printf "%s", buf}' \
+      "$LOGS/chain-$c.log" 2>/dev/null)"
+    if printf '%s' "$latest" | grep -q "chain $c stopped"; then
       echo "$(date -u +%FT%TZ) chain $c failed; $CHAIN not started" >> "$LOG"; exit 1
     fi
-    grep -q "chain $c done" "$LOGS/chain-$c.log" 2>/dev/null || done_all=0
+    printf '%s' "$latest" | grep -q "chain $c done" || done_all=0
   done
   [ "$done_all" = 1 ] && break
   sleep 120
