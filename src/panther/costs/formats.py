@@ -43,12 +43,21 @@ def candidate_formats() -> list[str]:
 NO_IMATRIX_GENE_KINDS = frozenset({"embd", "embd_head", "head"})
 
 
+def head_has_imatrix(model: str) -> bool:
+    """True if the model's importance matrix was collected with --process-output (configs/models.yaml), so the
+    untied output head may use imatrix-only formats (D46)."""
+    from panther.models.inventory import load_registry
+    m = next((m for m in load_registry()["models"] if m["name"] == model), {})
+    return bool(m.get("imatrix_process_output"))
+
+
 def gene_formats(inv: Inventory) -> dict[str, list[str]]:
-    """Allowed formats per gene: all candidates, minus imatrix-only formats for the embedding gene."""
+    """Allowed formats per gene: all candidates, minus imatrix-only formats for genes without importance data."""
     needs = set(load_format_config()["requires_imatrix"])
     all_f = candidate_formats()
+    no_imatrix = NO_IMATRIX_GENE_KINDS - ({"head"} if head_has_imatrix(inv.geometry.name) else set())
     return {
-        g.gene_id: [f for f in all_f if not (g.kind in NO_IMATRIX_GENE_KINDS and f in needs)]
+        g.gene_id: [f for f in all_f if not (g.kind in no_imatrix and f in needs)]
         for g in inv.genes
     }
 

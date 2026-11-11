@@ -171,3 +171,25 @@ def check_super_block_divisibility(inv: Inventory) -> list[str]:
         for t in g.tensors
         if t.cols % SUPER_BLOCK != 0
     ]
+
+
+def build_matrix_inventory(geo: ModelGeometry) -> Inventory:
+    """Every weight matrix its own gene (D46): attn_q.L, attn_k.L, attn_v.L, attn_output.L, ffn_gate.L,
+    ffn_up.L, ffn_down.L, plus embd/head (or embd_head). Kinds and layers are those of the matrix's block, so
+    format rules (gene_formats) and the RAM model apply unchanged."""
+    blocks = build_inventory(geo)
+    genes: list[Gene] = []
+    for g in blocks.genes:
+        if g.kind in ("attn", "mlp"):
+            for t in g.tensors:
+                short = t.name.split(".")[2]  # blk.L.<short>.weight
+                genes.append(Gene(f"{short}.{g.layer}", g.kind, g.layer, (t,), read_per_token=g.read_per_token))
+        else:
+            genes.append(g)
+    return Inventory(geo, tuple(genes), blocks.fixed_tensors)
+
+
+def block_of(gene: Gene) -> str:
+    """Sensitivity block of a (matrix) gene: attn.L, mlp.L, embd, head or embd_head (D45)."""
+    return f"{gene.kind}.{gene.layer}" if gene.kind in ("attn", "mlp") else gene.kind
+

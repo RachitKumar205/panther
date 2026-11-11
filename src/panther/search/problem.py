@@ -30,6 +30,7 @@ class Problem:
     overhead_gib: float
     s_min: float | None = None
     speed: SpeedModel | None = None
+    kv_bytes_per_element: float = 2.0  # f16; q8_0 is 34/32
     bytes_: dict[str, dict[str, int]] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -49,7 +50,7 @@ class Problem:
         geo = self.inv.geometry
         return (
             int(self.r_max_gib * GIB)
-            - geo.kv_cache_bytes(self.context_tokens)
+            - geo.kv_cache_bytes(self.context_tokens, self.kv_bytes_per_element)
             - int(self.overhead_gib * GIB)
             - fixed_bytes(self.inv)
         )

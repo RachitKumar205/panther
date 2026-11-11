@@ -47,13 +47,15 @@ fi
 
 IMAT="$OUT/$MODEL.imatrix.gguf"
 if [ ! -f "$IMAT" ]; then
-  timed imatrix "$BIN/llama-imatrix" -m "$BF16" -f "$CALIB" -o "$IMAT.part.gguf" -c 512 -ngl 99 -t "$THREADS"
+  PO="$("$PY" -c "import sys; from panther.costs.formats import head_has_imatrix; print('--process-output' if head_has_imatrix(sys.argv[1]) else '')" "$MODEL")"
+  timed imatrix "$BIN/llama-imatrix" -m "$BF16" -f "$CALIB" -o "$IMAT.part.gguf" -c 512 -ngl 99 -t "$THREADS" $PO
   mv "$IMAT.part.gguf" "$IMAT"
 fi
 
 # Candidate format -> llama-quantize ftype name. With --pure, the *_S mixes are all one type.
 declare -A FTYPE=(
   [Q2_K]=Q2_K [Q3_K]=Q3_K_S [Q4_K]=Q4_K_S [Q5_K]=Q5_K_S [Q6_K]=Q6_K [Q8_0]=Q8_0 [Q4_0]=Q4_0
+  [IQ1_S]=IQ1_S [IQ1_M]=IQ1_M [IQ2_XXS]=IQ2_XXS [IQ2_S]=IQ2_S
   [IQ2_XS]=IQ2_XS [IQ3_XXS]=IQ3_XXS [IQ3_S]=IQ3_S [IQ4_XS]=IQ4_XS [IQ4_NL]=IQ4_NL
 )
 # One line per format: "<format> <token-embedding format> <output-head format>". The embedding has no imatrix data, so
