@@ -420,7 +420,13 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 ### D38. HellaSwag, ARC-C and MMLU via `--multiple-choice`; WinoGrande via `--winogrande`; prompts per lm-eval — planned (A4)
 - `--multiple-choice` uses the same scoring as `--hellaswag` but keeps file order, so each result maps to
   a question id (the decision rule's bootstrap pairs questions across configurations). Prompt layouts in
-  PIPELINE.md A4. Task runs use `-c 4096`.
+  PIPELINE.md A4. Task runs use `-c 4096 -np 5`: llama.cpp evaluates each answer as its own sequence and
+  stops (exit code 0) at the first question with more answers than `-np` (found in A4: ARC-C question 460
+  has 5 choices; the default is 4). Every task run uses the same `-np 5`, so all configurations are
+  batched identically.
+- WinoGrande CSVs end with two newlines: `-f` strips one trailing newline from the file, and the CSV loader
+  then discards a final line that reaches end-of-file, silently scoring one question fewer (found in A4:
+  999 of 1,000). The parser port in `panther.quality.tasks` models both steps, and a test checks it.
 
 ### D39. Independent check of task scoring in transformers — planned (A4)
 - 200 seeded selection items per task, same prompts, llama.cpp's scoring rule reimplemented in Python on

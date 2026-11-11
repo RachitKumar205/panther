@@ -129,3 +129,59 @@ _TYPE_LINE = re.compile(r"- type\s+(\S+):\s+(\d+) tensors")
 def parse_type_counts(text: str) -> dict[str, int]:
     """Per-type tensor counts from the loader log (printed at -lv 4 and above)."""
     return {m.group(1).lower(): int(m.group(2)) for m in _TYPE_LINE.finditer(text)}
+
+
+# --- task modes (A4, D38) ---------------------------------------------------------------------------------
+
+_MC_ROW = re.compile(r"^(\d+)\t(\d+\.\d{8})$", re.M)
+_MC_FINAL = re.compile(r"Final result: ([0-9.]+) \+/- ([0-9.]+)")
+_WG_ROW = re.compile(r"^(\d+)\t([0-9.]+)\t\s*(\S+)\s+(\S+)\s+([12])\s+([12])$", re.M)
+_WG_FINAL = re.compile(r"Final Winogrande score\((\d+) tasks\): ([0-9.]+) \+/- ([0-9.]+)")
+
+
+@dataclass(frozen=True)
+class TaskResult:
+    correct: np.ndarray  # 0/1 per question, in file order
+    accuracy_pct: float  # llama.cpp's final figure
+    accuracy_se_pct: float
+
+
+def parse_multiple_choice(text: str, n_expected: int) -> TaskResult:
+    """`--multiple-choice` prints the running accuracy (8 decimals) after each question; the running count of
+    correct answers is round(acc * i / 100), and its steps are the per-question results."""
+    rows = [(int(m.group(1)), float(m.group(2))) for m in _MC_ROW.finditer(text)]
+    final = _MC_FINAL.search(text)
+    if final is None or len(rows) != n_expected:
+        raise ParseError(f"multiple-choice output: {len(rows)} rows of {n_expected}, final line "
+                         f"{'present' if final else 'missing'}")
+    counts = []
+    for k, (i, acc) in enumerate(rows, 1):
+        if i != k:
+            raise ParseError(f"row {k} numbered {i}")
+        c = acc * i / 100
+        if abs(c - round(c)) > 1e-3:
+            raise ParseError(f"row {i}: running count {c} is not an integer")
+        counts.append(round(c))
+    steps = np.diff(np.concatenate([[0], counts]))
+    if not set(np.unique(steps)) <= {0, 1}:
+        raise ParseError("running count moved by more than one")
+    acc = float(final.group(1))
+    if abs(100 * steps.mean() - acc) > 1e-3:
+        raise ParseError(f"recovered accuracy {100 * steps.mean():.4f} != reported {acc}")
+    return TaskResult(steps.astype(np.int8), acc, float(final.group(2)))
+
+
+def parse_winogrande(text: str, n_expected: int) -> TaskResult:
+    """`--winogrande` prints, per question, the choice made and the answer."""
+    rows = [(int(m.group(1)), int(m.group(5)), int(m.group(6))) for m in _WG_ROW.finditer(text)]
+    final = _WG_FINAL.search(text)
+    if final is None or len(rows) != n_expected or int(final.group(1)) != n_expected:
+        raise ParseError(f"winogrande output: {len(rows)} rows of {n_expected}, final line "
+                         f"{'present' if final else 'missing'}")
+    if [r[0] for r in rows] != list(range(1, n_expected + 1)):
+        raise ParseError("winogrande rows out of order")
+    correct = np.array([int(r[1] == r[2]) for r in rows], dtype=np.int8)
+    acc = float(final.group(2))
+    if abs(100 * correct.mean() - acc) > 1e-3:
+        raise ParseError(f"recovered accuracy {100 * correct.mean():.4f} != reported {acc}")
+    return TaskResult(correct, acc, float(final.group(3)))
