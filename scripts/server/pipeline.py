@@ -19,7 +19,7 @@ import os
 import re
 import subprocess
 import sys
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
 
@@ -598,7 +598,9 @@ def _cmd_sens(model: str) -> int:
         fast = bool(run) and reflink_ok(model)  # checked once, here, before the parallel runs
         note(f"{short_name(model)} part costs round {rnd}: {len(run)} KL runs to do ({len(done)} measured so far)")
         with ProcessPoolExecutor(CONCURRENT) as ex:
-            for i, _ in enumerate(ex.map(_sens_one, [(model, b, f, fast) for b, f in run]), 1):
+            futs = [ex.submit(_sens_one, (model, b, f, fast)) for b, f in run]
+            for i, fut in enumerate(as_completed(futs), 1):  # count runs as they finish
+                fut.result()
                 if i % 25 == 0 or i == len(run):
                     note(f"{short_name(model)} part costs round {rnd}: {i}/{len(run)}")
         base_kl, table = measured_table(model)
@@ -788,7 +790,7 @@ def cmd_test(budget: int, model: str) -> int:
         with ProcessPoolExecutor(TEST_CONCURRENT if attempt == 1 else 1) as ex:
             futs = {ex.submit(_test_one, j): j[1] for j in todo}
             failed = []
-            for f in futs:
+            for f in as_completed(futs):
                 try:
                     f.result()
                     note(f"{sm} tests: {futs[f]} done ({done()}/{len(items)} genotypes)")
@@ -899,15 +901,50 @@ def cmd_pick_model(budget: int, model: str) -> int:
     return 0
 
 
+def bundle_reference(budget: int, model: str, short: str) -> int:
+    """A reference model's uniform Q6_K file as a Pi bundle, so its RAM and speed sit next to the winners'."""
+    import gguf
+    import shutil
+    src = DATA / "store" / model / f"{model}-{REF_MODEL_FORMAT}.gguf"
+    bundle = DATA / "pi_bundle" / f"budget-{budget}-{short}"
+    bundle.mkdir(parents=True, exist_ok=True)
+    shutil.copy(DATA / "splits/text/agreement.txt", bundle / "agreement.txt")
+    dst = bundle / f"qwen2.5-{short}-b{budget}-uniform-{REF_MODEL_FORMAT.lower()}.gguf"
+    if not dst.exists():
+        subprocess.run(["cp", "--reflink=auto", str(src), str(dst)], check=True)
+    h = hashlib.sha256()
+    with open(dst, "rb") as f:
+        for c in iter(lambda: f.read(1 << 24), b""):
+            h.update(c)
+    tc: dict[str, int] = {}
+    for t in gguf.GGUFReader(dst).tensors:
+        tc[t.tensor_type.name.lower()] = tc.get(t.tensor_type.name.lower(), 0) + 1
+    weights = sum(int(t.n_bytes) for t in gguf.GGUFReader(dst).tensors)
+    kv = inv_of(model).geometry.kv_cache_bytes(CTX, KV_BPE)
+    files = {dst.name: {"model": model, "role": "reference", "sha256": h.hexdigest(), "bytes": dst.stat().st_size,
+                        "predicted_ram_gib": (weights + kv + OVERHEAD * GIB) / GIB,
+                        "predicted": {"weights": weights, "kv_cache": kv, "overhead": int(OVERHEAD * GIB)},
+                        "expected_type_counts": dict(sorted(tc.items())), "server_cpu_ppl_agreement": None}}
+    manifest = {"r_max_gib": float(budget) * (1 + WINDOW[1]), "context_tokens": CTX,
+                "kv_cache_type": CFG["kv_cache_type"], "overhead_gib_assumed": OVERHEAD, "files": files,
+                "agreement_text": "agreement.txt", "verdict": {"comparisons": {}}, "recommended_file": dst.name,
+                "recommended_reason": f"{model} uniform {REF_MODEL_FORMAT}, reference at {budget} GiB"}
+    (bundle / "manifest.json").write_text(json.dumps(manifest, indent=1))
+    note(f"{short.upper()} Pi bundle ready: {dst.name}")
+    return 0
+
+
 # --- bundle for the Pi ---------------------------------------------------------------------------------------
 
 def cmd_bundle_model(budget: int, model: str) -> int:
     """One model's winner as a Pi bundle (pi_bundle/budget-B-<size>), ready as soon as that model is picked."""
     import hashlib
     import shutil
+    short = model.split("-")[1].lower()
+    if model in contests()[budget]["reference"]:
+        return bundle_reference(budget, model, short)
     name = json.loads(out(f"budget-{budget}", f"winner-{model}.json").read_text())["winner"]
     a = json.loads(list_path(budget, model).read_text())[name]["assignment"]
-    short = model.split("-")[1].lower()
     bundle = DATA / "pi_bundle" / f"budget-{budget}-{short}"
     bundle.mkdir(parents=True, exist_ok=True)
     shutil.copy(DATA / "splits/text/agreement.txt", bundle / "agreement.txt")

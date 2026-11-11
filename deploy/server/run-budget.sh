@@ -36,7 +36,8 @@ done
 for m in $(list reference); do
   s="$(short "$m")"; c="b$B-ref-$s"; lanes="$lanes $c"
   running "$c" && { echo "lane $c already running"; continue; }
-  printf "%s\n" "gpu rw-store$B-$s $R store $B $m" "gpu rw-test$B-ref-$s $R test $B $m" > "$P/$c.steps"
+  printf "%s\n" "gpu rw-store$B-$s $R store $B $m" "gpu rw-test$B-ref-$s $R test $B $m" \
+    "gpu rw-bundle$B-$s $R bundle $B $m" > "$P/$c.steps"
   start x "$c" "$HERE/chain.sh" "$c" "$P/$c.steps"
 done
 running "b$B" || printf "%s\n" "gpu rw-pick$B $R pick $B" > "$P/b$B.steps"  # comparison across models
