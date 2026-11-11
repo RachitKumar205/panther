@@ -5,6 +5,7 @@
   python scripts/server/poc.py penalties  MODEL   # P5: penalty table, 3 KL runs at a time
   python scripts/server/poc.py shortlist  MODEL   # P6: solver top 5 + uniform baseline, scored on selection
   python scripts/server/poc.py verdict    all     # P7: test subset, decision rule (needs the user's approval)
+  python scripts/server/poc.py bundle     all     # P8: files + manifest for the Pi session
 
 Every step is resumable: finished measurements (records labelled poc:...) are not repeated.
 Outputs: $PANTHER_DATA/poc/<model>/ and records in $PANTHER_DATA/results/<model>/.
@@ -404,9 +405,89 @@ def cmd_verdict(_: str) -> int:
     return 0
 
 
+# --- P8 Pi bundle -----------------------------------------------------------------------------------------
+
+AGREEMENT_TOKENS = 4096 + 64  # two 2048-token chunks for llama-perplexity, plus margin
+
+
+def make_agreement_text(model: str) -> None:
+    """First ~4k tokens of the sensitivity text (never test), decoded, as splits/text/agreement.txt."""
+    path = DATA / "splits" / "text" / "agreement.txt"
+    if path.exists():
+        return
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(DATA / "hf" / model)
+    ids = tok((DATA / "splits/text/sensitivity.txt").read_text(), add_special_tokens=False)["input_ids"]
+    path.write_text(tok.decode(ids[:AGREEMENT_TOKENS]))
+
+
+def type_counts(inv, a: dict[str, str]) -> dict[str, int]:
+    c: dict[str, int] = {}
+    for g in inv.genes:
+        k = a[g.gene_id].lower()
+        c[k] = c.get(k, 0) + len(g.tensors)
+    c["f32"] = len(inv.fixed_tensors)
+    return dict(sorted(c.items()))
+
+
+def cmd_bundle(_: str) -> int:
+    import shutil
+    bundle = DATA / "pi_bundle"
+    bundle.mkdir(exist_ok=True)
+    verdict = json.loads((DATA / "poc" / "verdict.json").read_text())
+    make_agreement_text(next(iter(MENU)))
+    shutil.copy(DATA / "splits/text/agreement.txt", bundle / "agreement.txt")
+    files = {}
+    for model in MENU:
+        inv, menu, store, _ = setup(model)
+        sl = json.loads((out_dir(model) / "shortlist.json").read_text())
+        short = model.split("-")[1].lower()  # "7b" / "14b"
+        for role in ("winner", "uniform"):
+            name = sl["winner"] if role == "winner" else "uniform"
+            if name not in sl["rows"]:
+                continue
+            a = sl["rows"][name]["assignment"]
+            dst = bundle / f"qwen2.5-{short}-poc-{role}.gguf"
+            if not dst.exists():
+                src = build_file(inv, store, a, menu["base"], model)
+                src.rename(dst)
+            label = f"poc:bundle:{dst.stem}"
+            if not find(records(model), label, build="cpu", text="agreement"):
+                if evaluator.main(["ppl", "--model", model, "--gguf", str(dst), "--build", "cpu", "--text",
+                                   "agreement", "--label", label, "--threads", str(THREADS)]) != 0:
+                    raise SystemExit(f"{label}: agreement perplexity failed")
+            ppl = find(records(model), label, build="cpu", text="agreement")["metrics"]["ppl"]
+            ram = estimate_ram(inv, a, CTX, OVERHEAD)
+            h = hashlib.sha256()
+            with open(dst, "rb") as f:
+                for c in iter(lambda: f.read(1 << 24), b""):
+                    h.update(c)
+            files[dst.name] = {"model": model, "role": role, "shortlist_name": name, "sha256": h.hexdigest(),
+                               "bytes": dst.stat().st_size, "assignment_sha256": assignment_digest(a),
+                               "assignment": a, "predicted_ram_gib": ram.total_gib,
+                               "predicted": {"weights": ram.weights, "kv_cache": ram.kv_cache, "overhead": ram.overhead},
+                               "expected_type_counts": type_counts(inv, a), "server_cpu_ppl_agreement": ppl}
+            print(f"{dst.name}: {dst.stat().st_size / 2**30:.2f} GiB, predicted RAM {ram.total_gib:.3f} GiB, "
+                  f"server CPU PPL {ppl:.4f}", flush=True)
+    m7, m14 = list(MENU)
+    cmp = verdict["comparisons"]["7B winner vs 14B winner"]
+    recommended = ("qwen2.5-7b-poc-winner.gguf" if cmp["winner"] and cmp["winner"].startswith("7B")
+                   else "qwen2.5-14b-poc-winner.gguf" if cmp["winner"] else "qwen2.5-7b-poc-winner.gguf")
+    store_manifest = json.loads((DATA / "store" / m7 / "manifest.json").read_text())
+    manifest = {"r_max_gib": R_MAX, "context_tokens": CTX, "overhead_gib_assumed": OVERHEAD,
+                "llama_cpp_commit": store_manifest["llama_cpp_commit"], "files": files,
+                "agreement_text": "agreement.txt", "verdict": verdict,
+                "recommended_file": recommended,
+                "recommended_reason": (f"7B vs 14B: winner {cmp['winner']} by {cmp['decided_by']}" if cmp["winner"]
+                                       else "7B vs 14B indistinguishable; the smaller model is recommended")}
+    (bundle / "manifest.json").write_text(json.dumps(manifest, indent=1))
+    print(f"bundle ready: {bundle} (recommended: {recommended})")
+    return 0
+
+
 if __name__ == "__main__":
     cmds = {"refs": cmd_refs, "correct": cmd_correct, "penalties": cmd_penalties, "shortlist": cmd_shortlist,
-            "verdict": cmd_verdict}
+            "verdict": cmd_verdict, "bundle": cmd_bundle}
     if len(sys.argv) != 3 or sys.argv[1] not in cmds:
         sys.exit(__doc__)
     sys.exit(cmds[sys.argv[1]](sys.argv[2]))
