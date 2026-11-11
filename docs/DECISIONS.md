@@ -495,6 +495,15 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   for the Pi in the morning. A final chain on the server waits for both lanes, runs P7, and packages the Pi bundle;
   the Pi side (Phase E, PoC version) is in PIPELINE.md.
 
+
+### D43. Unattended runs are guarded: Panther pauses itself if the co-located service degrades — decided 2026-11-11
+- **Why:** the PoC runs overnight with nobody watching; jobs check service health only when they *start*.
+- **What:** `deploy/server/guard.sh` checks `PANTHER_HEALTH_URL` every 60 s. After 3 consecutive bad checks (not
+  HTTP 200, or slower than 3 s) it runs `podman pause` on every running `panther-*` container (frozen, not
+  killed); after 5 consecutive good minutes it unpauses them. It acts only on Panther's own containers, in
+  Panther's own container storage, and logs to `data/logs/guard.log`.
+- Measured when it was started (01:47 UTC): service responses 45–115 ms, CPU 55% idle, I/O wait 4%.
+
 ---
 
 ## Open
