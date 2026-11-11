@@ -989,23 +989,6 @@ def bundle_reference(budget: int, model: str, short: str) -> int:
                         "predicted_ram_gib": (weights + kv + OVERHEAD * GIB) / GIB,
                         "predicted": {"weights": weights, "kv_cache": kv, "overhead": int(OVERHEAD * GIB)},
                         "expected_type_counts": dict(sorted(tc.items())), "server_cpu_ppl_agreement": None}}
-    pfile = out(f"budget-{budget}", f"preset-{model}.json")
-    if pfile.exists():  # the best existing quantization goes along, so the Pi measures both side by side
-        import gguf
-        ftype = json.loads(pfile.read_text())["preset"]
-        src, pdst = DATA / "store" / model / f"preset-{ftype}.gguf", bundle / f"qwen2.5-{short}-b{budget}-preset-{ftype.lower()}.gguf"
-        if not pdst.exists():
-            os.link(src, pdst)
-        ph = hashlib.sha256()
-        with open(pdst, "rb") as f:
-            for c in iter(lambda: f.read(1 << 24), b""):
-                ph.update(c)
-        tc: dict[str, int] = {}
-        for t in gguf.GGUFReader(pdst).tensors:
-            tc[t.tensor_type.name.lower()] = tc.get(t.tensor_type.name.lower(), 0) + 1
-        files[pdst.name] = {"model": model, "role": "preset", "preset": ftype, "sha256": ph.hexdigest(),
-                            "bytes": pdst.stat().st_size, "predicted_ram_gib": file_ram_gib(model, pdst),
-                            "expected_type_counts": dict(sorted(tc.items())), "server_cpu_ppl_agreement": None}
     manifest = {"r_max_gib": float(budget) * (1 + WINDOW[1]), "context_tokens": CTX,
                 "kv_cache_type": CFG["kv_cache_type"], "overhead_gib_assumed": OVERHEAD, "files": files,
                 "agreement_text": "agreement.txt", "verdict": {"comparisons": {}}, "recommended_file": dst.name,
