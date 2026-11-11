@@ -606,3 +606,32 @@ rule runs and returns a winner with its deciding criterion; a results manifest l
 | P7 | Verdict on a fixed test subset, decision rule (after the user's OK) | ~30 min | ~1 h |
 
 7B result ≈ 2.5–3 h after start; 14B ≈ 7–8 h.
+
+### P8. Pi bundle (server, after P7) 📝 planned
+`poc.py bundle` writes `data/pi_bundle/` on the server: the 7B and 14B winners and their uniform baselines
+(7B Q6_K, 14B IQ3_XXS) as GGUF files, a 4,096-token agreement text, and `manifest.json` with each file's
+sha256, assignment, predicted RAM at 4,096 context, expected per-type tensor counts, and the server CPU-build
+perplexity on the agreement text. The final chain on the server runs P7 then P8 once both lanes finish.
+
+### Phase E for the proof of concept: Raspberry Pi 5 📝 planned
+Everything on the Pi runs as an ordinary user; only installing build tools needs `sudo`, which the user runs.
+Tools in `pi/` (Python standard library only, plus llama.cpp built on the Pi at the pinned commit).
+
+| # | Step | What | Time (est.) |
+|---|---|---|---|
+| E1 | Setup | apt build tools (user, sudo); clone + build llama.cpp at the pinned commit, CPU, native for the A76 | ~30 min |
+| E2 | Bundle | copy `pi_bundle/` from the server; verify every sha256 | ~10 min |
+| E3 | RAM + smoke | each file once (W_short): loads, generates, peak RAM vs prediction (±2%), measured runtime overhead | ~20 min |
+| E4 | Threads | 2, 3, 4 threads on both winners (W_short, 1 warm-up + 2) | ~30 min |
+| E5 | Confirmation | all 4 files at the best thread count, W_ref 256/64, 1 warm-up + 3 | ~1.5 h |
+| E6 | Agreement | perplexity on the 4,096-token agreement text for both winners; must match the server CPU build within 0.5% | ~30 min |
+| E7 | Generalisation | the recommended file at W_gen 128/32 and 1024/128 | ~30 min |
+
+Measured per run (llama-server, `--load-mode none` so weights sit in ordinary memory, `-c 4096`, greedy,
+`ignore_eos`, prompts given as exact token counts): prefill and decode tokens/s from the server's timings,
+inter-token latency p50/p95 from streamed token arrival times, end-to-end latency, peak RAM (`VmHWM` of the
+server process), minimum system `MemAvailable`, CPU temperature at start and end, and throttling flags when
+`vcgencmd` is available. A run is invalid if peak RAM exceeds 7.0 GiB, `MemAvailable` drops below 256 MiB, the
+SoC throttles, or the start temperature is above 70 °C (the queue waits up to 5 minutes to cool first).
+`pi/analyze.py` writes `results/report.md` and `report.json`, including the RAM-prediction check and the
+recommendation: the verdict winner, if it is within budget and valid on the Pi; otherwise the other model's winner.

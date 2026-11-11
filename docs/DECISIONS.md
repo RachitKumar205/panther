@@ -484,6 +484,12 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   each gene in each other format is one KL measurement on CUDA.
 - **Expected precision:** configurations within a few percent of the full pipeline's on KL; the 7B-vs-14B
   verdict is reliable only if they differ by about 2 benchmark points or more, otherwise "too close to call".
+- **Test-subset approval (user, 2026-11-11):** the user approved the fixed PoC test subset for P7. The full
+  test split stays reserved for Phase D. Subset items are recorded by id in `splits/llama_tasks/manifest.json`
+  (`poc_test/*`); the full Phase D run will report results with and without them.
+- **Unattended finish (user, 2026-11-11):** the user asked for the PoC to run to completion overnight and be ready
+  for the Pi in the morning. A final chain on the server waits for both lanes, runs P7, and packages the Pi bundle;
+  the Pi side (Phase E, PoC version) is in PIPELINE.md.
 
 ---
 
