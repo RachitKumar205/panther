@@ -3,6 +3,7 @@
 Standard library only. Runs as an ordinary user. Uses llama.cpp built on the Pi at the pinned commit.
 
     python3 pi/panther_pi.py run     --bundle ~/panther-pi/bundle --llama ~/panther-pi/llama.cpp
+    python3 pi/panther_pi.py run --quick   # ~15 min: recommended file only, RAM + one speed measurement (D44)
     python3 pi/panther_pi.py analyze --bundle ~/panther-pi/bundle
 
 Results go to <bundle>/results/: runs.jsonl (one line per measured run), log files, report.md, report.json.
@@ -246,8 +247,10 @@ class Queue:
                 return t
             time.sleep(10)
 
-    def verify_bundle(self) -> None:
+    def verify_bundle(self, names: list[str] | None = None) -> None:
         for name, f in self.manifest["files"].items():
+            if names is not None and name not in names:
+                continue
             key = f"verify:{name}"
             if key in self.done:
                 continue
@@ -320,6 +323,11 @@ class Queue:
         self.log(f"E6 {name}: Pi PPL {ppl} vs server CPU {ref:.4f} ({diff})")
 
 
+def fmt(x: float | None, spec: str) -> str:
+    """Format a number for the report; missing or NaN values print as n/a instead of crashing."""
+    return "n/a" if x is None or x != x else format(x, spec)
+
+
 def mean(xs: list) -> float:
     xs = [x for x in xs if x is not None]
     return statistics.mean(xs) if xs else float("nan")
@@ -365,7 +373,46 @@ def validity(rec: dict) -> tuple[bool, list[str]]:
     return (not reasons), reasons
 
 
+def fallback_file(manifest: dict) -> str | None:
+    """The other model's file the server verdict prefers (its within-model comparison), if any."""
+    rec = manifest["files"][manifest["recommended_file"]]
+    comps = manifest["verdict"]["comparisons"]
+    others = {f["role"]: n for n, f in manifest["files"].items() if f["model"] != rec["model"]}
+    if not others:
+        return None
+    size = next(iter(others.values())).split("-")[1].upper()  # qwen2.5-7b-poc-... -> 7B
+    within = comps.get(f"{size} winner vs uniform", {})
+    role = "uniform" if (within.get("winner") or "").endswith(":uniform") else "winner"
+    return others.get(role) or next(iter(others.values()))
+
+
+def cmd_quick(a: argparse.Namespace) -> int:
+    """D44: the recommended file only (fallback if it is invalid): sha256, one load, W_ref 1 warm-up + 2."""
+    q = Queue(a.bundle, a.llama)
+    rec = q.manifest["recommended_file"]
+    order = [rec] + [f for f in [fallback_file(q.manifest)] if f]
+    q.log(f"quick check start: {rec} (fallback {order[1] if len(order) > 1 else 'none'})")
+    for name in order:
+        if not (a.bundle / name).exists():
+            q.log(f"Q {name}: not copied; run pi/fetch_bundle.sh PI_HOST (full) to get it")
+            break
+        q.verify_bundle([name])
+        try:
+            q.measure("Q", name, 4, W_REF, warmup=1, reps=2)
+        except (RuntimeError, TimeoutError, OSError) as e:
+            q.log(f"Q {name}: FAILED ({e}); see results/server-Q-*.log")
+            continue
+        last = [json.loads(x) for x in q.runs_path.read_text().splitlines()
+                if json.loads(x)["run_key"] == f"Q:{name}:t4:{W_REF[0]}/{W_REF[1]}"]
+        if last and last[-1]["valid"]:
+            q.log(f"quick check done: {name} is valid on this Pi")
+            break
+    return analyze(a.bundle)
+
+
 def cmd_run(a: argparse.Namespace) -> int:
+    if a.quick:
+        return cmd_quick(a)
     q = Queue(a.bundle, a.llama)
     deadline = time.monotonic() + a.hours * 3600
     files = q.manifest["files"]
@@ -414,7 +461,7 @@ def analyze(bundle: Path) -> int:
     recs = [json.loads(x) for x in (out / "runs.jsonl").read_text().splitlines()] if (out / "runs.jsonl").exists() else []
     rows, ram_checks, agree = [], [], []
     for r in recs:
-        if r.get("step") in ("E3", "E5", "E7") and "runs" in r:
+        if r.get("step") in ("E3", "E5", "E7", "Q") and "runs" in r:
             meas = [x for x in r["runs"] if not x["warmup"]] or r["runs"]
             dec = [x["decode_tps"] for x in meas if x["decode_tps"]]
             rows.append({"step": r["step"], "file": r["file"], "threads": r["threads"], "workload": r["workload"],
@@ -431,7 +478,7 @@ def analyze(bundle: Path) -> int:
         if r.get("step") == "E6":
             agree.append(r)
     rec_file = manifest["recommended_file"]
-    rec_rows = [x for x in rows if x["file"] == rec_file and x["step"] == "E5"]
+    rec_rows = [x for x in rows if x["file"] == rec_file and x["step"] in ("E5", "Q")]
     rec_ok = bool(rec_rows) and all(x["valid"] and x["peak_ram_gib"] <= R_MAX_GIB for x in rec_rows)
     report = {"recommended_file": rec_file, "recommended_reason": manifest["recommended_reason"],
               "recommended_confirmed_on_pi": rec_ok, "ram_prediction_within_2pct": all(ram_checks) if ram_checks else None,
@@ -445,9 +492,10 @@ def analyze(bundle: Path) -> int:
     for x in rows:
         rng = f" ({x['decode_range'][0]:.2f}–{x['decode_range'][1]:.2f})" if x["decode_range"] else ""
         lines.append(f"| {x['step']} | {x['file']} | {x['threads']} | {x['workload'][0]}/{x['workload'][1]} | "
-                     f"{x['prefill_tps']:.2f} | {x['decode_tps']:.2f}{rng} | {x['itl_p50_ms']:.0f}/{x['itl_p95_ms']:.0f} | "
-                     f"{x['e2e_s']:.1f} | {x['peak_ram_gib']:.3f} ({x['predicted_ram_gib']:.3f}) | "
-                     f"{x['ram_error_pct']:+.2f} | {'yes' if x['valid'] else 'no: ' + '; '.join(x['invalid_reasons'])} |")
+                     f"{fmt(x['prefill_tps'], '.2f')} | {fmt(x['decode_tps'], '.2f')}{rng} | "
+                     f"{fmt(x['itl_p50_ms'], '.0f')}/{fmt(x['itl_p95_ms'], '.0f')} | {fmt(x['e2e_s'], '.1f')} | "
+                     f"{fmt(x['peak_ram_gib'], '.3f')} ({fmt(x['predicted_ram_gib'], '.3f')}) | "
+                     f"{fmt(x['ram_error_pct'], '+.2f')} | {'yes' if x['valid'] else 'no: ' + '; '.join(x['invalid_reasons'])} |")
     lines += ["", "## Agreement with the server CPU build (4,096-token text)", ""]
     for g in agree:
         diff = "n/a" if g["rel_diff"] is None else "%.3f%%" % (100 * g["rel_diff"])
@@ -467,6 +515,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bundle", type=Path, default=Path.home() / "panther-pi" / "bundle")
     ap.add_argument("--llama", type=Path, default=Path.home() / "panther-pi" / "llama.cpp")
     ap.add_argument("--hours", type=float, default=10.0)
+    ap.add_argument("--quick", action="store_true", help="recommended file only, ~15 min (D44)")
     a = ap.parse_args(argv)
     a.bundle, a.llama = a.bundle.expanduser(), a.llama.expanduser()
     if os.geteuid() == 0:

@@ -25,6 +25,17 @@ git clone https://github.com/RachitKumar205/panther ~/panther
 bash ~/panther/pi/setup.sh
 ```
 
+## Quick check instead of steps 2–3 (~15 min after a ~6 GB copy, D44)
+
+```bash
+pi/fetch_bundle.sh pi@<pi-hostname> quick                 # on the Mac: recommended file only
+cd ~/panther && python3 pi/panther_pi.py run --quick      # on the Pi
+```
+
+It checks the file, loads it once at 4 threads, and measures peak RAM and speed (256-token prompt, 64 generated,
+1 warm-up + 2). If the recommended file does not fit, it tries the fallback file if you copied it (full copy).
+Results: `~/panther-pi/bundle/results/report.md`. The full queue below can still be run later on top.
+
 ## 2. On your Mac: copy the bundle to the Pi (~25 GB)
 
 ```bash

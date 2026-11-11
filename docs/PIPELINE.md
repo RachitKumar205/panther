@@ -627,6 +627,10 @@ Tools in `pi/` (Python standard library only, plus llama.cpp built on the Pi at 
 | E6 | Agreement | perplexity on the 4,096-token agreement text for both winners; must match the server CPU build within 0.5% | ~30 min |
 | E7 | Generalisation | the recommended file at W_gen 128/32 and 1024/128 | ~30 min |
 
+**Quick check (D44, chosen 2026-11-11):** `run --quick` does only E2 + E5 for the recommended file at 4 threads
+(1 warm-up + 2), falling back to the other model's preferred file if the recommended one is invalid on the Pi.
+About 15 min after a ~6 GB copy (`fetch_bundle.sh PI_HOST quick`). The full queue above remains optional.
+
 Measured per run (llama-server, `--load-mode none` so weights sit in ordinary memory, `-c 4096`, greedy,
 `ignore_eos`, prompts given as exact token counts): prefill and decode tokens/s from the server's timings,
 inter-token latency p50/p95 from streamed token arrival times, end-to-end latency, peak RAM (`VmHWM` of the

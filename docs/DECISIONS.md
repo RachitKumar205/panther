@@ -506,6 +506,23 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 
 ---
 
+### D44. Quick Pi check: one file, RAM and one speed measurement (~15 min) — decided by user 2026-11-11
+- **Why:** the full Phase E queue takes 3–4 h, mostly repeats, a thread sweep and secondary workloads. The two
+  answers that matter for the proof of concept are: does the recommended file fit in 7.0 GiB on the real Pi, and
+  how fast is it.
+- **What:** `python3 pi/panther_pi.py run --quick`:
+  1. checks the sha256 of the recommended file (only the files present are checked);
+  2. loads it once at 4 threads (the Pi 5 has 4 cores; the thread sweep is skipped) and runs W_ref 256/64,
+     1 warm-up + 2 measured, with the same RAM, temperature, throttling and tensor-type checks as E5;
+  3. if it is invalid (over 7.0 GiB, fails to load, MemAvailable floor) it does the same for the fallback,
+     the other model's file the verdict prefers (here `qwen2.5-7b-poc-uniform.gguf`), if that file was copied.
+  `pi/fetch_bundle.sh PI_HOST quick` copies only the manifest, the agreement text and the recommended file
+  (~6 GB instead of ~25 GB).
+- **Not covered:** the thread sweep (E4), all four files (E5), server agreement (E6) and other workloads (E7).
+  The full queue stays available and is resumable on top of the quick run (different run keys).
+
+---
+
 ## Open
 
 - Team value for R_max (`configs/budgets.yaml`), required before Phase C.
