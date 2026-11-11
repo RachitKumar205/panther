@@ -291,6 +291,7 @@ def build_file(model: str, a: dict[str, str]) -> Path:
     tmp = out(model, "tmp", "x").parent
     path = tmp / f"{assignment_digest(a)[:16]}.gguf"
     if not path.exists():
+        need_disk()  # every worker writes a whole-model file; several at once once filled the disk
         part = path.with_suffix(f".{os.getpid()}.part")
         assemble(inv_of(model), a, store(model), part, base_format=base_format(model))
         part.rename(path)
@@ -319,6 +320,7 @@ def fast_probe(model: str, a: dict[str, str]) -> Path:
     come from the base file, changed tensors from their type's quantized copy; then the header's type and offset
     entries are updated. Tensors stay in order and back to back, as llama.cpp requires."""
     import gguf
+    need_disk()  # every worker writes a whole-model file; several at once once filled the disk
     base = base_file(model)
     base_a = fill(model, base_format(model))
     inv = inv_of(model)
