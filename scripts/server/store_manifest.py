@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 
 from panther.gguf_files import verify
-from panther.model import REPO_ROOT, build_inventory, candidate_formats, load_geometry, source_assignment
+from panther.model import load_registry, REPO_ROOT, build_inventory, candidate_formats, load_geometry, source_assignment
 
 DATA = Path(os.environ.get("PANTHER_DATA", REPO_ROOT / "data"))
 
@@ -72,7 +72,7 @@ def main() -> int:
         raise SystemExit(f"could not read the llama.cpp commit from {llama}")
     manifest = {
         "model": a.model,
-        "weights": (DATA / "hf" / a.model / ".panther-revision").read_text().strip(),
+        "weights": "{repo}@{revision}".format(**next(m for m in load_registry()["models"] if m["name"] == a.model)),
         "llama_cpp_commit": commit,
         "image_id": os.environ.get("PANTHER_IMAGE_ID", "unknown"),
         "calibration": {"file": str(a.calibration), "sha256": sha256(a.calibration),
