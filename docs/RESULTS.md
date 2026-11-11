@@ -45,13 +45,30 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
   far more tokens, can. The winner is the most accurate genotype unless the bootstrap ties it with others, in which
   case the lowest KL wins (DECISIONS: "Winner").
 
+## 1 GiB (RAM between 0.99 and 1.005 GiB): 1.5B
+
+| 1.5B @ 1 GiB | RAM GiB | Accuracy | KL | Perplexity | MMLU | HellaSwag | ARC-C | WinoGrande | GSM8K |
+|---|---|---|---|---|---|---|---|---|---|
+| **Uniform IQ2_S, padded to fill** (the pick) | 0.993 | **44.99** | 0.777 | 21.97 | 49.9 | 61.9 | 38.2 | 61.6 | 13.3 |
+| Best searched genotype (sol2) | 1.005 | 39.94 | **0.485** | **16.54** | 44.1 | 55.2 | 35.8 | 57.0 | 7.7 |
+| llama.cpp IQ2_S preset (best existing) | 0.978 | 39.98 | 0.506 | 16.95 | | | | | |
+| llama.cpp IQ2_XS preset | 0.965 | 37.71 | 0.640 | 19.46 | | | | | |
+
+- Pick vs llama.cpp IQ2_S: **+5.01 points [+3.64, +6.44]**, but 54% higher KL and 30% higher perplexity.
+- The searched genotypes beat llama.cpp on what the search minimises (KL 0.485 vs 0.506, perplexity 16.54 vs 16.95)
+  with equal accuracy (39.94 vs 39.98).
+- **At this compression (1.5B at ~3 bits/weight) the lowest-KL genotype is not the most accurate one**: the uniform
+  padded genotype scores 5 points higher on every test with clearly worse KL. At 14B / 7 GiB the same direction
+  showed up within noise. The search minimises measured KL, so where KL stops tracking accuracy it optimises the
+  wrong thing; the pick came from the padding step (fill the budget exactly with one type), not from the search.
+
 ## On the Pi 5 (8 GB): RAM and speed
 
 256-token prompt, 64 tokens written, 4 threads, 4,096-token context, 8-bit KV cache, 1 warm-up + 2 timed runs.
 
 | Budget | Model | Peak RAM (predicted) | Writing tok/s | Prompt tok/s | Clock | Notes |
 |---|---|---|---|---|---|---|
-| 7 GiB | 14B ours | **6.70 GiB** (7.04) | **1.00** | 1.46 | 2.4 GHz, heat-limited | good supply. Capped at 1.8 GHz on the weak supply: 0.76 / 1.09 |
+| 7 GiB | 14B ours | **6.70 GiB** (7.04) | **1.00** | 1.46 | 2.4 GHz, heat-limited | good supply; a repeat run gave 1.01 / 1.46 / 6.69 GiB. Capped at 1.8 GHz on the weak supply: 0.76 / 1.09 |
 | 7 GiB | 32B ours | **6.78 GiB** (7.04) | 0.49 | 0.61 | 2.4 GHz, heat-limited (83–84 °C) | supply 5.02–5.04 V, no under-voltage |
 | 7 GiB | 7B Q6_K | **6.07 GiB** (6.34) | 1.75 | 7.83 | 2.4 GHz, heat-limited | good supply; same as on the weak one (1.74 / 7.98): memory-bound |
 | 3 GiB | 3B Q6_K | **2.78 GiB** (2.83) | **4.11** | 21.1 | 2.4 GHz | good supply; 3.41 / 17.3 on the weak one |
@@ -77,7 +94,7 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
 
 | Budget | Searched | Reference | Status |
 |---|---|---|---|
-| 1 GiB | 1.5B | — | part costs (restarted after the booking-file fault, below) |
+| 1 GiB | 1.5B | — | **done** (above); Pi check running |
 | 3 GiB | 7B (~2.8 bits/weight) | 3B Q6_K | 7B: part costs (restarted); 3B Pi-checked above |
 | 5 GiB | 14B (~2.4), 7B (~5.1), InternLM2.5 20B (~1.8) | — | queued after the 3 GiB 7B |
 
