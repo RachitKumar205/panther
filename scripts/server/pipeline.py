@@ -256,7 +256,7 @@ def build_file(model: str, a: dict[str, str]) -> Path:
     tmp = out(model, "tmp", "x").parent
     path = tmp / f"{assignment_digest(a)[:16]}.gguf"
     if not path.exists():
-        part = path.with_suffix(".part")
+        part = path.with_suffix(f".{os.getpid()}.part")
         assemble(inv_of(model), a, store(model), part, base_format=base_format(model))
         part.rename(path)
     if not verify(inv_of(model), a, path).ok:
@@ -300,7 +300,7 @@ def fast_probe(model: str, a: dict[str, str]) -> Path:
     for fmt in set(new_type.values()):
         path = DATA / "store" / model / f"{model}-{fmt}.gguf"
         srcs[fmt] = (path, {t.name: t for t in gguf.GGUFReader(path).tensors})
-    part = dst.with_suffix(".part")
+    part = dst.with_suffix(f".{os.getpid()}.part")
     plan, pos = [], 0  # (name, type, new relative offset)
     with open(base, "rb") as fb, open(part, "wb") as fo:
         def copy(fin, src_off: int, n: int) -> None:
@@ -488,10 +488,10 @@ def sens_label(model: str, block: str, fmt: str) -> str:
     return f"rw:sens:{base_format(model)}:{block}:{fmt}"
 
 
-def _sens_one(job: tuple[str, str, str]) -> None:
-    model, block, fmt = job
+def _sens_one(job: tuple[str, str, str, bool]) -> None:
+    model, block, fmt, fast = job
     a = block_assignment(model, None if block == "base" else block, fmt)
-    path = fast_probe(model, a) if reflink_ok(model) else build_file(model, a)
+    path = fast_probe(model, a) if fast else build_file(model, a)
     wait_for_gpu_memory(path.stat().st_size)
     try:
         kl(model, path, "sensitivity", sens_label(model, block, fmt))
@@ -593,11 +593,12 @@ def _cmd_sens(model: str) -> int:
         print(f"{model} round {rnd}: {len(run)} KL runs (base {base}, probe {probe}, measured so far {len(done)})",
               flush=True)
         if ("base", base) in run:
-            _sens_one((model, "base", base))
+            _sens_one((model, "base", base, False))
             run.remove(("base", base))
+        fast = bool(run) and reflink_ok(model)  # checked once, here, before the parallel runs
         note(f"{short_name(model)} part costs round {rnd}: {len(run)} KL runs to do ({len(done)} measured so far)")
         with ProcessPoolExecutor(CONCURRENT) as ex:
-            for i, _ in enumerate(ex.map(_sens_one, [(model, b, f) for b, f in run]), 1):
+            for i, _ in enumerate(ex.map(_sens_one, [(model, b, f, fast) for b, f in run]), 1):
                 if i % 25 == 0 or i == len(run):
                     note(f"{short_name(model)} part costs round {rnd}: {i}/{len(run)}")
         base_kl, table = measured_table(model)
