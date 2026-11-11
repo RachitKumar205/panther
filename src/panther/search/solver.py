@@ -24,8 +24,11 @@ class Solution:
     weight_bytes: int
 
 
-def solve_top_k(problem: Problem, k: int = 1, time_limit_s: float = 30.0) -> list[Solution]:
-    """Return up to k distinct optimal-then-next-best assignments, best first."""
+def solve_top_k(problem: Problem, k: int = 1, time_limit_s: float = 30.0, min_bytes: int | None = None,
+                min_distance: int = 1) -> list[Solution]:
+    """Return up to k distinct optimal-then-next-best assignments, best first. `min_bytes` forces the weights to
+    fill the budget from below; `min_distance` makes each returned assignment differ from every earlier one in at
+    least that many genes."""
     m = cp_model.CpModel()
     x: dict[tuple[str, str], cp_model.IntVar] = {}
     for g, fmts in problem.formats.items():
@@ -36,6 +39,8 @@ def solve_top_k(problem: Problem, k: int = 1, time_limit_s: float = 30.0) -> lis
     m.Add(
         sum(problem.bytes_[g][f] * v for (g, f), v in x.items()) <= problem.weight_budget_bytes
     )
+    if min_bytes is not None:
+        m.Add(sum(problem.bytes_[g][f] * v for (g, f), v in x.items()) >= min_bytes)
 
     if problem.s_min is not None:
         sp = problem.speed
@@ -67,5 +72,5 @@ def solve_top_k(problem: Problem, k: int = 1, time_limit_s: float = 30.0) -> lis
             raise RuntimeError("solver returned an assignment that fails the exact feasibility check")
         solutions.append(Solution(a, problem.total_penalty(a), problem.total_bytes(a)))
         # No-good cut: forbid this exact assignment.
-        m.Add(sum(x[g, f] for g, f in a.items()) <= n_genes - 1)
+        m.Add(sum(x[g, f] for g, f in a.items()) <= n_genes - min_distance)
     return solutions

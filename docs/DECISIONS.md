@@ -615,6 +615,20 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 
 ---
 
+### D49. One standard: a fixed solution list per budget, each genotype assembled once and fully tested — decided by user 2026-11-11
+- **Why:** the user found the run patchworked and slow: files were rebuilt for every measurement, candidates did not
+  have to fill the budget, tests differed per step, and there was a lot of one-off code.
+- **What:** `docs/STANDARD.md` is the procedure from now on. The solution space for a budget is a precomputed list of
+  genotypes inside RAM −1% … +0.5% of the budget (solver top 6 per model, ≥5% apart, plus a padded-uniform
+  baseline). Each is assembled once and gets every quality test on the GPU; the best by accuracy wins and goes to
+  the Pi. Part-cost measurements (step 2) stay as instruments: offline tests on the 14B data showed choosing with
+  no measurements captures ~75% of the achievable gain (about llama.cpp-preset level), and learning part costs
+  from measured whole genotypes only 64–73% even with 200 of them.
+- **Removed:** the contest/eval split, llama.cpp presets and head/V references (the Phase 0 gate already compared
+  against presets), the CPU/GPU correction scripts, Phase A gate scripts, `phase0.py`, greedy/random baselines.
+
+---
+
 ## Open
 
 - Team value for R_max (`configs/budgets.yaml`), required before Phase C.

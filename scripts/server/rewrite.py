@@ -6,9 +6,10 @@ one sensitivity KL run per block. Runs in the GPU container; every step is resum
   rewrite.py refs    MODEL        # BF16 KL references: sensitivity (12 chunks) and selection
   rewrite.py error   MODEL        # importance-weighted dequantization error per matrix and format
   rewrite.py sens    MODEL        # one KL run per block: the block moved from base to probe format
-  rewrite.py contest BUDGET MODEL # solve top 3; references; selection KL for all; winner = lowest KL of top 3
-  rewrite.py eval    BUDGET       # test-subset evaluation of winners and references, paired comparisons
-  rewrite.py bundle  BUDGET       # winners + best references as GGUF files and a manifest for the Pi
+  rewrite.py list    BUDGET       # the solution space: top genotypes per model inside the RAM window (D49)
+  rewrite.py test    BUDGET       # each listed genotype assembled once; KL, tasks, perplexity, GSM8K on it
+  rewrite.py pick    BUDGET       # best per model, then against its baseline, each other and the reference
+  rewrite.py bundle  BUDGET       # the winners as GGUF files and a manifest for the Pi
 
 Outputs: $PANTHER_DATA/rewrite/<model>/ and $PANTHER_DATA/rewrite/budget-<B>/; KL/task records in
 $PANTHER_DATA/results/<model>/ (labels rw:...).
@@ -377,59 +378,7 @@ def cmd_sens(model: str) -> int:
     return 0
 
 
-# --- contest -------------------------------------------------------------------------------------------------
-
-def fits(model: str, a: dict[str, str], budget: float) -> bool:
-    return ram_gib(model, a) <= budget
-
-
-def largest_uniform(model: str, budget: float) -> tuple[str, dict[str, str]] | None:
-    ok = [(f, fill(model, f)) for f in sorted(menu(model), key=bits_per_weight) if fits(model, fill(model, f), budget)]
-    return ok[-1] if ok else None
-
-
-def headv_padded(model: str, budget: float) -> dict[str, str] | None:
-    """Uniform with head and every attn_v raised (Q6_K, or the top menu format), whole layers raised one
-    format, alternating from both ends, up to the budget (D46)."""
-    m = sorted(menu(model), key=bits_per_weight)
-    hi = "Q6_K" if "Q6_K" in m else m[-1]
-    inv = inv_of(model)
-    for u in reversed(m):
-        a = fill(model, u)
-        for g in inv.genes:
-            if (g.kind in ("head", "embd_head") or g.gene_id.startswith("attn_v.")) and hi in allowed(model)[g.gene_id]:
-                a[g.gene_id] = hi
-        if not fits(model, a, budget):
-            continue
-        nxt = m[min(m.index(u) + 1, len(m) - 1)]
-        order, lo_, hi_ = [], 0, inv.geometry.n_layers - 1
-        while lo_ <= hi_:
-            order += [lo_] + ([hi_] if hi_ != lo_ else [])
-            lo_, hi_ = lo_ + 1, hi_ - 1
-        for L in order:
-            trial = dict(a)
-            for g in inv.genes:
-                if g.layer == L and not g.gene_id.startswith("attn_v.") and nxt in allowed(model)[g.gene_id]:
-                    trial[g.gene_id] = nxt
-            if fits(model, trial, budget):
-                a = trial
-        return a
-    return None
-
-
-def quantize_preset(model: str, preset: str) -> Path:
-    dst = DATA / "rewrite" / model / "presets" / f"{model}-{preset}.gguf"
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if not dst.exists():
-        s = DATA / "store" / model
-        cmd = [str(LLAMA / "build-cuda/bin/llama-quantize"), "--imatrix", str(s / f"{model}.imatrix.gguf"),
-               str(s / f"{model}-BF16.gguf"), str(dst) + ".part", preset, str(THREADS)]
-        with open(dst.with_suffix(".log"), "w") as f:
-            if subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT).returncode != 0:
-                raise SystemExit(f"llama-quantize {preset} failed; see {dst.with_suffix('.log')}")
-        Path(str(dst) + ".part").rename(dst)
-    return dst
-
+# --- helpers -------------------------------------------------------------------------------------------------
 
 def file_ram_gib(model: str, path: Path) -> float:
     import gguf
@@ -437,81 +386,151 @@ def file_ram_gib(model: str, path: Path) -> float:
     return (w + inv_of(model).geometry.kv_cache_bytes(CTX, KV_BPE) + OVERHEAD * GIB) / GIB
 
 
-def best_preset(model: str, budget: float) -> tuple[str, Path] | None:
-    """Largest stock preset that fits: try the two nearest below the budget's average bits per weight, then go
-    down until one fits (real sizes read back, since stock mixes raise some tensors)."""
-    target = avg_bpw(model, budget)
-    cands = sorted([p for p in STOCK if STOCK_BPW[p] <= target + 0.3], key=lambda p: -STOCK_BPW[p])
-    found = []
-    for p in cands:
-        path = quantize_preset(model, p)
-        if file_ram_gib(model, path) <= budget:
-            found.append((p, path))
-            if len(found) == 2 or STOCK_BPW[p] < target - 0.6:
+# --- solution list, test all, pick (D49) ---------------------------------------------------------------------
+
+WINDOW = (-0.01, 0.005)   # D49: in the solution space iff RAM is within -1% / +0.5% of the budget
+LIST_K = 6                # solver genotypes per model
+LIST_DISTANCE = 0.05      # each differs from every other in at least 5% of its matrices
+TEST_CONCURRENT = 8
+
+
+def in_window(model: str, a: dict[str, str], budget: float) -> bool:
+    r = ram_gib(model, a)
+    return budget * (1 + WINDOW[0]) <= r <= budget * (1 + WINDOW[1])
+
+
+def padded_uniform(model: str, budget: float) -> tuple[str, dict[str, str]] | None:
+    """In-space baseline: the largest uniform format that fits, whole layers raised one format (alternating from
+    both ends) until the RAM is inside the window."""
+    m = sorted(menu(model), key=bits_per_weight)
+    inv = inv_of(model)
+    for u in reversed(m):
+        a = fill(model, u)
+        if ram_gib(model, a) > budget * (1 + WINDOW[1]):
+            continue
+        nxt = m[min(m.index(u) + 1, len(m) - 1)]
+        order, lo_, hi_ = [], 0, inv.geometry.n_layers - 1
+        while lo_ <= hi_:
+            order += [lo_] + ([hi_] if hi_ != lo_ else [])
+            lo_, hi_ = lo_ + 1, hi_ - 1
+        for L in order:
+            if in_window(model, a, budget):
                 break
-        else:
-            path.unlink()
-    return max(found, key=lambda x: file_ram_gib(model, x[1])) if found else None
+            trial = dict(a)
+            for g in inv.genes:
+                if g.layer == L and nxt in allowed(model)[g.gene_id]:
+                    trial[g.gene_id] = nxt
+            if ram_gib(model, trial) <= budget * (1 + WINDOW[1]):
+                a = trial
+        return (u, a) if in_window(model, a, budget) else None
+    return None
 
 
-def kl_sel(model: str, label: str, path: Path) -> dict:
-    if not poc.find(poc.records(model), label, reference="selection"):
-        poc.kl(model, path, "selection", label)
-    return poc.find(poc.records(model), label, reference="selection")["metrics"]
-
-
-def cmd_contest(budget: int, model: str) -> int:
+def solution_list(budget: int, pen_fn=None) -> dict[str, dict]:
     from panther.search.problem import Problem
     from panther.search.solver import solve_top_k
-    od = out(f"budget-{budget}", model, "x").parent
-    res_path = od / "contest.json"
-    res = json.loads(res_path.read_text()) if res_path.exists() else {"rows": {}}
-    inv = inv_of(model)
-    if "candidates" not in res:
-        prob = Problem(inv, allowed(model), penalties(model), budget, CTX, OVERHEAD, kv_bytes_per_element=KV_BPE)
-        sols = solve_top_k(prob, k=CFG["top_k"], time_limit_s=120)
-        cands = {f"top{i + 1}": {"assignment": s.assignment, "predicted_penalty": s.penalty} for i, s in enumerate(sols)}
-        lu = largest_uniform(model, budget)
-        if lu:
-            cands[f"uniform-{lu[0]}"] = {"assignment": lu[1]}
-        hv = headv_padded(model, budget)
-        if hv:
-            cands["headv"] = {"assignment": hv}
-        res["candidates"] = cands
-        res_path.write_text(json.dumps(res, indent=1))
-    if "preset" not in res:
-        bp = best_preset(model, budget)
-        res["preset"] = {"name": bp[0], "path": str(bp[1])} if bp else None
-        res_path.write_text(json.dumps(res, indent=1))
-    for name, c in res["candidates"].items():
-        if name in res["rows"]:
-            continue
-        a = c["assignment"]
-        label = f"rw:b{budget}:{name}:{assignment_digest(a)[:12]}"
-        path = build_file(model, a)
-        k = kl_sel(model, label, path)
-        path.unlink()
-        res["rows"][name] = {"label": label, "ram_gib": ram_gib(model, a), "kl": k["kl_mean"], "top1_pct": k["top1_pct"],
-                             "bpw": 8 * sum(gene_bytes(g, a[g.gene_id]) for g in inv.genes) / sum(g.n_weights for g in inv.genes),
-                             "predicted_penalty": c.get("predicted_penalty")}
-        res_path.write_text(json.dumps(res, indent=1))
-        print(f"{model} @ {budget} GiB {name:16s} RAM {res['rows'][name]['ram_gib']:.3f} | KL sel {k['kl_mean']:.5f} "
-              f"| top-1 {k['top1_pct']:.1f}%", flush=True)
-    if res["preset"] and "preset" not in res["rows"]:
-        p = res["preset"]
-        k = kl_sel(model, f"rw:b{budget}:preset:{p['name']}", Path(p["path"]))
-        res["rows"]["preset"] = {"label": f"rw:b{budget}:preset:{p['name']}", "name": p["name"],
-                                 "ram_gib": file_ram_gib(model, Path(p["path"])), "kl": k["kl_mean"], "top1_pct": k["top1_pct"]}
-        print(f"{model} @ {budget} GiB preset {p['name']:9s} RAM {res['rows']['preset']['ram_gib']:.3f} | "
-              f"KL sel {k['kl_mean']:.5f} | top-1 {k['top1_pct']:.1f}%", flush=True)
-    tops = [n for n in res["rows"] if n.startswith("top")]
-    res["winner"] = min(tops, key=lambda n: res["rows"][n]["kl"])
-    res_path.write_text(json.dumps(res, indent=1))
-    print(f"{model} @ {budget} GiB winner: {res['winner']}", flush=True)
+    items = {}
+    for model in contests()[budget]["searched"]:
+        inv = inv_of(model)
+        short = model.split("-")[1]
+        prob = Problem(inv, allowed(model), (pen_fn or penalties)(model), budget * (1 + WINDOW[1]), CTX, OVERHEAD,
+                       kv_bytes_per_element=KV_BPE)
+        lo_bytes = prob.weight_budget_bytes - int((WINDOW[1] - WINDOW[0]) * budget * GIB)
+        sols = solve_top_k(prob, k=LIST_K, time_limit_s=90, min_bytes=lo_bytes,
+                           min_distance=max(1, int(LIST_DISTANCE * len(inv.genes))))
+        for i, sol in enumerate(sols):
+            if not in_window(model, sol.assignment, budget):
+                raise SystemExit(f"{short} sol{i + 1} outside the window ({ram_gib(model, sol.assignment):.3f} GiB)")
+            items[f"{short}:sol{i + 1}"] = {"model": model, "assignment": sol.assignment,
+                                            "predicted_penalty": sol.penalty}
+        pu = padded_uniform(model, budget)
+        if pu:
+            items[f"{short}:uniform-{pu[0]}-padded"] = {"model": model, "assignment": pu[1]}
+    for it in items.values():
+        it["ram_gib"] = ram_gib(it["model"], it["assignment"])
+    return items
+
+
+def cmd_list(budget: int) -> int:
+    """The entire solution space for a budget, written once and never extended (D49)."""
+    path = out(f"budget-{budget}", "list.json")
+    if path.exists():
+        print(f"list exists: {path}")
+        return 0
+    items = solution_list(budget)
+    for name, it in items.items():
+        print(f"{budget} GiB {name:28s} RAM {it['ram_gib']:.3f} GiB", flush=True)
+    path.write_text(json.dumps(items, indent=1))
     return 0
 
 
-# --- eval ----------------------------------------------------------------------------------------------------
+def test_label(budget: int, name: str, a: dict[str, str] | None) -> str:
+    return f"rw:b{budget}:{name}" + (f":{assignment_digest(a)[:12]}" if a else "")
+
+
+def run_all_tests(model: str, path: Path, label: str, kl: bool) -> None:
+    """Every quality test on one file: KL (selection text), the four test-subset tasks, perplexity, GSM8K."""
+    if kl and not poc.find(poc.records(model), label, reference="selection"):
+        poc.kl(model, path, "selection", label)
+    for t in poc.SUBSET:
+        if not poc.find(poc.records(model), label, task=t, split="poc_test"):
+            if poc.evaluator.main(["task", "--model", model, "--gguf", str(path), "--build", "cuda", "--task", t,
+                                   "--split", "poc_test", "--label", label, "--threads", str(THREADS)]) != 0:
+                raise SystemExit(f"{label} {t} failed")
+    if not poc.find(poc.records(model), label, text="test_web"):
+        if poc.evaluator.main(["ppl", "--model", model, "--gguf", str(path), "--build", "cuda", "--text",
+                               "test_web", "--label", label, "--threads", str(THREADS)]) != 0:
+            raise SystemExit(f"{label} ppl failed")
+    gsm8k_run(model, path, label)
+
+
+def tests_done(model: str, label: str, kl: bool) -> bool:
+    recs = poc.records(model)
+    return ((not kl or poc.find(recs, label, reference="selection") is not None)
+            and all(poc.find(recs, label, task=t, split="poc_test") for t in poc.SUBSET)
+            and poc.find(recs, label, text="test_web") is not None
+            and out(model, "gsm8k", f"{label.replace(':', '_')}.json").exists())
+
+
+def _test_one(job: tuple[int, str, dict]) -> str:
+    """One genotype: assembled once, all tests run on that file, then the file is deleted."""
+    budget, name, it = job
+    model, a = it["model"], it["assignment"]
+    label = test_label(budget, name, a)
+    if tests_done(model, label, kl=True):
+        return name
+    path = build_file(model, a)
+    wait_for_gpu_memory(2 * path.stat().st_size)
+    try:
+        run_all_tests(model, path, label, kl=True)
+    finally:
+        path.unlink(missing_ok=True)
+    return name
+
+
+def _test_ref(job: tuple[int, str]) -> str:
+    budget, model = job
+    name = f"{model.split('-')[1]}:uniform-{REF_MODEL_FORMAT}"
+    path = DATA / "store" / model / f"{model}-{REF_MODEL_FORMAT}.gguf"
+    label = test_label(budget, name, None)
+    if not tests_done(model, label, kl=False):
+        wait_for_gpu_memory(2 * path.stat().st_size)
+        run_all_tests(model, path, label, kl=False)  # KL against a different model's original is meaningless
+    return name
+
+
+def cmd_test(budget: int) -> int:
+    """All listed genotypes and the cross-model reference, TEST_CONCURRENT at once on the GPU."""
+    items = json.loads(out(f"budget-{budget}", "list.json").read_text())
+    refs = contests()[budget]["reference"]
+    print(f"{len(items)} genotypes + {len(refs)} reference(s), up to {TEST_CONCURRENT} at once", flush=True)
+    with ProcessPoolExecutor(TEST_CONCURRENT) as ex:
+        futs = [ex.submit(_test_one, (budget, n, it)) for n, it in items.items()]
+        futs += [ex.submit(_test_ref, (budget, m)) for m in refs]
+        for f in futs:
+            print(f"  tested {f.result()}", flush=True)
+    return 0
+
 
 def gsm8k_run(model: str, path: Path, label: str) -> dict:
     from panther.quality import gsm8k
@@ -522,7 +541,7 @@ def gsm8k_run(model: str, path: Path, label: str) -> dict:
     items = poc.jsonl(DATA / "splits/llama_tasks/poc_test/gsm8k.jsonl")
     fewshot = poc.jsonl(DATA / "splits/tasks/fewshot/gsm8k.jsonl")
     with LlamaServer(LLAMA, path, "cuda", parallel=8, ctx_per_slot=2048, threads=THREADS,
-                     log=out(model, "server.log")) as srv:
+                     log=out(model, "servers", f"{path.stem}.log")) as srv:
         comps = srv.map(lambda it: srv.complete(gsm8k.prompt(it["question"], fewshot), gsm8k.MAX_TOKENS,
                                                 gsm8k.STOP), items)
     correct = [int(gsm8k.exact_match(gsm8k.strict_match(c), it["answer"])) for it, c in zip(items, comps)]
@@ -531,160 +550,102 @@ def gsm8k_run(model: str, path: Path, label: str) -> dict:
     return rec
 
 
-def evaluate(model: str, name: str, path_fn, ram: float):
-    """The PoC verdict's evaluation (test subset: 4 tasks, GSM8K 300, perplexity on test_web)."""
+def evaluation(model: str, label: str, ram: float, name: str):
     from panther.stats.decision import Evaluation
-    label = f"rw:test:{name}"
-    recs = poc.records(model)
-    todo = [t for t in poc.SUBSET if not poc.find(recs, label, task=t, split="poc_test")]
-    need_ppl = not poc.find(recs, label, text="test_web")
-    gpath = out(model, "gsm8k", f"{label.replace(':', '_')}.json")
-    if todo or need_ppl or not gpath.exists():
-        path, temp = path_fn()
-        for t in todo:
-            if poc.evaluator.main(["task", "--model", model, "--gguf", str(path), "--build", "cuda", "--task", t,
-                                   "--split", "poc_test", "--label", label, "--threads", str(THREADS)]) != 0:
-                raise SystemExit(f"{label} {t} failed")
-        if need_ppl and poc.evaluator.main(["ppl", "--model", model, "--gguf", str(path), "--build", "cuda",
-                                            "--text", "test_web", "--label", label, "--threads", str(THREADS)]) != 0:
-            raise SystemExit(f"{label} ppl failed")
-        gsm8k_run(model, path, label)
-        if temp:
-            path.unlink()
     recs = poc.records(model)
     correct = {t: np.array(poc.find(recs, label, task=t, split="poc_test")["per_item"]["correct"], dtype=np.int8)
                for t in poc.SUBSET}
-    correct["gsm8k"] = np.array(json.loads(gpath.read_text())["correct"], dtype=np.int8)
+    g = json.loads(out(model, "gsm8k", f"{label.replace(':', '_')}.json").read_text())
+    correct["gsm8k"] = np.array(g["correct"], dtype=np.int8)
     p = poc.find(recs, label, text="test_web")["per_chunk"]
     nll = np.array(p["mean_nll"]) * p["tokens"]
     return Evaluation(name, correct, nll, np.full(len(nll), p["tokens"]), int(ram * GIB), 0.0)
 
 
-def cmd_eval(budget: int) -> int:
+def cmd_pick(budget: int) -> int:
+    """Per model: best mean test-subset accuracy (ties: lower KL). Then winner vs its padded-uniform baseline, the
+    models' winners against each other, and against the cross-model reference."""
     from panther.stats.decision import compare
-    c = contests()[budget]
-    evs = {}
-    for model in c["searched"]:
-        res = json.loads(out(f"budget-{budget}", model, "contest.json").read_text())
-        short = model.split("-")[1]
-        refs = [n for n in res["rows"] if not n.startswith("top")]
-        best_ref = min(refs, key=lambda n: res["rows"][n]["kl"]) if refs else None  # D48: one reference
-        for name in [res["winner"]] + ([best_ref] if best_ref else []):
-            row = res["rows"][name]
-            if name == "preset":
-                pp = Path(res["preset"]["path"])
-                fn = lambda pp=pp: (pp, False)  # noqa: E731
-            else:
-                a = res["candidates"][name]["assignment"]
-                fn = lambda model=model, a=a: (build_file(model, a), True)  # noqa: E731
-            tag = "winner" if name == res["winner"] else name
-            evs[f"{short}:{tag}"] = evaluate(model, f"b{budget}:{short}:{tag}:{row['label'].split(':')[-1]}", fn,
-                                             row["ram_gib"])
-    for model in c["reference"]:
-        short = model.split("-")[1]
-        path = DATA / "store" / model / f"{model}-{REF_MODEL_FORMAT}.gguf"
-        ram = file_ram_gib(model, path)
-        evs[f"{short}:uniform-{REF_MODEL_FORMAT}"] = evaluate(model, f"ref:{short}:{REF_MODEL_FORMAT}",
-                                                              lambda path=path: (path, False), ram)
-    for k, e in evs.items():
-        e.name = k
+    items = json.loads(out(f"budget-{budget}", "list.json").read_text())
+    rows, evs = {}, {}
+    for name, it in items.items():
+        label = test_label(budget, name, it["assignment"])
+        evs[name] = evaluation(it["model"], label, it["ram_gib"], name)
+        k = poc.find(poc.records(it["model"]), label, reference="selection")["metrics"]
+        rows[name] = {"model": it["model"], "ram_gib": it["ram_gib"], "kl": k["kl_mean"], "top1_pct": k["top1_pct"]}
+    for model in contests()[budget]["reference"]:
+        name = f"{model.split('-')[1]}:uniform-{REF_MODEL_FORMAT}"
+        ram = file_ram_gib(model, DATA / "store" / model / f"{model}-{REF_MODEL_FORMAT}.gguf")
+        evs[name] = evaluation(model, test_label(budget, name, None), ram, name)
+        rows[name] = {"model": model, "ram_gib": ram, "kl": None, "reference": True}
+    for n, r in rows.items():
+        r.update({"mean_accuracy_pct": 100 * evs[n].mean_accuracy(), "ppl": evs[n].perplexity(),
+                  "per_task_pct": {t: 100 * float(v.mean()) for t, v in evs[n].task_correct.items()}})
+    winners = {}
+    for model in contests()[budget]["searched"]:
+        cands = [n for n in items if items[n]["model"] == model]
+        winners[model] = max(cands, key=lambda n: (round(rows[n]["mean_accuracy_pct"], 2), -rows[n]["kl"]))
     pairs = {}
-    winners = [k for k in evs if k.endswith(":winner")]
-    for w in winners:
-        short = w.split(":")[0]
-        for k in evs:
-            if k.startswith(short + ":") and k != w:
-                pairs[f"{w} vs {k}"] = (evs[w], evs[k])
-    for i, w in enumerate(winners):
-        for k in winners[i + 1:] + [k for k in evs if k.endswith(f":uniform-{REF_MODEL_FORMAT}") and
-                                    k.split(":")[0] not in {x.split(":")[0] for x in winners}]:
-            pairs[f"{w} vs {k}"] = (evs[w], evs[k])
-    result = {"budget_gib": budget, "configs": {}, "comparisons": {}}
-    for k, e in evs.items():
-        result["configs"][k] = {"mean_accuracy_pct": 100 * e.mean_accuracy(), "ppl_test_web": e.perplexity(),
-                                "per_task_pct": {t: 100 * float(v.mean()) for t, v in e.task_correct.items()},
-                                "ram_gib": e.peak_ram_bytes / GIB}
-        v = result["configs"][k]
-        print(f"{budget} GiB {k:24s} RAM {v['ram_gib']:.3f}  acc {v['mean_accuracy_pct']:.2f}  PPL {v['ppl_test_web']:.3f}  "
-              + " ".join(f"{t[:4]} {x:.1f}" for t, x in v["per_task_pct"].items()), flush=True)
-    for k, (a, b) in pairs.items():
-        cmp_ = compare(a, b)
-        result["comparisons"][k] = {"winner": cmp_.winner, "decided_by": cmp_.decided_by,
-                                    "acc_diff_pts": 100 * cmp_.acc_diff,
-                                    "acc_ci_pts": [100 * cmp_.acc_ci[0], 100 * cmp_.acc_ci[1]],
-                                    "ppl_ratio": cmp_.ppl_ratio}
-        r = result["comparisons"][k]
-        print(f"  {k}: {r['winner']} by {r['decided_by']} | acc {r['acc_diff_pts']:+.2f} "
-              f"[{r['acc_ci_pts'][0]:+.2f}, {r['acc_ci_pts'][1]:+.2f}] | PPL ratio {r['ppl_ratio']:.4f}", flush=True)
-    out(f"budget-{budget}", "eval.json").write_text(json.dumps(result, indent=1))
+    for model, w in winners.items():
+        base = next((n for n in items if items[n]["model"] == model and n.endswith("-padded")), None)
+        if base and base != w:
+            pairs[f"{w} vs {base}"] = (w, base)
+    ws = list(winners.values())
+    for i, w in enumerate(ws):
+        for v in ws[i + 1:] + [n for n in rows if rows[n].get("reference")]:
+            pairs[f"{w} vs {v}"] = (w, v)
+    result = {"budget_gib": budget, "window": WINDOW, "rows": rows, "winners": winners, "comparisons": {}}
+    for k, (x, y) in pairs.items():
+        c = compare(evs[x], evs[y])
+        result["comparisons"][k] = {"winner": c.winner, "decided_by": c.decided_by, "acc_diff_pts": 100 * c.acc_diff,
+                                    "acc_ci_pts": [100 * c.acc_ci[0], 100 * c.acc_ci[1]], "ppl_ratio": c.ppl_ratio}
+    for n, r in sorted(rows.items(), key=lambda kv: -kv[1]["mean_accuracy_pct"]):
+        kl = f"{r['kl']:.4f}" if r["kl"] is not None else "   -  "
+        print(f"{budget} GiB {n:28s} RAM {r['ram_gib']:.3f} | KL {kl} | acc {r['mean_accuracy_pct']:.2f} | "
+              f"PPL {r['ppl']:.3f} | " + " ".join(f"{t[:4]} {v:.1f}" for t, v in r["per_task_pct"].items()), flush=True)
+    for k, c in result["comparisons"].items():
+        print(f"  {k}: {c['winner']} by {c['decided_by']} | acc {c['acc_diff_pts']:+.2f} "
+              f"[{c['acc_ci_pts'][0]:+.2f}, {c['acc_ci_pts'][1]:+.2f}] | PPL ratio {c['ppl_ratio']:.4f}", flush=True)
+    out(f"budget-{budget}", "pick.json").write_text(json.dumps(result, indent=1))
     return 0
 
 
 # --- bundle for the Pi ---------------------------------------------------------------------------------------
 
 def cmd_bundle(budget: int) -> int:
-    """Winners of a budget (+ each model's best reference) as GGUF files and a manifest for pi/panther_pi.py."""
+    """Each model's winner for the Pi, with a manifest for pi/panther_pi.py (recommended = best accuracy)."""
     import hashlib
     import shutil
-    ev = json.loads(out(f"budget-{budget}", "eval.json").read_text())
+    pick = json.loads(out(f"budget-{budget}", "pick.json").read_text())
+    items = json.loads(out(f"budget-{budget}", "list.json").read_text())
     bundle = DATA / "pi_bundle" / f"budget-{budget}"
     bundle.mkdir(parents=True, exist_ok=True)
     poc.make_agreement_text("Qwen2.5-1.5B-Instruct")
     shutil.copy(DATA / "splits/text/agreement.txt", bundle / "agreement.txt")
     files = {}
-    for model in contests()[budget]["searched"]:
-        res = json.loads(out(f"budget-{budget}", model, "contest.json").read_text())
-        short = model.split("-")[1].lower()
-        refs = [n for n in res["rows"] if not n.startswith("top")]
-        best_ref = min(refs, key=lambda n: res["rows"][n]["kl"]) if refs else None
-        for role, name in (("winner", res["winner"]), ("reference", best_ref)):
-            if name is None:
-                continue
-            dst = bundle / f"qwen2.5-{short}-b{budget}-{role}.gguf"
-            if name == "preset":
-                src, a = Path(res["preset"]["path"]), None
-                if not dst.exists():
-                    shutil.copy(src, dst)
-                import gguf
-                tc: dict[str, int] = {}
-                for t in gguf.GGUFReader(dst).tensors:
-                    k = t.tensor_type.name.lower()
-                    tc[k] = tc.get(k, 0) + 1
-                ram = file_ram_gib(model, dst)
-                weights = dst.stat().st_size
-            else:
-                a = res["candidates"][name]["assignment"]
-                if not dst.exists():
-                    build_file(model, a).rename(dst)
-                tc = poc.type_counts(inv_of(model), a)
-                ram = ram_gib(model, a)
-                weights = estimate_ram(inv_of(model), a, CTX, OVERHEAD, KV_BPE).weights
-            h = hashlib.sha256()
-            with open(dst, "rb") as f:
-                for c in iter(lambda: f.read(1 << 24), b""):
-                    h.update(c)
-            kv = inv_of(model).geometry.kv_cache_bytes(CTX, KV_BPE)
-            files[dst.name] = {"model": model, "role": role, "contest_name": name, "sha256": h.hexdigest(),
-                               "bytes": dst.stat().st_size, "predicted_ram_gib": ram,
-                               "predicted": {"weights": weights, "kv_cache": kv, "overhead": int(OVERHEAD * GIB)},
-                               "expected_type_counts": dict(sorted(tc.items())), "server_cpu_ppl_agreement": None,
-                               "kl_selection": res["rows"][name]["kl"]}
-            print(f"{dst.name}: predicted RAM {ram:.3f} GiB", flush=True)
-    # Recommended: the winner with the best test-subset accuracy among models (smaller model if tied).
-    wins = [k for k in ev["configs"] if k.endswith(":winner")]
-    rec = max(wins, key=lambda k: ev["configs"][k]["mean_accuracy_pct"])
-    for k in wins:
-        c = ev["comparisons"].get(f"{rec} vs {k}") or ev["comparisons"].get(f"{k} vs {rec}")
-        if c and c["winner"] is None and inv_of(f"Qwen2.5-{k.split(':')[0]}-Instruct").geometry.hidden < \
-                inv_of(f"Qwen2.5-{rec.split(':')[0]}-Instruct").geometry.hidden:
-            rec = k
-    recommended = f"qwen2.5-{rec.split(':')[0].lower()}-b{budget}-winner.gguf"
+    for model, name in pick["winners"].items():
+        a = items[name]["assignment"]
+        dst = bundle / f"qwen2.5-{model.split('-')[1].lower()}-b{budget}-winner.gguf"
+        if not dst.exists():
+            build_file(model, a).rename(dst)
+        h = hashlib.sha256()
+        with open(dst, "rb") as f:
+            for c in iter(lambda: f.read(1 << 24), b""):
+                h.update(c)
+        r = estimate_ram(inv_of(model), a, CTX, OVERHEAD, KV_BPE)
+        files[dst.name] = {"model": model, "role": "winner", "list_name": name, "sha256": h.hexdigest(),
+                           "bytes": dst.stat().st_size, "predicted_ram_gib": r.total_gib,
+                           "predicted": {"weights": r.weights, "kv_cache": r.kv_cache, "overhead": r.overhead},
+                           "expected_type_counts": poc.type_counts(inv_of(model), a), "server_cpu_ppl_agreement": None}
+        print(f"{dst.name}: predicted RAM {r.total_gib:.3f} GiB", flush=True)
+    best = max(pick["winners"].values(), key=lambda n: pick["rows"][n]["mean_accuracy_pct"])
+    rec = f"qwen2.5-{items[best]['model'].split('-')[1].lower()}-b{budget}-winner.gguf"
     manifest = {"r_max_gib": float(budget), "context_tokens": CTX, "kv_cache_type": CFG["kv_cache_type"],
                 "overhead_gib_assumed": OVERHEAD, "files": files, "agreement_text": "agreement.txt",
-                "verdict": {"comparisons": ev["comparisons"], "configs": ev["configs"]},
-                "recommended_file": recommended, "recommended_reason": f"best test-subset accuracy at {budget} GiB"}
+                "verdict": {"comparisons": pick["comparisons"]}, "recommended_file": rec,
+                "recommended_reason": f"best test-subset accuracy at {budget} GiB"}
     (bundle / "manifest.json").write_text(json.dumps(manifest, indent=1))
-    print(f"bundle ready: {bundle} (recommended {recommended})", flush=True)
+    print(f"bundle ready: {bundle} (recommended {rec})", flush=True)
     return 0
 
 
@@ -694,12 +655,8 @@ def main() -> int:
         return cmd_plan()
     if cmd in ("store", "refs", "error", "sens"):
         return {"store": cmd_store, "refs": poc.cmd_refs, "error": cmd_error, "sens": cmd_sens}[cmd](args[0])
-    if cmd == "contest":
-        return cmd_contest(int(args[0]), args[1])
-    if cmd == "eval":
-        return cmd_eval(int(args[0]))
-    if cmd == "bundle":
-        return cmd_bundle(int(args[0]))
+    if cmd in ("list", "test", "pick", "bundle"):
+        return {"list": cmd_list, "test": cmd_test, "pick": cmd_pick, "bundle": cmd_bundle}[cmd](int(args[0]))
     raise SystemExit(__doc__)
 
 

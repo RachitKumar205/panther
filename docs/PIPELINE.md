@@ -708,3 +708,11 @@ ready (user, 2026-11-11): `b1` after m15; `b3` after m7 and the 3B reference; `b
 m14 and sensB. Each runs its contests, then that budget's test-subset evaluation. Lanes share the GPU, so every
 KL run waits until the GPU has its file size + 4 GiB free; `chain.sh` adopts a job that is already running
 instead of replacing it.
+
+### Phase 0 results (2026-11-11)
+- **0.1 preset gate (14B, 7 GiB, PoC RAM model):** of llama.cpp's presets only IQ3_XXS (6.683 GiB) and IQ2_M (6.133)
+  fit; IQ3_XS 7.089, Q3_K_S 7.347, IQ3_S 7.378, IQ3_M 7.586; the head/V baseline came out at 7.002. PoC winner vs
+  IQ3_XXS preset: KL 0.0896 vs 0.1137, accuracy 75.17 vs 74.12 (+1.05 pts, CI [0.00, 2.10]), perplexity 7.317 vs
+  7.531: the mix wins (by perplexity under the D5 rule). IQ2_M: KL 0.197 (benchmarks not finished; not needed).
+- **0.3 penalty model:** one probe per block scaled by offline error: Spearman 0.87 vs the measured table, but the
+  7 GiB solution it picks has 11.4% worse selection KL (0.1039 vs 0.0932) → D47 adaptive measurement.
