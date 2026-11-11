@@ -684,3 +684,18 @@ Decisions (D5 rule, paired bootstrap, Holm):
   holds all four files; the Pi checks whether 6.999 GiB really fits (Phase E3), with the 7B files as fallback.
 - Reading: at 7 GiB the per-layer mix matters at 14B (low bits, where precision placement is decisive) and not
   at 7B (Q6_K is already near lossless, so extra bytes buy nothing measurable).
+
+### Rewrite Phase 0 (D45) — 📝 planned 2026-11-11
+Script: `scripts/server/phase0.py` (GPU container; PoC RAM model: f16 KV, 4,096 context, 0.40 GiB overhead).
+- **0.1 presets:** stock `llama-quantize` mixes of 14B with the PoC importance matrix: IQ3_XXS, IQ3_XS, IQ3_S,
+  IQ3_M, Q3_K_S, IQ2_M, plus IQ3_XXS with output and every `attn_v` at Q6_K padded with IQ3_S layers (alternating
+  from both ends) up to 7.0 GiB. RAM from the files' real tensor bytes. Those that fit are scored like the PoC
+  winner: KL on selection, and the PoC verdict's test-subset evaluation (4 tasks, GSM8K 300, perplexity), then
+  compared with the winner by the same paired bootstrap. This is a second use of the approved test subset; the
+  presets are fixed (nothing is tuned on it). **Gate:** if the PoC winner does not beat the best preset, stop.
+- **0.3 penalty model:** importance-weighted dequantization error e(tensor, format) from the BF16 file and the
+  PoC store files (gguf-py); block error E = Σ e. For each probe format p: s_b = measured ΔKL(b, p) / ΔE(b, p),
+  predict the other 5 formats of the measured 14B table; report Spearman and relative error; then solve 7 GiB with
+  modelled vs measured penalties and measure the modelled solution's selection KL (1 KL run). **Gate:** the two
+  solutions' KL within a few percent. Note: this checks per-block prediction; the per-matrix split inside a block
+  (D45) has no measured data to check against.
