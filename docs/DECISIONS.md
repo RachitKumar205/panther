@@ -433,10 +433,22 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   the BF16 model; per-question agreement with llama.cpp ≥ 95% per task. Catches converter or prompt errors
   that a self-consistent pipeline would not.
 
-### D40. Cost of final task accuracy on the CPU build — open, measured in A4
+### D40. Cost of final task accuracy on the CPU build — measured in A4; decision needed before Phase D
 - MMLU test alone is 14,042 five-shot prompts (~11M tokens); on the CPU build this is hours per
   configuration for 1.5B and roughly 10× that for 14B. A4 records CPU timings; Phase D's plan (all tasks on
   CPU, CUDA with a CPU subset, or another design) is decided from the measured numbers before Phase D.
+- **Change (2026-11-11, user):** A4's full CPU stage (BF16 and A1 on every selection question, ≈ 90 min) was
+  stopped before finishing anything and replaced by a timing sample: CPU build, A1, 100 questions per task
+  (llama.cpp's own seeded subset), timing only. Script: `scripts/server/time_tasks_cpu.sh`.
+- **Measured (A1, 1.5B, 20 threads, per question):** HellaSwag 0.30 s, ARC-C 0.14 s, MMLU 1.11 s,
+  WinoGrande 0.09 s. Full test split per configuration: ≈ 5.3 CPU-hours for 1.5B (MMLU 4.3 h); expect
+  roughly 10× for 14B. On CUDA the full test for 1.5B is a few minutes.
+- **Consequence:** PLAN §2.1's "final task accuracy on the CPU build" for top-2 per model plus baselines
+  is not feasible for 7B/14B in the time available. Options for Phase D, to be decided:
+  1. Final task accuracy on CUDA for every finalist; CPU build only for perplexity and KL (cheap), plus
+     a CPU task check on a fixed subset (e.g. 200 questions per task) to report the CPU/CUDA difference.
+  2. CPU build on a fixed test subset (e.g. 2,000 MMLU questions) for every finalist; wider CIs.
+  3. Full CPU runs for 1.5B/3B only; CUDA for 7B/14B.
 
 ### D26. Generation-sanity prompts — planned, open
 - Proposal: 50 items drawn by seed from the selection questions of all five tasks, stored with the splits.
@@ -452,3 +464,4 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 - How to handle sensitivity precision for Phase C (D31: accept N = 48, enlarge the split, or a
   solver-based rule).
 - How 14B measures its per-gene activation correction (D36 C3 decides whether a layer sample suffices).
+- How Phase D measures final task accuracy given the CPU cost (D40).

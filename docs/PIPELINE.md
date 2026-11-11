@@ -442,7 +442,7 @@ follow-up proposed in D35; the check stays failed.
 - **D37 result: PASS.** The unscaled correction, confirmed on 4 fresh configurations, removes 84–92% of the
   CPU − CUDA gap on each. It is what Phase C's penalty table uses.
 
-### A4. Benchmark tasks through llama-perplexity 📝 planned
+### A4. Benchmark tasks through llama-perplexity ✅ passed 2026-11-11
 Turns the four log-likelihood benchmarks (HellaSwag, WinoGrande, ARC-Challenge, MMLU 5-shot) into the
 files llama.cpp reads, scores them, and recovers a right/wrong result per question, which the
 pre-registered decision rule (D5) needs for its paired bootstrap. GSM8K is A5.
@@ -493,7 +493,7 @@ reproduce llama.cpp's final accuracy exactly.
 |---|---|---|
 | BF16 | CUDA | baseline accuracies |
 | Q8_0, Q4_K, A1 | CUDA | behaviour across quality levels |
-| BF16, A1 | CPU | CPU/CUDA agreement on tasks; **timings for the Phase D cost estimate** |
+| ~~BF16, A1~~ | ~~CPU~~ | ~~full CPU runs~~ cut for time (user, 2026-11-11): replaced by a timing sample, A1 only, 100 random selection questions per task (D40) |
 
 **A4.4 Independent check (D39):** reimplement llama.cpp's scoring rule in transformers (BF16 on the GPU)
 for 200 seeded selection items per task, with the same prompt strings, and compare per-question choices
@@ -507,7 +507,29 @@ WinoGrande continuation) to report how much the definitions differ.
 3. BF16 is at least 10 points above chance on every task (HellaSwag, ARC-C, MMLU: 25%; WinoGrande: 50%),
    and Q8_0 is within 2 points of BF16 on every task;
 4. the independent check agrees with llama.cpp on ≥ 95% of items for every task;
-5. CPU timings recorded and a Phase D cost estimate written (D40).
+5. CPU timings recorded (from the 100-question sample) and a Phase D cost estimate written (D40).
+   CPU-vs-CUDA agreement on tasks is not checked in A4; the CPU/CUDA difference is handled by D36/D37.
+
+**Result (all 5 checks pass).** Selection questions, 1.5B, CUDA build (accuracy %):
+
+| File | HellaSwag | ARC-C | MMLU 5-shot | WinoGrande |
+|---|---|---|---|---|
+| BF16 | 67.10 | 46.10 | 61.25 | 76.30 |
+| Q8_0 | 67.50 | 45.40 | 60.85 | 77.20 |
+| Q4_K | 67.20 | 44.40 | 59.39 | 76.30 |
+| A1 (mixed) | 64.90 | 44.00 | 55.46 | 73.80 |
+
+Independent check (D39), 200 questions per task: agreement with llama.cpp 99.5 / 99.0 / 99.0 / 97.5%.
+The lm-eval scoring rules on the same questions give HellaSwag +3.0 and ARC-C +3.0 points (byte-length
+normalisation); MMLU and WinoGrande are identical.
+
+CPU timing sample (A1, 100 questions per task; full CPU stage cut for time): HellaSwag 30 s, ARC-C 14 s,
+MMLU 111 s, WinoGrande 9 s. Extrapolated to the full test split, **one 1.5B configuration takes ≈ 5.3 h on
+the CPU build** (MMLU ≈ 4.3 h); on CUDA the same is minutes. See D40.
+
+Problems found on the way (all silent in llama.cpp, all caught by the item-count check): 5-choice ARC
+questions need `-np 5`; `-f` plus the WinoGrande loader drops the last row unless the file ends with two
+newlines; question text containing U+2028 broke a `splitlines()` JSONL reader.
 
 **Known cost risk (D40):** final task accuracy is planned on the CPU build (PLAN §2.1). The full MMLU test
 is 14,042 five-shot prompts (~11M tokens). At the 1.5B CPU rate seen so far that is hours per
