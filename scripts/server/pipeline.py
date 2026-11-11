@@ -157,6 +157,22 @@ def searched_budgets(model: str) -> list[int]:
     raise SystemExit("every step needs the budget: pipeline.py <step> BUDGET MODEL")
 
 
+def note(msg: str) -> None:
+    """One plain progress line per event, in data/logs/progress-b<BUDGET>.log (IST), and on stdout."""
+    import datetime as dt
+    ist = dt.datetime.now(dt.timezone(dt.timedelta(hours=5, minutes=30))).strftime("%H:%M")
+    line = f"{ist} {msg}"
+    print(line, flush=True)
+    path = DATA / "logs" / f"progress-b{BUDGET}.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(line + "\n")
+
+
+def short_name(model: str) -> str:
+    return model.split("-")[1]
+
+
 class locked:
     """an exclusive lock per (model, step), so runs for different budgets never write the same files at once;
     the second one waits, then finds the work done and skips it."""
@@ -263,74 +279,119 @@ def base_file(model: str) -> Path:
 
 
 def fast_probe(model: str, a: dict[str, str]) -> Path:
-    """A probe file without rewriting the model: reflink-copy the base file (instant on XFS), point the changed
-    tensors' table entries at their new data, and append only that data. Every tensor's bytes are identical to a
-    normally assembled file; only the order inside the file differs."""
+    """A probe file without rewriting the model in Python: the base file's header, then every tensor in the same
+    order, copied by the kernel (copy_file_range: reflinked on XFS where block alignment allows). Unchanged runs
+    come from the base file, changed tensors from their type's quantized copy; then the header's type and offset
+    entries are updated. Tensors stay in order and back to back, as llama.cpp requires."""
     import gguf
     base = base_file(model)
     base_a = fill(model, base_format(model))
     inv = inv_of(model)
-    changed = {t.name: a[g.gene_id] for g in inv.genes for t in g.tensors if a[g.gene_id] != base_a[g.gene_id]}
+    new_type = {t.name: a[g.gene_id] for g in inv.genes for t in g.tensors if a[g.gene_id] != base_a[g.gene_id]}
     dst = out(model, "tmp", f"{assignment_digest(a)[:16]}.gguf")
     if dst.exists():
         return dst
-    part = dst.with_suffix(".part")
-    subprocess.run(["cp", "--reflink=always", str(base), str(part)], check=True)
-    r = gguf.GGUFReader(part, "r+")
-    tens = {t.name: t for t in r.tensors}
-    t0 = r.tensors[0]
+    rb = gguf.GGUFReader(base)
+    t0 = rb.tensors[0]
     data_start = int(t0.data_offset) - int(t0.field.parts[-1][0])
-    al = r.fields.get("general.alignment")
+    al = rb.fields.get("general.alignment")
     alignment = int(al.parts[-1][0]) if al else 32
-    pos = part.stat().st_size
-    plan = []
-    for name, fmt in changed.items():
-        src_path = DATA / "store" / model / f"{model}-{fmt}.gguf"
-        if src_path not in _SRC_READERS:
-            _SRC_READERS[src_path] = {t.name: t for t in gguf.GGUFReader(src_path).tensors}
-        src = _SRC_READERS[src_path][name]
-        pos += (-(pos - data_start)) % alignment
-        plan.append((name, src, pos))
-        tens[name].field.parts[-2][0] = int(src.tensor_type)
-        tens[name].field.parts[-1][0] = pos - data_start
-        pos += int(src.n_bytes)
-    r.data.flush()
-    del r
-    with open(part, "ab") as f:
-        for name, src, at in plan:
-            f.write(b"\0" * (at - f.tell()))
-            f.write(src.data.tobytes())
+    srcs = {}
+    for fmt in set(new_type.values()):
+        path = DATA / "store" / model / f"{model}-{fmt}.gguf"
+        srcs[fmt] = (path, {t.name: t for t in gguf.GGUFReader(path).tensors})
+    part = dst.with_suffix(".part")
+    plan, pos = [], 0  # (name, type, new relative offset)
+    with open(base, "rb") as fb, open(part, "wb") as fo:
+        def copy(fin, src_off: int, n: int) -> None:
+            if not hasattr(os, "copy_file_range"):  # not Linux (tests on the Mac): plain copy
+                fin.seek(src_off)
+                fo.write(fin.read(n))
+                return
+            while n > 0:
+                k = os.copy_file_range(fin.fileno(), fo.fileno(), n, src_off)
+                if k <= 0:
+                    raise OSError("copy_file_range copied nothing")
+                src_off, n = src_off + k, n - k
+        copy(fb, 0, data_start)  # header (same length: only type and offset values change)
+        run = None  # [base start, length] of the current run of unchanged tensors
+        for t in rb.tensors:
+            pad = (-pos) % alignment
+            if t.name in new_type:
+                if run:
+                    copy(fb, *run)
+                    run = None
+                fo.write(b"\0" * pad)
+                pos += pad
+                fmt = new_type[t.name]
+                s_path, s_t = srcs[fmt]
+                src = s_t[t.name]
+                with open(s_path, "rb") as fs:
+                    copy(fs, int(src.data_offset), int(src.n_bytes))
+                plan.append((t.name, int(src.tensor_type), pos))
+                pos += int(src.n_bytes)
+            else:
+                old = int(t.field.parts[-1][0])
+                if run is None or (data_start + old) != run[0] + run[1] + pad:
+                    if run:
+                        copy(fb, *run)
+                    fo.write(b"\0" * pad)
+                    pos += pad
+                    run = [data_start + old, int(t.n_bytes)]
+                else:
+                    run[1] += pad + int(t.n_bytes)
+                    pos += pad
+                plan.append((t.name, int(t.tensor_type), pos))
+                pos += int(t.n_bytes)
+        if run:
+            copy(fb, *run)
+    # Patch each tensor's type and offset in the header, at the byte positions they have in the base file (the
+    # header is copied verbatim, so the positions are the same).
+    base_addr = rb.data.ctypes.data
+    where = {t.name: (t.field.parts[-2].ctypes.data - base_addr, t.field.parts[-1].ctypes.data - base_addr)
+             for t in rb.tensors}
+    with open(part, "r+b") as f:
+        for name, ttype, off in plan:
+            f.seek(where[name][0])
+            f.write(np.uint32(ttype).tobytes())
+            f.seek(where[name][1])
+            f.write(np.uint64(off).tobytes())
+    expect = 0  # llama.cpp's rule: each tensor starts where the previous one ends, rounded up to the alignment
+    for t in gguf.GGUFReader(part).tensors:
+        expect += (-expect) % alignment
+        if int(t.field.parts[-1][0]) != expect:
+            raise SystemExit(f"probe file layout: {t.name} at {int(t.field.parts[-1][0])}, llama.cpp expects {expect}")
+        expect += int(t.n_bytes)
     part.rename(dst)
     if not verify(inv, a, dst).ok:
-        raise SystemExit(f"fast probe read-back failed for {dst.name}")
+        raise SystemExit(f"probe file read-back failed for {dst.name}")
     return dst
 
 
 def reflink_ok(model: str) -> bool:
-    """reflink-copied probe files are used only if, for a test block, every tensor (type and bytes) matches a
-    normally assembled file. Checked once per model; the answer is stored."""
-    import gguf
-    flag = out(model, f"reflink-check-{base_format(model)}.json")
+    """Probe files built by copy_file_range are used only if llama.cpp loads one and its KL equals that of the
+    same genotype assembled normally (2 KL runs, once per model and starting type; the answer is stored)."""
+    flag = out(model, f"probe-check-{base_format(model)}.json")
     if flag.exists():
         return json.loads(flag.read_text())["identical"]
     b0 = sorted(blocks(model))[len(blocks(model)) // 2]
     a = block_assignment(model, b0, probe_format(model))
+    same, kls = False, {}
     try:
         fast = fast_probe(model, a)
-        slow = out(model, "tmp", "reflink-check-slow.gguf")
+        slow = out(model, "tmp", "probe-check-normal.gguf")
         assemble(inv_of(model), a, store(model), slow, base_format=base_format(model))
-        rf = {t.name: t for t in gguf.GGUFReader(fast).tensors}
-        rs = {t.name: t for t in gguf.GGUFReader(slow).tensors}
-        same = rf.keys() == rs.keys() and all(rf[n].tensor_type == rs[n].tensor_type and
-                                              np.array_equal(rf[n].data, rs[n].data) for n in rs)
+        for name, path in (("copied", fast), ("normal", slow)):
+            label = f"rw:probecheck:{base_format(model)}:{name}:{b0}"
+            if evaluate.run("kl", model, path, label, THREADS, reference="sensitivity"):
+                kls[name] = find(records(model), label, reference="sensitivity")["metrics"]["kl_mean"]
+        same = len(kls) == 2 and abs(kls["copied"] - kls["normal"]) <= 1e-6 + 1e-5 * kls["normal"]
         fast.unlink()
         slow.unlink()
-    except Exception as e:  # noqa: BLE001  (any failure means: build files the normal way)
-        print(f"reflink check failed: {e}", flush=True)
-        same = False
-    flag.write_text(json.dumps({"block": b0, "identical": bool(same)}))
-    print(f"{model}: reflink-copied probe files {'match' if same else 'DO NOT match; using normal assembly'}",
-          flush=True)
+    except Exception as e:  # noqa: BLE001  (any failure means: build probe files the normal way)
+        print(f"probe check failed: {e}", flush=True)
+    flag.write_text(json.dumps({"block": b0, "kl": kls, "identical": bool(same)}))
+    note(f"{short_name(model)} part costs: fast probe files {'verified (same KL)' if same else 'FAILED the KL check; using normal assembly'}")
     return bool(same)
 
 
@@ -534,9 +595,11 @@ def _cmd_sens(model: str) -> int:
         if ("base", base) in run:
             _sens_one((model, "base", base))
             run.remove(("base", base))
+        note(f"{short_name(model)} part costs round {rnd}: {len(run)} KL runs to do ({len(done)} measured so far)")
         with ProcessPoolExecutor(CONCURRENT) as ex:
-            for _ in ex.map(_sens_one, [(model, b, f) for b, f in run]):
-                pass
+            for i, _ in enumerate(ex.map(_sens_one, [(model, b, f) for b, f in run]), 1):
+                if i % 25 == 0 or i == len(run):
+                    note(f"{short_name(model)} part costs round {rnd}: {i}/{len(run)}")
         base_kl, table = measured_table(model)
         measured = {(b, f) for b, row in table.items() for f in row}
         stats.append({"round": rnd, "runs": len(run), "measured_total": len(measured)})
@@ -548,7 +611,7 @@ def _cmd_sens(model: str) -> int:
             break
     out(model, f"sens-{base}.json").write_text(json.dumps({"base": base, "probe": probe, "base_kl": base_kl,
                                                    "table": table, "rounds": stats}, indent=1))
-    print(f"{model}: sensitivity done, {sum(s['runs'] for s in stats)} KL runs, base KL {base_kl:.5f}", flush=True)
+    note(f"{short_name(model)} part costs done: {sum(x['runs'] for x in stats)} KL runs")
     return 0
 
 
@@ -565,7 +628,7 @@ def file_ram_gib(model: str, path: Path) -> float:
 WINDOW = (-0.01, 0.005)   # in the solution space iff RAM is within -1% / +0.5% of the budget
 LIST_K = 6                # solver genotypes per model
 LIST_DISTANCE = 0.05      # each differs from every other in at least 5% of its matrices
-TEST_CONCURRENT = 8
+TEST_CONCURRENT = 4
 
 
 def in_window(model: str, a: dict[str, str], budget: float) -> bool:
@@ -647,6 +710,7 @@ def cmd_list(budget: int, model: str) -> int:
     for name, it in items.items():
         print(f"{budget} GiB {name:28s} RAM {it['ram_gib']:.3f} GiB", flush=True)
     path.write_text(json.dumps(items, indent=1))
+    note(f"{short_name(model)} list: {len(items)} genotypes, RAM " + ", ".join(f"{it['ram_gib']:.3f}" for it in items.values()) + " GiB")
     return 0
 
 
@@ -654,9 +718,9 @@ def test_label(budget: int, name: str, a: dict[str, str] | None) -> str:
     return f"rw:b{budget}:{name}" + (f":{assignment_digest(a)[:12]}" if a else "")
 
 
-def run_all_tests(model: str, path: Path, label: str, kl: bool) -> None:
+def run_all_tests(model: str, path: Path, label: str, with_kl: bool) -> None:
     """Every quality test on one file: KL (selection text), the four test-subset tasks, perplexity, GSM8K."""
-    if kl and not find(records(model), label, reference="selection"):
+    if with_kl and not find(records(model), label, reference="selection"):
         kl(model, path, "selection", label)
     for t in SUBSET:
         if not find(records(model), label, task=t, split="poc_test"):
@@ -668,9 +732,9 @@ def run_all_tests(model: str, path: Path, label: str, kl: bool) -> None:
     gsm8k_run(model, path, label)
 
 
-def tests_done(model: str, label: str, kl: bool) -> bool:
+def tests_done(model: str, label: str, with_kl: bool) -> bool:
     recs = records(model)
-    return ((not kl or find(recs, label, reference="selection") is not None)
+    return ((not with_kl or find(recs, label, reference="selection") is not None)
             and all(find(recs, label, task=t, split="poc_test") for t in SUBSET)
             and find(recs, label, text="test_web") is not None
             and out(model, "gsm8k", f"{label.replace(':', '_')}.json").exists())
@@ -678,16 +742,18 @@ def tests_done(model: str, label: str, kl: bool) -> bool:
 
 def _test_one(job: tuple[int, str, dict]) -> str:
     """One genotype: assembled once, all tests run on that file, then the file is deleted."""
+    global BUDGET
     budget, name, it = job
+    BUDGET = budget
     model, a = it["model"], it["assignment"]
     label = test_label(budget, name, a)
-    if tests_done(model, label, kl=True):
+    if tests_done(model, label, with_kl=True):
         return name
     need_disk()
     path = build_file(model, a)
     wait_for_gpu_memory(2 * path.stat().st_size)
     try:
-        run_all_tests(model, path, label, kl=True)
+        run_all_tests(model, path, label, with_kl=True)
     finally:
         path.unlink(missing_ok=True)
     return name
@@ -698,9 +764,9 @@ def _test_ref(job: tuple[int, str]) -> str:
     name = f"{model.split('-')[1]}:uniform-{REF_MODEL_FORMAT}"
     path = DATA / "store" / model / f"{model}-{REF_MODEL_FORMAT}.gguf"
     label = test_label(budget, name, None)
-    if not tests_done(model, label, kl=False):
+    if not tests_done(model, label, with_kl=False):
         wait_for_gpu_memory(2 * path.stat().st_size)
-        run_all_tests(model, path, label, kl=False)  # KL against a different model's original is meaningless
+        run_all_tests(model, path, label, with_kl=False)  # KL against a different model's original is meaningless
     return name
 
 
@@ -710,11 +776,27 @@ def cmd_test(budget: int, model: str) -> int:
         print(f"tested {_test_ref((budget, model))}", flush=True)
         return 0
     items = json.loads(list_path(budget, model).read_text())
-    print(f"{model}: {len(items)} genotypes, all at once", flush=True)
-    with ProcessPoolExecutor(len(items)) as ex:
-        for n in ex.map(_test_one, [(budget, n, it) for n, it in items.items()]):
-            print(f"  tested {n}", flush=True)
-    return 0
+    sm = short_name(model)
+
+    def done() -> int:
+        return sum(tests_done(model, test_label(budget, n, it["assignment"]), with_kl=True) for n, it in items.items())
+    note(f"{sm} tests: {done()}/{len(items)} genotypes done, testing the rest {TEST_CONCURRENT} at a time")
+    failed = []
+    for attempt in (1, 2):  # a genotype that fails (e.g. a crashed run) is retried once
+        todo = [(budget, n, it) for n, it in items.items() if not tests_done(model, test_label(budget, n, it["assignment"]), with_kl=True)]
+        with ProcessPoolExecutor(TEST_CONCURRENT if attempt == 1 else 1) as ex:
+            futs = {ex.submit(_test_one, j): j[1] for j in todo}
+            failed = []
+            for f in futs:
+                try:
+                    f.result()
+                    note(f"{sm} tests: {futs[f]} done ({done()}/{len(items)} genotypes)")
+                except BaseException as e:  # noqa: BLE001
+                    failed.append(futs[f])
+                    note(f"{sm} tests: {futs[f]} failed ({e}); {'retrying' if attempt == 1 else 'giving up'}")
+        if not failed:
+            break
+    return 1 if failed else 0
 
 
 def gsm8k_run(model: str, path: Path, label: str) -> dict:
@@ -723,7 +805,11 @@ def gsm8k_run(model: str, path: Path, label: str) -> dict:
         return json.loads(rec_path.read_text())
     items = jsonl(DATA / "splits/llama_tasks/poc_test/gsm8k.jsonl")
     fewshot = jsonl(DATA / "splits/tasks/fewshot/gsm8k.jsonl")
-    with evaluate.LlamaServer(path, parallel=8, ctx_per_slot=2048, threads=THREADS,
+    import socket
+    with socket.socket() as sock:  # a free port: several genotypes run GSM8K at the same time
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    with evaluate.LlamaServer(path, parallel=8, ctx_per_slot=2048, threads=THREADS, port=port,
                               log=out(model, "servers", f"{path.stem}.log")) as srv:
         comps = srv.map(lambda it: srv.complete(evaluate.gsm8k_prompt(it["question"], fewshot),
                                                 evaluate.GSM8K_MAX_TOKENS, evaluate.GSM8K_STOP), items)

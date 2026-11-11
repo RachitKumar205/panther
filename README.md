@@ -27,6 +27,7 @@ One command, on the Mac:
 
 ```bash
 ./panther run 7       # sync the code, run the 7 GiB budget on the server, check each model's winner on the Pi
-./panther status 7    # what every lane is doing
+./panther status 7    # the latest progress lines and what every lane is doing
+./panther watch 7     # follow the progress live
 uv sync && uv run pytest
 ```
