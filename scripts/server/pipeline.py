@@ -43,24 +43,52 @@ OVERHEAD = CFG["overhead_gib"]
 KV_BPE = {"Q8_0": 34 / 32, "F16": 2.0}[CFG["kv_cache_type"]]
 MENU_ALL = CFG["formats"]
 CONCURRENT = int(os.environ.get("PANTHER_KL_CONCURRENT", "10"))
-GPU_HEADROOM_MIB = 4096  # per KL run on top of the file size: compute buffers and logits
 
 
-def wait_for_gpu_memory(need_bytes: int, timeout_s: int = 3600) -> None:
-    """Several lanes share the GPU: start a KL run only when the file plus headroom fits in free memory."""
-    import random
-    import shutil
-    import time
-    if not shutil.which("nvidia-smi"):
-        return
-    need = need_bytes / 2**20 + GPU_HEADROOM_MIB
-    t0 = time.monotonic()
-    while time.monotonic() - t0 < timeout_s:
-        out_ = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-                              capture_output=True, text=True).stdout.split()
-        if not out_ or float(out_[0]) >= need:
-            return
-        time.sleep(random.uniform(5, 15))
+GPU_BOOKABLE = 88 * 2**30  # of the GPU's 96 GiB; the rest is margin
+
+
+class gpu_booking:
+    """Shared booking of GPU memory across every process and lane: a run books its file size + working space in
+    one ledger (under a file lock) and waits until the total fits in GPU_BOOKABLE; it releases on exit. Checking
+    free memory instead raced: ten runs saw room at the same moment and all loaded. Bookings expire after `hold_s`
+    so a killed job cannot block the GPU for long."""
+
+    def __init__(self, need_bytes: int, hold_s: int) -> None:
+        self.need, self.hold = int(need_bytes), hold_s
+        self.key = f"{os.uname().nodename}-{os.getpid()}-{id(self)}"
+        self.ledger = DATA / "locks" / "gpu-bookings.json"
+
+    def _edit(self, fn):
+        import fcntl
+        import time
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.ledger.with_suffix(".lock"), "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            book = json.loads(self.ledger.read_text()) if self.ledger.exists() else {}
+            now = time.time()
+            book = {k: v for k, v in book.items() if v["until"] > now}
+            ok = fn(book, now)
+            self.ledger.write_text(json.dumps(book))
+            return ok
+
+    def __enter__(self) -> "gpu_booking":
+        import random
+        import time
+
+        def take(book, now):
+            if sum(v["bytes"] for v in book.values()) + self.need > GPU_BOOKABLE and book:
+                return False
+            book[self.key] = {"bytes": self.need, "until": now + self.hold}
+            return True
+        while not self._edit(take):
+            time.sleep(random.uniform(3, 8))
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._edit(lambda book, now: book.pop(self.key, None) or True)
+
+
 CALIB = DATA / "splits" / "calibration.txt"
 REF_MODEL_FORMAT = "Q6_K"  # cross-model references: uniform Q6_K, accuracy only
 
@@ -383,7 +411,9 @@ def reflink_ok(model: str) -> bool:
         assemble(inv_of(model), a, store(model), slow, base_format=base_format(model))
         for name, path in (("copied", fast), ("normal", slow)):
             label = f"rw:probecheck:{base_format(model)}:{name}:{b0}"
-            if evaluate.run("kl", model, path, label, THREADS, reference="sensitivity"):
+            with gpu_booking(path.stat().st_size + 6 * 2**30, hold_s=1800):
+                ok = evaluate.run("kl", model, path, label, THREADS, reference="sensitivity")
+            if ok:
                 kls[name] = find(records(model), label, reference="sensitivity")["metrics"]["kl_mean"]
         same = len(kls) == 2 and abs(kls["copied"] - kls["normal"]) <= 1e-6 + 1e-5 * kls["normal"]
         fast.unlink()
@@ -492,9 +522,9 @@ def _sens_one(job: tuple[str, str, str, bool]) -> None:
     model, block, fmt, fast = job
     a = block_assignment(model, None if block == "base" else block, fmt)
     path = fast_probe(model, a) if fast else build_file(model, a)
-    wait_for_gpu_memory(path.stat().st_size)
     try:
-        kl(model, path, "sensitivity", sens_label(model, block, fmt))
+        with gpu_booking(path.stat().st_size + 6 * 2**30, hold_s=1800):
+            kl(model, path, "sensitivity", sens_label(model, block, fmt))
     finally:
         path.unlink(missing_ok=True)
 
@@ -598,11 +628,20 @@ def _cmd_sens(model: str) -> int:
         fast = bool(run) and reflink_ok(model)  # checked once, here, before the parallel runs
         note(f"{short_name(model)} part costs round {rnd}: {len(run)} KL runs to do ({len(done)} measured so far)")
         with ProcessPoolExecutor(CONCURRENT) as ex:
-            futs = [ex.submit(_sens_one, (model, b, f, fast)) for b, f in run]
+            futs = {ex.submit(_sens_one, (model, b, f, fast)): (b, f) for b, f in run}
+            failed = []
             for i, fut in enumerate(as_completed(futs), 1):  # count runs as they finish
-                fut.result()
+                try:
+                    fut.result()
+                except BaseException:  # noqa: BLE001  (one failed run never stops the lane)
+                    failed.append(futs[fut])
                 if i % 25 == 0 or i == len(run):
                     note(f"{short_name(model)} part costs round {rnd}: {i}/{len(run)}")
+        for b, f in failed:  # retried one at a time
+            try:
+                _sens_one((model, b, f, fast))
+            except BaseException as e:  # noqa: BLE001
+                note(f"{short_name(model)} part costs: {b} {f} failed twice ({e}); continuing without it")
         base_kl, table = measured_table(model)
         measured = {(b, f) for b, row in table.items() for f in row}
         stats.append({"round": rnd, "runs": len(run), "measured_total": len(measured)})
@@ -754,9 +793,9 @@ def _test_one(job: tuple[int, str, dict]) -> str:
         return name
     need_disk()
     path = build_file(model, a)
-    wait_for_gpu_memory(2 * path.stat().st_size)
     try:
-        run_all_tests(model, path, label, with_kl=True)
+        with gpu_booking(path.stat().st_size + 10 * 2**30, hold_s=3 * 3600):
+            run_all_tests(model, path, label, with_kl=True)
     finally:
         path.unlink(missing_ok=True)
     return name
@@ -768,8 +807,8 @@ def _test_ref(job: tuple[int, str]) -> str:
     path = DATA / "store" / model / f"{model}-{REF_MODEL_FORMAT}.gguf"
     label = test_label(budget, name, None)
     if not tests_done(model, label, with_kl=False):
-        wait_for_gpu_memory(2 * path.stat().st_size)
-        run_all_tests(model, path, label, with_kl=False)  # KL against a different model's original is meaningless
+        with gpu_booking(path.stat().st_size + 10 * 2**30, hold_s=3 * 3600):
+            run_all_tests(model, path, label, with_kl=False)  # KL against a different model's original is meaningless
     return name
 
 
