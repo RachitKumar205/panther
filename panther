@@ -25,7 +25,7 @@ case "$cmd" in
       > "$HOME/panther-logs/pi-budget-$B.log" 2>&1 &
     echo "Pi checks for budget $B: $HOME/panther-logs/pi-budget-$B.log" ;;
   status)
-    ssh_s "cd /s3/panther/work/data/logs && tail -n 12 progress-b$B.log 2>/dev/null; echo; for f in chain-b$B-*.log chain-b$B.log; do [ -f \$f ] && printf '%-20s %s\n' \"\${f#chain-}\" \"\$(tail -n 1 \$f | cut -c1-110)\"; done; true"
+    ssh_s "cd /s3/panther/work/data/logs && grep -E 'STOPPED|FAILED' progress-b$B.log 2>/dev/null | tail -n 3 | sed 's/^/!! /'; tail -n 12 progress-b$B.log 2>/dev/null; echo; for f in chain-b$B-*.log chain-b$B.log; do [ -f \$f ] && printf '%-20s %s\n' \"\${f#chain-}\" \"\$(tail -n 1 \$f | cut -c1-110)\"; done; true"
     tail -n 3 "$HOME/panther-logs/pi-budget-$B.log" 2>/dev/null || true ;;
   watch)
     ssh_s "tail -n 20 -F /s3/panther/work/data/logs/progress-b$B.log" ;;

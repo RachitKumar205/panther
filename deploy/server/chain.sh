@@ -25,10 +25,19 @@ while read -r kind name cmd; do
     [ -n "$status" ] && "${P[@]}" rm -f "panther-$name" >/dev/null
     case "$kind" in cpu) sub=job ;; gpu) sub=gpujob ;; *) log "bad kind $kind"; exit 2 ;; esac
     # shellcheck disable=SC2086
-    "$HERE/panther.sh" "$sub" "$name" $cmd >>"$LOG" 2>&1 || { log "FAILED to start $name"; exit 1; }
+    "$HERE/panther.sh" "$sub" "$name" $cmd >>"$LOG" 2>&1 || {
+      log "FAILED to start $name"
+      echo "$(TZ=Asia/Kolkata date +%H:%M) LANE $CHAIN STOPPED: could not start $name" >> "$W/data/logs/progress-${CHAIN%%-*}.log"
+      exit 1; }
   fi
   rc="$("${P[@]}" wait "panther-$name")"
   log "$name exited $rc"
-  [ "$rc" = 0 ] || { log "chain $CHAIN stopped at $name"; exit 1; }
+  if [ "$rc" != 0 ]; then
+    log "chain $CHAIN stopped at $name"
+    # Failures go into the budget's progress stream (./panther watch|status), with the job's last error line.
+    why="$(grep -iE "error|failed|traceback|exception" "$W/data/logs/$name.log" 2>/dev/null | tail -n 1 | cut -c1-200)"
+    echo "$(TZ=Asia/Kolkata date +%H:%M) LANE $CHAIN STOPPED at $name: ${why:-exit $rc}" >> "$W/data/logs/progress-${CHAIN%%-*}.log"
+    exit 1
+  fi
 done < "$STEPS"
 log "chain $CHAIN done"

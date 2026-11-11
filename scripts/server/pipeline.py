@@ -952,4 +952,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:  # noqa: BLE001  (a failure is never silent: it goes into the progress stream)
+        if BUDGET is not None:
+            note(f"FAILED: {' '.join(sys.argv[1:])}: {type(e).__name__}: {e}")
+        raise
