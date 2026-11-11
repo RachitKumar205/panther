@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# The one entry point, run on the Mac.
+#
+#   ./panther run 7        sync the code to the server, run the 7 GiB budget there (every model in parallel), and
+#                          send each model's winner to the Pi as soon as it is ready (one Pi check at a time)
+#   ./panther status 7     what every lane of the 7 GiB budget is doing
+#
+# Needs the server's SSH control master (deploy/server/local.env) and key login to the Pi (PANTHER_PI).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=/dev/null
+. "$ROOT/deploy/server/local.env"
+PI="${PANTHER_PI:-jia@100.89.94.89}"
+ssh_s() { ssh -o ControlPath="$PANTHER_SSH_CONTROL" -o BatchMode=yes "$PANTHER_HOST" "$@"; }
+sizes() { grep -E "^  $1: " "$ROOT/configs/search.yaml" | sed -E 's/.*searched: \[([^]]*)\].*/\1/' | tr ',' '\n' |
+          sed -E 's/.*Qwen2\.5-([0-9.]+B).*/\1/' | tr 'A-Z' 'a-z'; }
+cmd="${1:?usage: ./panther run|status BUDGET}"; B="${2:?budget in GiB}"
+case "$cmd" in
+  run)
+    "$ROOT/deploy/server/push.sh" >/dev/null
+    ssh_s "cd /s3/panther/work/repo && deploy/server/run-budget.sh $B"
+    mkdir -p "$HOME/panther-logs"
+    nohup bash -c "for s in $(sizes "$B" | tr '\n' ' '); do PANTHER_PI='$PI' '$ROOT/pi/relay.sh' $B \$s '$PI'; done" \
+      > "$HOME/panther-logs/pi-budget-$B.log" 2>&1 &
+    echo "Pi checks for budget $B: $HOME/panther-logs/pi-budget-$B.log" ;;
+  status)
+    ssh_s "cd /s3/panther/work/data/logs && for f in chain-b$B-*.log chain-b$B.log; do [ -f \$f ] && printf '%-20s %s\n' \"\${f#chain-}\" \"\$(tail -n 1 \$f | cut -c1-110)\"; done; true" ;;
+  *) echo "usage: ./panther run|status BUDGET" >&2; exit 2 ;;
+esac

@@ -35,14 +35,14 @@ DATA = Path(os.environ.get("PANTHER_DATA", REPO_ROOT / "data"))
 LLAMA = Path(os.environ.get("PANTHER_LLAMA", "/opt/llama.cpp"))
 THREADS = int(os.environ.get("PANTHER_THREADS", "16"))
 SENS_CHUNKS = 12
-SUBSET = {"mmlu": 1000, "hellaswag": 2000, "arc_challenge": None, "winogrande": None}  # test subset (D42)
+SUBSET = {"mmlu": 1000, "hellaswag": 2000, "arc_challenge": None, "winogrande": None}  # test subset
 RW = DATA / "rewrite"
 CFG = yaml.safe_load((REPO_ROOT / "configs" / "search.yaml").read_text())
 CTX = CFG["context_tokens"]
 OVERHEAD = CFG["overhead_gib"]
 KV_BPE = {"Q8_0": 34 / 32, "F16": 2.0}[CFG["kv_cache_type"]]
 MENU_ALL = CFG["formats"]
-CONCURRENT = int(os.environ.get("PANTHER_KL_CONCURRENT", "10"))  # D48
+CONCURRENT = int(os.environ.get("PANTHER_KL_CONCURRENT", "10"))
 GPU_HEADROOM_MIB = 4096  # per KL run on top of the file size: compute buffers and logits
 
 
@@ -62,7 +62,7 @@ def wait_for_gpu_memory(need_bytes: int, timeout_s: int = 3600) -> None:
             return
         time.sleep(random.uniform(5, 15))
 CALIB = DATA / "splits" / "calibration.txt"
-REF_MODEL_FORMAT = "Q6_K"  # cross-model references: uniform Q6_K, accuracy only (D45)
+REF_MODEL_FORMAT = "Q6_K"  # cross-model references: uniform Q6_K, accuracy only
 
 
 # --- records of quality runs (written by panther.evaluate) ---------------------------------------------------
@@ -78,8 +78,7 @@ def find(recs: list[dict], label: str, build: str = "cuda", **how) -> dict | Non
 
 
 def kl(model: str, gguf: Path, ref: str, label: str) -> None:
-    if evaluate.main(["kl", "--model", model, "--gguf", str(gguf), "--build", "cuda", "--reference", ref,
-                      "--label", label, "--threads", str(THREADS)]) != 0:
+    if not evaluate.run("kl", model, gguf, label, THREADS, reference=ref):
         raise SystemExit(f"{label}: KL run failed")
 
 
@@ -149,18 +148,17 @@ def avg_bpw(model: str, budget: float) -> float:
     return 8 * room / sum(g.n_weights for g in inv.genes)
 
 
-BUDGET: int | None = None  # D51: set from the command line; every step then works for exactly this budget
+BUDGET: int | None = None  # set from the command line; every step then works for exactly this budget
 
 
 def searched_budgets(model: str) -> list[int]:
     if BUDGET is not None:
         return [BUDGET] if model in contests()[BUDGET]["searched"] else []
-    active = set(CFG.get("active_budgets", contests()))  # without a budget argument: the active budgets (D48)
-    return sorted(b for b, c in contests().items() if model in c["searched"] and b in active)
+    raise SystemExit("every step needs the budget: pipeline.py <step> BUDGET MODEL")
 
 
 class locked:
-    """D51: an exclusive lock per (model, step), so runs for different budgets never write the same files at once;
+    """an exclusive lock per (model, step), so runs for different budgets never write the same files at once;
     the second one waits, then finds the work done and skips it."""
 
     def __init__(self, name: str) -> None:
@@ -183,7 +181,7 @@ MIN_FREE_GB = 30
 
 
 def need_disk(timeout_s: int = 3600) -> None:
-    """D51: heavy steps wait while the data disk has less than MIN_FREE_GB free, then fail clearly."""
+    """heavy steps wait while the data disk has less than MIN_FREE_GB free, then fail clearly."""
     import shutil
     import time
     t0 = time.monotonic()
@@ -196,7 +194,7 @@ def need_disk(timeout_s: int = 3600) -> None:
 
 @lru_cache(maxsize=None)
 def menu(model: str) -> list[str]:
-    """D46: formats between the lowest budget average - 1.5 and the highest + 2.5 bits per weight."""
+    """formats between the lowest budget average - 1.5 and the highest + 2.5 bits per weight."""
     bs = [avg_bpw(model, b) for b in searched_budgets(model)]
     lo, hi = min(bs) - 1.5, max(bs) + 2.5
     return [f for f in MENU_ALL if lo <= bits_per_weight(f) <= hi]
@@ -221,13 +219,13 @@ def fill(model: str, fmt: str) -> dict[str, str]:
 
 
 def base_format(model: str) -> str:
-    """D46: the menu format closest to the lowest searched budget's average bits per weight."""
+    """the menu format closest to the lowest searched budget's average bits per weight."""
     target = avg_bpw(model, searched_budgets(model)[0])
     return min(menu(model), key=lambda f: abs(bits_per_weight(f) - target))
 
 
 def probe_format(model: str) -> str:
-    """D47: the highest menu format at most `sensitivity_probe_up_bpw` above the base (else the one below)."""
+    """the highest menu format at most `sensitivity_probe_up_bpw` above the base (else the one below)."""
     m = sorted(menu(model), key=bits_per_weight)
     b = bits_per_weight(base_format(model))
     up = [f for f in m if b < bits_per_weight(f) <= b + CFG["sensitivity_probe_up_bpw"]]
@@ -267,7 +265,7 @@ def base_file(model: str) -> Path:
 def fast_probe(model: str, a: dict[str, str]) -> Path:
     """A probe file without rewriting the model: reflink-copy the base file (instant on XFS), point the changed
     tensors' table entries at their new data, and append only that data. Every tensor's bytes are identical to a
-    normally assembled file; only the order inside the file differs (D50)."""
+    normally assembled file; only the order inside the file differs."""
     import gguf
     base = base_file(model)
     base_a = fill(model, base_format(model))
@@ -309,7 +307,7 @@ def fast_probe(model: str, a: dict[str, str]) -> Path:
 
 
 def reflink_ok(model: str) -> bool:
-    """D50: reflink-copied probe files are used only if, for a test block, every tensor (type and bytes) matches a
+    """reflink-copied probe files are used only if, for a test block, every tensor (type and bytes) matches a
     normally assembled file. Checked once per model; the answer is stored."""
     import gguf
     flag = out(model, f"reflink-check-{base_format(model)}.json")
@@ -413,7 +411,7 @@ def _cmd_error(model: str) -> int:
     return 0
 
 
-# --- sensitivity (D47: adaptive) ------------------------------------------------------------------------------
+# --- sensitivity ------------------------------------------------------------------------------
 
 def block_assignment(model: str, block: str | None, fmt: str | None = None) -> dict[str, str]:
     """The base, with every matrix of `block` moved to `fmt` where allowed."""
@@ -466,7 +464,7 @@ def block_formats(model: str, block: str) -> list[str]:
 
 def penalties(model: str, table: dict[str, dict[str, float]] | None = None,
               err: dict | None = None) -> dict[str, dict[str, float]]:
-    """D47: per block, dKL as a piecewise-linear function of the block's offline error E through (base, 0) and
+    """per block, dKL as a piecewise-linear function of the block's offline error E through (base, 0) and
     the measured points; per matrix, penalty(m, f) = r_b(f) * (e(m, f) - e(m, base)), r_b(f) = dKL_b(f) / dE_b(f)."""
     if table is None:
         table = measured_table(model)[1]
@@ -562,9 +560,9 @@ def file_ram_gib(model: str, path: Path) -> float:
     return (w + inv_of(model).geometry.kv_cache_bytes(CTX, KV_BPE) + OVERHEAD * GIB) / GIB
 
 
-# --- solution list, test all, pick (D49) ---------------------------------------------------------------------
+# --- solution list, test all, pick ---------------------------------------------------------------------
 
-WINDOW = (-0.01, 0.005)   # D49: in the solution space iff RAM is within -1% / +0.5% of the budget
+WINDOW = (-0.01, 0.005)   # in the solution space iff RAM is within -1% / +0.5% of the budget
 LIST_K = 6                # solver genotypes per model
 LIST_DISTANCE = 0.05      # each differs from every other in at least 5% of its matrices
 TEST_CONCURRENT = 8
@@ -640,7 +638,7 @@ def load_list(budget: int) -> dict[str, dict]:
 
 
 def cmd_list(budget: int, model: str) -> int:
-    """One model's solution space for a budget, written once and never extended (D49)."""
+    """One model's solution space for a budget, written once and never extended."""
     path = list_path(budget, model)
     if path.exists():
         print(f"list exists: {path}")
@@ -662,12 +660,10 @@ def run_all_tests(model: str, path: Path, label: str, kl: bool) -> None:
         kl(model, path, "selection", label)
     for t in SUBSET:
         if not find(records(model), label, task=t, split="poc_test"):
-            if evaluate.main(["task", "--model", model, "--gguf", str(path), "--build", "cuda", "--task", t,
-                                   "--split", "poc_test", "--label", label, "--threads", str(THREADS)]) != 0:
+            if not evaluate.run("task", model, path, label, THREADS, task=t, split="poc_test"):
                 raise SystemExit(f"{label} {t} failed")
     if not find(records(model), label, text="test_web"):
-        if evaluate.main(["ppl", "--model", model, "--gguf", str(path), "--build", "cuda", "--text",
-                               "test_web", "--label", label, "--threads", str(THREADS)]) != 0:
+        if not evaluate.run("ppl", model, path, label, THREADS, text="test_web"):
             raise SystemExit(f"{label} ppl failed")
     gsm8k_run(model, path, label)
 
@@ -727,11 +723,11 @@ def gsm8k_run(model: str, path: Path, label: str) -> dict:
         return json.loads(rec_path.read_text())
     items = jsonl(DATA / "splits/llama_tasks/poc_test/gsm8k.jsonl")
     fewshot = jsonl(DATA / "splits/tasks/fewshot/gsm8k.jsonl")
-    with evaluate.LlamaServer(LLAMA, path, "cuda", parallel=8, ctx_per_slot=2048, threads=THREADS,
-                     log=out(model, "servers", f"{path.stem}.log")) as srv:
-        comps = srv.map(lambda it: srv.complete(evaluate.prompt(it["question"], fewshot), evaluate.MAX_TOKENS,
-                                                evaluate.STOP), items)
-    correct = [int(evaluate.exact_match(evaluate.strict_match(c), it["answer"])) for it, c in zip(items, comps)]
+    with evaluate.LlamaServer(path, parallel=8, ctx_per_slot=2048, threads=THREADS,
+                              log=out(model, "servers", f"{path.stem}.log")) as srv:
+        comps = srv.map(lambda it: srv.complete(evaluate.gsm8k_prompt(it["question"], fewshot),
+                                                evaluate.GSM8K_MAX_TOKENS, evaluate.GSM8K_STOP), items)
+    correct = [int(evaluate.gsm8k_correct(c, it["answer"])) for it, c in zip(items, comps)]
     rec = {"ids": [it["id"] for it in items], "correct": correct}
     rec_path.write_text(json.dumps(rec))
     return rec
@@ -856,18 +852,15 @@ def main() -> int:
     if cmd == "refs":
         with locked(f"{args[-1]}-refs"):
             return cmd_refs(args[-1])
-    if cmd in ("store", "error", "sens"):  # "store B MODEL" (D51), or "store MODEL" for the active budgets
-        if len(args) == 2:
-            BUDGET = int(args[0])
-        return {"store": cmd_store, "error": cmd_error, "sens": cmd_sens}[cmd](args[-1])
-    if cmd in ("list", "test", "pick", "bundle"):
-        BUDGET = int(args[0])
-    if cmd in ("list", "test"):
-        return {"list": cmd_list, "test": cmd_test}[cmd](int(args[0]), args[1])
-    if cmd in ("pick", "bundle") and len(args) == 2:
-        return {"pick": cmd_pick_model, "bundle": cmd_bundle_model}[cmd](int(args[0]), args[1])
-    if cmd == "pick":
-        return cmd_pick(int(args[0]))
+    BUDGET = int(args[0])
+    if cmd == "pick" and len(args) == 1:
+        return cmd_pick(BUDGET)
+    steps = {"store": cmd_store, "error": cmd_error, "sens": cmd_sens}
+    if cmd in steps:
+        return steps[cmd](args[1])
+    steps2 = {"list": cmd_list, "test": cmd_test, "pick": cmd_pick_model, "bundle": cmd_bundle_model}
+    if cmd in steps2:
+        return steps2[cmd](BUDGET, args[1])
     raise SystemExit(__doc__)
 
 

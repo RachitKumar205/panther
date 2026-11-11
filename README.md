@@ -17,14 +17,16 @@ Decisions that stand: [docs/DECISIONS.md](docs/DECISIONS.md). Server setup and r
 | `src/panther/stats.py` | Paired bootstrap comparison of two configurations |
 | `scripts/server/pipeline.py` | The pipeline steps (store, refs, error, sens, list, test, pick, bundle) |
 | `scripts/server/` | Model download, quantized copies (llama-quantize) and their check |
-| `deploy/server/` | Container image, job runner, `run-budget.sh` (one command per budget), host setup/uninstall |
-| `pi/` | Pi setup, the Pi check (`panther_pi.py`), copying bundles to the Pi (`fetch_bundle.sh`, `relay.sh`) |
+| `panther` | The one entry point (Mac): `run` and `status` per budget |
+| `deploy/server/` | Container image, job runner, `run-budget.sh` (what `./panther run` starts on the server), host setup/uninstall |
+| `pi/` | Pi setup, the Pi check (`panther_pi.py`), copying a winner to the Pi (`fetch_bundle.sh`, `relay.sh`) |
 
 ## Run
 
+One command, on the Mac:
+
 ```bash
-uv sync && uv run pytest                    # Mac: tests
-deploy/server/push.sh                       # Mac: copy the code to the server
-deploy/server/run-budget.sh 7               # server: the whole 7 GiB budget, unattended, safe to rerun
-pi/relay.sh 7 14b                           # Mac: when 14B's 7 GiB winner is ready, check it on the Pi
+./panther run 7       # sync the code, run the 7 GiB budget on the server, check each model's winner on the Pi
+./panther status 7    # what every lane is doing
+uv sync && uv run pytest
 ```

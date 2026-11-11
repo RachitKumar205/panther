@@ -62,7 +62,7 @@ cannot give layer 0 more bits than layer 20, which is where the gain over llama.
 from the weights alone (no measurement) reaches ~75% of the achievable improvement on 14B, about llama.cpp-recipe
 level; measuring which parts matter reaches ~97%.
 
-## The steps (one command per budget: `deploy/server/run-budget.sh <budget>`)
+## The steps (one command per budget: `./panther run <budget>` on the Mac)
 
 Each model runs in its own lane, straight through, without waiting for the other models. Every step takes the budget
 as an argument and checks the disk first: work already there is skipped. Several budgets can run at once: steps that
@@ -78,7 +78,7 @@ the data disk has less than 30 GB free.
 | 5 | Solver list | The solver's 6 best genotypes inside the window (each ≥5% different) + 1 baseline (one type everywhere, raised layer by layer to fill the budget). This is the model's whole solution space; stored in `rewrite/budget-<B>/list-<model>.json` | CPU, seconds |
 | 6 | Tests | Each of the 7 genotypes built once and given every test: KL, perplexity, MMLU (1,000), HellaSwag (2,000), ARC-C (1,172), WinoGrande (1,267), GSM8K (300); all 7 at once | GPU |
 | 7 | Winner | Best mean accuracy (ties: lower KL) | seconds |
-| 8 | Pi | `pi/relay.sh <B> <size>` on the Mac copies the winner to the Pi; the Pi loads it once, checks peak RAM against the budget and measures speed (256-token prompt, 64 tokens out, 4 threads) | Pi |
+| 8 | Pi | `./panther run` copies each winner to the Pi as soon as it is bundled (one check at a time); the Pi loads it once, checks peak RAM against the budget and measures speed (256-token prompt, 64 tokens out, 4 threads) | Pi |
 | 9 | Comparison | All models' winners and the reference model against each other (paired bootstrap on accuracy) | seconds |
 
 Part-cost files are made with a **reflink copy** (XFS copy-on-write clone: the copy shares the base file's data,
@@ -108,4 +108,4 @@ such file is compared tensor by tensor with a normally built file; if anything d
 | 32B: tests of 7 genotypes | ~00:30 |
 | 32B: winner → Pi; comparison 14B vs 32B vs 7B | **~01:00** |
 
-**Then 1 GiB (~1 h), 3 GiB (~2.5 h), 5 GiB (~3 h)**, each with `run-budget.sh`.
+**Then 1 GiB (~1 h), 3 GiB (~2.5 h), 5 GiB (~3 h)**, each with `./panther run <budget>`.
