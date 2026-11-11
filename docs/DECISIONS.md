@@ -629,6 +629,17 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 
 ---
 
+### D50. One command per budget; each model goes straight to its winner and the Pi; reflink copies for part costs — decided by user 2026-11-11
+- **Why:** the user: the pipeline must be code, not hand-written job lists; a model whose measurements are done must
+  go to the solver and its final picks immediately; building a whole model file for every measurement is wasteful.
+- **What:** `deploy/server/run-budget.sh <B>` runs one lane per model (quantized copies → offline error → reference
+  → part costs → solver list → tests → winner → Pi bundle) and a final cross-model comparison; it is idempotent and
+  never rewrites a running lane. `pi/relay.sh <B> <size>` (Mac) sends a winner to the Pi as soon as it is bundled.
+  Part-cost files are reflink copies of the model's starting-type file with the changed part appended, used only if
+  a tensor-by-tensor comparison with a normally built file matches. Explanation and numbers: `docs/STANDARD.md`.
+
+---
+
 ## Open
 
 - Team value for R_max (`configs/budgets.yaml`), required before Phase C.
