@@ -536,13 +536,58 @@ is 14,042 five-shot prompts (~11M tokens). At the 1.5B CPU rate seen so far that
 configuration, and ~10× more for 14B. A4's CPU timings give the real figure; the Phase D plan is decided
 from it, before Phase D.
 
-### A5. GSM8K 📝
-- `llama-server` and lm-evaluation-harness (`local-completions`) in the same GPU container, talking over
-  localhost (container still has no outside network). 5-shot with the fixed exemplars, greedy, exact match.
+### A5. GSM8K 📝 planned
+GSM8K is generated, not scored by log-likelihood, so it runs through `llama-server` (greedy decoding) in the
+same container as the client, over localhost only (GPU containers have no outside network).
 
-### A6. Generation sanity 📝
-- 50 fixed prompts, 128 tokens greedy, compare with BF16. **Open:** the prompt set doesn't exist yet;
-  proposal: 50 items drawn by seed from the selection questions of all five tasks, stored in the splits.
+**Definition (D41):** a copy of lm-evaluation-harness 0.4.13's `gsm8k` task (read from the pinned package):
+- prompt: the 5 fixed few-shot exemplars from the splits as `"Question: {q}\nAnswer: {answer}"`, joined by
+  `"\n\n"`, then `"\n\nQuestion: {q}\nAnswer:"`; the full reference answers, calculator annotations included;
+- generation: greedy (temperature 0), stop at `Question:`, `</s>`, `<|im_end|>`, at most 256 tokens;
+- extraction: **strict-match** (primary, fixed now): the first `#### (-?[0-9.,]+)`; **flexible-extract**
+  (reported): the last match of `(-?[$0-9.,]{2,})|(-?[0-9]+)`;
+- scoring: exact match after removing `,`, `$`, everything up to `#### `, and a trailing `.`; case-insensitive.
 
-### A7. Run everything on the A1 file and BF16; write a results manifest 📝
-- **Pass:** every metric produces a number; outputs and timings saved with a manifest.
+lm-eval itself is not used because it fetches the dataset from the Hub, and GPU containers have no network;
+the definition is copied, with unit tests of the extraction rules on lm-eval's own patterns.
+
+**Runs (selection, 500 questions):** BF16, Q8_0 and A1 on CUDA (8 parallel server slots); BF16 again
+for determinism; CPU build on the first 20 questions of A1 for timing (D40).
+
+**Pass:**
+1. every question gets a completion (no request errors or empty outputs) in every run;
+2. BF16 strict-match accuracy ≥ 40% (a sanity floor; Qwen2.5-1.5B-Instruct is reported far above it);
+3. Q8_0 within 5 points of BF16 (500 questions; ≈ 2 SE);
+4. the repeated BF16 run's accuracy is within 1 point of the first (batched GPU decoding is not
+   guaranteed bit-identical; the number of differing completions is reported);
+5. CPU timing recorded.
+
+### A6. Generation sanity 📝 planned
+**Prompts (D26, decided now):** 50 prompts, 10 per task, drawn with a fixed seed from the selection items of
+HellaSwag ("Continue this text: …"), ARC-C and MMLU (question and lettered options, "Answer with the letter
+and one sentence of reasoning."), WinoGrande ("Fill in the blank: …") and GSM8K (the question). Sent as a
+single user message through the model's chat template (`/v1/chat/completions`), greedy, 128 tokens. Stored
+with the splits (`splits/gen_prompts.json`).
+
+**Measures, per configuration against BF16:** matched prefix (tokens until the first difference), share of
+outputs identical to BF16, and a degeneration flag (empty output, or more than half of its 4-grams repeated).
+
+**Runs:** BF16 twice, Q8_0, Q4_K, A1 (CUDA).
+
+**Pass:**
+1. every prompt produces non-empty output in every run;
+2. the BF16 repeat matches the first BF16 run exactly on ≥ 48 of 50 prompts;
+3. no degenerate outputs for BF16 or Q8_0;
+4. mean matched prefix: Q8_0 ≥ A1;
+5. a spot-check of 10 A1 outputs, read and judged coherent or not, recorded here.
+
+### A7. End to end on 1.5B 📝 planned
+Assemble, from the A3–A6 records only (no new runs), one evaluation each for **BF16** and **A1** with every
+PLAN §2.1 quality metric on selection data: task accuracy (HellaSwag, ARC-C, MMLU, WinoGrande, GSM8K),
+perplexity (selection text), KL and top-1 (selection reference), generation sanity. Then run the
+pre-registered decision rule (`panther.stats.decision.compare`, paired bootstrap, 10,000 resamples) for
+**BF16 vs A1** and for **Q8_0 vs Q4_K** (task accuracy only for the latter if perplexity was not measured).
+
+**Pass (the Phase A gate's second half):** every metric is present for both configurations; the decision
+rule runs and returns a winner with its deciding criterion; a results manifest lists every record used.
+

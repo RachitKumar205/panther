@@ -450,9 +450,17 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
   2. CPU build on a fixed test subset (e.g. 2,000 MMLU questions) for every finalist; wider CIs.
   3. Full CPU runs for 1.5B/3B only; CUDA for 7B/14B.
 
-### D26. Generation-sanity prompts — planned, open
-- Proposal: 50 items drawn by seed from the selection questions of all five tasks, stored with the splits.
+### D26. Generation-sanity prompts — decided (A6)
+- 50 prompts, 10 per task, seeded draw from the selection items of HellaSwag, ARC-C, MMLU, WinoGrande and
+  GSM8K, each wrapped in a short instruction and sent through the chat template; greedy, 128 tokens.
+  Stored in `splits/gen_prompts.json`. Details and pass rules in PIPELINE.md A6.
 
+### D41. GSM8K: our own runner reproducing lm-eval 0.4.13's `gsm8k` task — decided (A5)
+- PLAN §2.1 named lm-evaluation-harness with `local-completions`. lm-eval downloads the dataset from the
+  Hub, and GPU containers have no network (D14). The task definition (prompt layout, stop strings, both
+  extraction regexes, exact-match normalisation) is copied from the pinned lm-eval 0.4.13 `gsm8k.yaml` and
+  run against `llama-server` over localhost, on our split's items and fixed exemplars.
+- **Primary metric:** strict-match (`#### N`), fixed before any run; flexible-extract reported alongside.
 ---
 
 ## Open
