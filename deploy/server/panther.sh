@@ -64,6 +64,7 @@ run_args() {  # run_args cpu|gpu
     -e "PANTHER_IMAGE_ID=$("${P[@]}" image inspect -f '{{.Id}}' "$IMAGE:current" 2>/dev/null || echo unknown)"
   )
   [ -n "${PANTHER_FORMATS:-}" ] && RUN_ARGS+=(-e "PANTHER_FORMATS=$PANTHER_FORMATS")
+  [ -n "${PANTHER_HF_REPO:-}" ] && RUN_ARGS+=(-e "PANTHER_HF_REPO=$PANTHER_HF_REPO")
   case "$1" in
     cpu) RUN_ARGS+=(--network pasta) ;;
     gpu) RUN_ARGS+=(--device nvidia.com/gpu=all --security-opt label=disable --network none

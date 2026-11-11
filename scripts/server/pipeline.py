@@ -9,6 +9,7 @@ them. Runs in the GPU container; every step checks the disk and skips work alrea
   pipeline.py test   BUDGET MODEL  # each listed genotype built once; KL, benchmarks, GSM8K, perplexity on it
   pipeline.py pick   BUDGET MODEL  # the model's winner; `pick BUDGET` compares all models' winners
   pipeline.py bundle BUDGET MODEL  # the winner as a GGUF + manifest for the Pi
+  pipeline.py upload BUDGET MODEL  # the bundle to its private Hugging Face repo, for the Pi to download
 """
 
 from __future__ import annotations
@@ -1018,6 +1019,18 @@ def cmd_bundle_model(budget: int, model: str) -> int:
     print(f"bundle ready: {bundle} ({dst.name}, predicted RAM {r.total_gib:.3f} GiB)", flush=True)
     return 0
 
+def cmd_upload(budget: int, model: str) -> int:
+    """The model's Pi bundle to its private Hugging Face repo (PANTHER_HF_REPO, e.g. user/panther-{size}-{budget}g).
+    The server and the Pi cannot reach each other, and the VPN to the server is slow; the Pi downloads from there.
+    Files already there with the same content are not sent again."""
+    from huggingface_hub import HfApi
+    short = model.split("-")[1].lower()
+    repo = os.environ["PANTHER_HF_REPO"].format(size=short, budget=budget)
+    api = HfApi()
+    api.create_repo(repo, private=True, exist_ok=True)
+    api.upload_folder(repo_id=repo, folder_path=DATA / "pi_bundle" / f"budget-{budget}-{short}")
+    note(f"{short.upper()} Pi bundle uploaded to {repo}")
+    return 0
 
 
 def main() -> int:
@@ -1032,7 +1045,8 @@ def main() -> int:
     steps = {"store": cmd_store, "error": cmd_error, "sens": cmd_sens}
     if cmd in steps:
         return steps[cmd](args[1])
-    steps2 = {"list": cmd_list, "test": cmd_test, "pick": cmd_pick_model, "bundle": cmd_bundle_model}
+    steps2 = {"list": cmd_list, "test": cmd_test, "pick": cmd_pick_model, "bundle": cmd_bundle_model,
+              "upload": cmd_upload}
     if cmd in steps2:
         return steps2[cmd](BUDGET, args[1])
     raise SystemExit(__doc__)

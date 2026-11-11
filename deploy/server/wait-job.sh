@@ -33,3 +33,4 @@ while :; do
 done
 echo "panther-$NAME: $s"
 "${SSH[@]}" "tail -20 /s3/panther/work/data/logs/$NAME.log; curl -sL -o /dev/null -w 'health %{http_code}\n' $PANTHER_HEALTH_URL"
+[ "$s" = "exited 0" ] || { echo "panther-$NAME FAILED ($s)" >&2; exit 1; }

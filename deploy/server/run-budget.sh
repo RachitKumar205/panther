@@ -4,7 +4,8 @@
 #   deploy/server/run-budget.sh 7
 #
 # One lane per model, all in parallel. A searched model goes straight through:
-#   format files -> offline error -> references -> part costs -> solver list -> tests -> winner -> Pi bundle
+#   format files -> offline error -> references -> part costs -> solver list -> tests -> winner -> Pi bundle -> upload
+# (to a private Hugging Face repo, PANTHER_HF_REPO in local.env; the Pi downloads it from there)
 # without waiting for the other models. A reference model only needs its uniform Q6_K file, then its tests.
 # When every lane is done: pick the winners, bundle them for the Pi.
 # Idempotent: every step checks the disk and skips work that is already there; a step already running is adopted.
@@ -30,14 +31,15 @@ for m in $(list searched); do
   running "$c" && { echo "lane $c already running"; continue; }  # never rewrite a running lane's steps
   printf "%s\n" "gpu rw-store$B-$s $R store $B $m" "gpu rw-err$B-$s $R error $B $m" "gpu rw-refs-$s $R refs $m" \
     "gpu rw-sens$B-$s $R sens $B $m" "gpu rw-list$B-$s $R list $B $m" "gpu rw-test$B-$s $R test $B $m" \
-    "gpu rw-pick$B-$s $R pick $B $m" "gpu rw-bundle$B-$s $R bundle $B $m" > "$P/$c.steps"
+    "gpu rw-pick$B-$s $R pick $B $m" "gpu rw-bundle$B-$s $R bundle $B $m" "cpu rw-upload$B-$s $R upload $B $m" \
+    > "$P/$c.steps"
   start x "$c" "$HERE/chain.sh" "$c" "$P/$c.steps"
 done
 for m in $(list reference); do
   s="$(short "$m")"; c="b$B-ref-$s"; lanes="$lanes $c"
   running "$c" && { echo "lane $c already running"; continue; }
   printf "%s\n" "gpu rw-store$B-$s $R store $B $m" "gpu rw-test$B-ref-$s $R test $B $m" \
-    "gpu rw-bundle$B-$s $R bundle $B $m" > "$P/$c.steps"
+    "gpu rw-bundle$B-$s $R bundle $B $m" "cpu rw-upload$B-$s $R upload $B $m" > "$P/$c.steps"
   start x "$c" "$HERE/chain.sh" "$c" "$P/$c.steps"
 done
 running "b$B" || printf "%s\n" "gpu rw-pick$B $R pick $B" > "$P/b$B.steps"  # comparison across models

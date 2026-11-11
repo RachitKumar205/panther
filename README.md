@@ -19,7 +19,7 @@ Decisions that stand: [docs/DECISIONS.md](docs/DECISIONS.md). Server setup and r
 | `scripts/server/` | Model download, quantized copies (llama-quantize) and their check |
 | `panther` | The one entry point (Mac): `run` and `status` per budget |
 | `deploy/server/` | Container image, job runner, `run-budget.sh` (what `./panther run` starts on the server), host setup/uninstall |
-| `pi/` | Pi setup, the Pi check (`panther_pi.py`), copying a winner to the Pi (`fetch_bundle.sh`, `relay.sh`) |
+| `pi/` | Pi setup, the Pi check (`panther_pi.py`), the Pi downloading a winner from its private Hugging Face repo and checking it (`relay.sh`) |
 
 ## Run
 
