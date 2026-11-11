@@ -650,3 +650,33 @@ recommendation: the verdict winner, if it is within budget and valid on the Pi; 
 - 7B CPU correction (D37 method, 12 chunks): output head a = 0.00180, last MLP a = 0.00049, the same pattern as
   1.5B.
 - Expected: 7B shortlist ~03:00 UTC, 14B shortlist ~05:30, Pi bundle ~07:00 UTC.
+- Actual: 7B shortlist 03:15 UTC, 14B shortlist 04:02, verdict 04:30, **Pi bundle ready 04:35 UTC**. GitLab
+  stayed at 200 throughout; the guard (D43) never paused anything.
+
+#### PoC results (server; the Pi confirms RAM and measures speed)
+Shortlists (selection data; KL is the CPU estimate after the D37 correction):
+
+| Config | RAM (pred.) | KL (sel.) | top-1 agree |
+|---|---|---|---|
+| 7B solver winner (top4 of 5) | 6.997 GiB | 0.00155 | 97.7% |
+| 7B uniform Q6_K | 6.438 GiB | 0.00525 | 96.7% |
+| 14B solver winner (top4 of 5) | 6.999 GiB | 0.0896 | 87.2% |
+| 14B uniform IQ3_XXS | 6.419 GiB | 0.242 | 75.6% |
+
+Verdict on the approved test subset (D42; MMLU 1000, HellaSwag 2000, ARC-C 1172, WinoGrande 1267, GSM8K 300):
+
+| Config | mean acc | MMLU | HellaSwag | ARC-C | WinoGr. | GSM8K | PPL (test_web) |
+|---|---|---|---|---|---|---|---|
+| 7B winner | 70.40 | 74.3 | 80.2 | 52.8 | 71.0 | 73.7 | 8.132 |
+| 7B uniform | 70.57 | 73.8 | 80.1 | 53.2 | 71.1 | 74.7 | 8.146 |
+| 14B winner | **75.17** | 77.1 | 82.0 | 60.2 | 72.9 | 83.7 | **7.317** |
+| 14B uniform | 73.45 | 76.8 | 80.5 | 58.5 | 73.4 | 78.0 | 8.540 |
+
+Decisions (D5 rule, paired bootstrap, Holm):
+- 7B winner vs 14B winner: **14B** by accuracy, −4.77 pts, CI [−6.21, −3.34].
+- 7B winner vs 7B uniform: tie on accuracy (−0.16, CI [−0.84, +0.51]) and perplexity → **uniform**, on RAM.
+- 14B winner vs 14B uniform: **winner**, +1.72 pts, CI [+0.59, +2.84]; perplexity 14% lower.
+- Recommended for the Pi: `qwen2.5-14b-poc-winner.gguf` (5.85 GiB file, 6.999 GiB predicted RAM). The bundle
+  holds all four files; the Pi checks whether 6.999 GiB really fits (Phase E3), with the 7B files as fallback.
+- Reading: at 7 GiB the per-layer mix matters at 14B (low bits, where precision placement is decisive) and not
+  at 7B (Q6_K is already near lossless, so extra bytes buy nothing measurable).
