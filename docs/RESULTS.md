@@ -62,6 +62,25 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
   showed up within noise. The search minimises measured KL, so where KL stops tracking accuracy it optimises the
   wrong thing; the pick came from the padding step (fill the budget exactly with one type), not from the search.
 
+## 3 GiB (RAM between 2.97 and 3.015 GiB): 7B, and llama.cpp's preset wins
+
+| 3 GiB | RAM GiB | Accuracy | KL | Perplexity | MMLU | HellaSwag | ARC-C | WinoGrande | GSM8K |
+|---|---|---|---|---|---|---|---|---|---|
+| **7B, llama.cpp IQ2_S preset** (best existing) | 2.928 | **64.69** | **0.255** | **10.37** | | | | | |
+| 7B, our pick (uniform IQ2_S, padded) | 2.979 | 62.45 | 0.401 | 12.03 | 65.6 | 73.4 | 50.6 | 67.0 | 55.7 |
+| 7B, best searched (sol1) | 3.015 | 60.19 | 0.288 | 10.59 | 64.1 | 72.3 | 48.5 | 64.1 | 52.0 |
+| 7B, llama.cpp IQ2_XS preset | 2.810 | 61.15 | 0.293 | 10.72 | | | | | |
+| 3B, Q6_K (standard download) | 2.833 | 53.21 | — | 9.14 | 65.6 | 73.9 | 46.0 | 69.2 | 11.3 |
+
+- llama.cpp's IQ2_S preset beats our pick by **2.24 points [+0.63, +3.82]** and beats our best searched genotype on
+  KL (0.255 vs 0.288), the very quantity the search minimises: at ~2.8 bits/weight the part-cost model (each block's
+  KL interpolated from offline error) misses what llama.cpp's hand rules for sensitive matrices get right.
+- A squeezed 7B still beats the 3B download by far: our pick +9.25 points [+7.50, +10.92], the preset more.
+- Pi: our 7B pick peaks at 2.72 GiB (predicted 2.98), writes 1.86 tok/s, reads 2.44 tok/s; 3B Q6_K writes 4.1–4.5 and
+  reads 21–24 (IQ types have no fast ARM path).
+- Proposed, not done: add the best preset's own layout to the solver's candidates, so the list can never do worse
+  than it.
+
 ## On the Pi 5 (8 GB): RAM and speed
 
 256-token prompt, 64 tokens written, 4 threads, 4,096-token context, 8-bit KV cache, 1 warm-up + 2 timed runs.
@@ -72,6 +91,7 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
 | 7 GiB | 32B ours | **6.78 GiB** (7.04) | 0.49 | 0.61 | 2.4 GHz, heat-limited (83–84 °C) | supply 5.02–5.04 V, no under-voltage |
 | 7 GiB | 7B Q6_K | **6.07 GiB** (6.34) | 1.75 | 7.83 | 2.4 GHz, heat-limited | good supply; same as on the weak one (1.74 / 7.98): memory-bound |
 | 1 GiB | 1.5B pick (uniform IQ2_S, padded) | **0.70 GiB** (0.99) | **9.40** | 13.9 | 2.4 GHz | good supply; RAM 0.3 GiB under the prediction |
+| 3 GiB | 7B pick (uniform IQ2_S, padded) | **2.72 GiB** (2.98) | 1.86 | 2.44 | 2.4 GHz | |
 | 3 GiB | 3B Q6_K | **2.78 GiB** (2.83) | **4.11** | 21.1 | 2.4 GHz | good supply; 3.41 / 17.3 on the weak one |
 
 - Every model fits its budget. The RAM prediction is always a little high (0.05–0.28 GiB): the real runtime overhead
@@ -96,7 +116,7 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
 | Budget | Searched | Reference | Status |
 |---|---|---|---|
 | 1 GiB | 1.5B | — | **done** (above); Pi check running |
-| 3 GiB | 7B (~2.8 bits/weight) | 3B Q6_K | 7B: part costs (restarted); 3B Pi-checked above |
+| 3 GiB | 7B (~2.8 bits/weight) | 3B Q6_K | **done** (above) |
 | 5 GiB | 14B (~2.4), 7B (~5.1), InternLM2.5 20B (~1.8) | — | queued after the 3 GiB 7B |
 
 Each also gets the best-existing-preset baseline.
