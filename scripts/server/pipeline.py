@@ -9,6 +9,7 @@ them. Runs in the GPU container; every step checks the disk and skips work alrea
   pipeline.py test   BUDGET MODEL  # each listed genotype built once; KL, benchmarks, GSM8K, perplexity on it
   pipeline.py pick   BUDGET MODEL  # the model's winner; `pick BUDGET` compares all models' winners
   pipeline.py bundle BUDGET MODEL  # the winner as a GGUF + manifest for the Pi
+  pipeline.py preset BUDGET MODEL  # the best existing quantization (llama.cpp's largest fitting preset), tested
   pipeline.py upload BUDGET MODEL  # the bundle to its private Hugging Face repo, for the Pi to download
 """
 
@@ -1026,6 +1027,67 @@ def cmd_bundle_model(budget: int, model: str) -> int:
     print(f"bundle ready: {bundle} ({dst.name}, predicted RAM {r.total_gib:.3f} GiB)", flush=True)
     return 0
 
+# llama.cpp's own mixed presets (llama-quantize ftypes, which raise sensitive tensors on their own), ordered by
+# their nominal bits per weight. The best existing quantization at a budget is the largest that fits.
+PRESETS = ["IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M", "Q2_K_S", "IQ3_XXS", "Q2_K", "IQ3_XS", "IQ3_S",
+           "Q3_K_S", "IQ3_M", "Q3_K_M", "IQ4_XS", "Q3_K_L", "Q4_K_S", "Q4_K_M", "Q5_K_S", "Q5_K_M", "Q6_K", "Q8_0"]
+PRESET_BPW = [1.56, 1.75, 2.06, 2.31, 2.5, 2.7, 2.9, 3.06, 3.2, 3.3, 3.44, 3.5, 3.66, 3.9, 4.25, 4.27, 4.58, 4.89,
+              5.54, 5.69, 6.56, 8.5]
+
+
+def cmd_preset(budget: int, model: str) -> int:
+    """The best existing quantization that fits the budget: llama.cpp's largest mixed preset (same BF16 file and
+    importance matrix) whose RAM is at most the budget's top. Built largest-first, tested like the genotypes, and
+    compared with the model's winner (paired bootstrap)."""
+    from panther.stats import compare
+    store = DATA / "store" / model
+    bf16, imat = store / f"{model}-BF16.gguf", store / f"{model}.imatrix.gguf"
+    inv = inv_of(model)
+    top = budget * (1 + WINDOW[1])
+    room = (top * GIB - inv.geometry.kv_cache_bytes(CTX, KV_BPE) - OVERHEAD * GIB) * 8 / sum(g.n_weights for g in inv.genes)
+    chosen = None
+    for ftype, bpw in sorted(zip(PRESETS, PRESET_BPW), key=lambda x: -x[1]):
+        if bpw > room + 0.3:
+            continue
+        path = store / f"preset-{ftype}.gguf"
+        if not path.exists():
+            subprocess.run([str(evaluate.LLAMA / "build-cuda/bin/llama-quantize"), "--imatrix", str(imat), str(bf16),
+                            str(path) + ".part", ftype, str(THREADS)], check=True, capture_output=True)
+            os.rename(str(path) + ".part", path)
+        ram = file_ram_gib(model, path)
+        note(f"{model.split('-')[1]} preset {ftype}: {ram:.3f} GiB ({'fits' if ram <= top else 'too big'})")
+        if ram <= top:
+            chosen = (ftype, path, ram)
+            break
+    if chosen is None:
+        note(f"{model.split('-')[1]} preset: none of llama.cpp's presets fits {budget} GiB")
+        return 0
+    ftype, path, ram = chosen
+    name = f"preset-{ftype}"
+    label = test_label(budget, name, None)
+    run_all_tests(model, path, label, with_kl=True)
+    ev_p = evaluation(model, label, ram, name)
+    kl_p = find(records(model), label, reference="selection")["metrics"]["kl_mean"]
+    result = {"preset": ftype, "ram_gib": ram, "kl": kl_p, "mean_accuracy_pct": 100 * ev_p.mean_accuracy(),
+              "ppl": ev_p.perplexity()}
+    wfile = out(f"budget-{budget}", f"winner-{model}.json")
+    if wfile.exists():
+        w = json.loads(wfile.read_text())
+        it = json.loads(list_path(budget, model).read_text())[w["winner"]]
+        ev_w = evaluation(model, test_label(budget, w["winner"], it["assignment"]), it["ram_gib"], w["winner"])
+        c = compare(ev_w, ev_p)
+        result["vs_winner"] = {"winner": w["winner"], "acc_diff_pts": 100 * c.acc_diff,
+                               "acc_ci_pts": [100 * c.acc_ci[0], 100 * c.acc_ci[1]], "ppl_ratio": c.ppl_ratio,
+                               "kl_winner": w["rows"][w["winner"]]["kl"]}
+    out(f"budget-{budget}", f"preset-{model}.json").write_text(json.dumps(result, indent=1))
+    v = result.get("vs_winner")
+    note(f"{model.split('-')[1]} preset {ftype}: acc {result['mean_accuracy_pct']:.2f}, KL {kl_p:.4f}, PPL "
+         f"{result['ppl']:.3f}" + (f" | our winner {v['acc_diff_pts']:+.2f} pts [{v['acc_ci_pts'][0]:+.2f}, "
+                                   f"{v['acc_ci_pts'][1]:+.2f}], KL {v['kl_winner']:.4f}, PPL ratio "
+                                   f"{v['ppl_ratio']:.3f}" if v else ""))
+    return 0
+
+
 def cmd_upload(budget: int, model: str) -> int:
     """The model's Pi bundle to its private Hugging Face repo (PANTHER_HF_REPO, e.g. user/panther-{size}-{budget}g).
     The server and the Pi cannot reach each other, and the VPN to the server is slow; the Pi downloads from there.
@@ -1053,7 +1115,7 @@ def main() -> int:
     if cmd in steps:
         return steps[cmd](args[1])
     steps2 = {"list": cmd_list, "test": cmd_test, "pick": cmd_pick_model, "bundle": cmd_bundle_model,
-              "upload": cmd_upload}
+              "upload": cmd_upload, "preset": cmd_preset}
     if cmd in steps2:
         return steps2[cmd](BUDGET, args[1])
     raise SystemExit(__doc__)

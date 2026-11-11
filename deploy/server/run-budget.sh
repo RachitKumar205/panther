@@ -21,7 +21,7 @@ P="$W/data/rewrite/chains"; mkdir -p "$P"
 R="/opt/venv/bin/python scripts/server/pipeline.py"
 line="$(grep -E "^  $B: " "$ROOT/configs/search.yaml")" || { echo "budget $B not in configs/search.yaml" >&2; exit 1; }
 list() { echo "$line" | sed -E "s/.*$1: \[([^]]*)\].*/\1/" | tr -d ' ' | tr ',' ' '; }
-short() { echo "$1" | sed -E 's/Qwen2\.5-([0-9.]+B).*/\1/' | tr 'A-Z' 'a-z'; }
+short() { echo "$1" | sed -E 's/^[^-]+-([0-9.]+B).*/\1/' | tr 'A-Z' 'a-z'; }
 running() { local ps_out; ps_out="$(ps -eo args)"; grep -qE "chain.sh $1 /|after-chains.sh .* $1 /" <<< "$ps_out"; }  # the lane's own runner only
 start() { running "$2" && { echo "lane $2 already running"; return; }
           PANTHER_CPUS="${PANTHER_CPUS:-16}" setsid nohup "${@:3}" >/dev/null 2>&1 < /dev/null & echo "started $2"; }
@@ -29,9 +29,9 @@ lanes=""
 for m in $(list searched); do
   s="$(short "$m")"; c="b$B-$s"; lanes="$lanes $c"
   running "$c" && { echo "lane $c already running"; continue; }  # never rewrite a running lane's steps
-  printf "%s\n" "gpu rw-store$B-$s $R store $B $m" "gpu rw-err$B-$s $R error $B $m" "gpu rw-refs-$s $R refs $m" \
+  printf "%s\n" "cpu rw-fetch-$s bash scripts/server/fetch_model.sh $m" "gpu rw-store$B-$s $R store $B $m" "gpu rw-err$B-$s $R error $B $m" "gpu rw-refs-$s $R refs $m" \
     "gpu rw-sens$B-$s $R sens $B $m" "gpu rw-list$B-$s $R list $B $m" "gpu rw-test$B-$s $R test $B $m" \
-    "gpu rw-pick$B-$s $R pick $B $m" "gpu rw-bundle$B-$s $R bundle $B $m" "cpu rw-upload$B-$s $R upload $B $m" \
+    "gpu rw-pick$B-$s $R pick $B $m" "gpu rw-preset$B-$s $R preset $B $m" "gpu rw-bundle$B-$s $R bundle $B $m" "cpu rw-upload$B-$s $R upload $B $m" \
     > "$P/$c.steps"
   start x "$c" "$HERE/chain.sh" "$c" "$P/$c.steps"
 done

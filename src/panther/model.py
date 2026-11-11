@@ -29,10 +29,16 @@ class ModelGeometry:
     vocab: int
     tied: bool
     max_context: int
+    head_dim_cfg: int = 0  # config.json "head_dim" when n_heads * head_dim != hidden (e.g. Mistral Small)
+    qkv_bias: bool = True  # Qwen2 has q/k/v biases; Llama and Mistral do not
 
     @property
     def head_dim(self) -> int:
-        return self.hidden // self.n_heads
+        return self.head_dim_cfg or self.hidden // self.n_heads
+
+    @property
+    def q_dim(self) -> int:
+        return self.n_heads * self.head_dim
 
     @property
     def kv_dim(self) -> int:
@@ -107,11 +113,13 @@ def load_geometry(name: str, config_dir: Path | None = None) -> ModelGeometry:
         vocab=c["vocab_size"],
         tied=bool(c.get("tie_word_embeddings", False)),
         max_context=c.get("max_position_embeddings", 0),
+        head_dim_cfg=c.get("head_dim") or 0,
+        qkv_bias=c.get("model_type") == "qwen2",
     )
 
 
 def build_inventory(geo: ModelGeometry) -> Inventory:
-    h, i, kv = geo.hidden, geo.intermediate, geo.kv_dim
+    h, i, kv, q = geo.hidden, geo.intermediate, geo.kv_dim, geo.q_dim
     genes: list[Gene] = []
     fixed: list[TensorSpec] = []
 
@@ -133,10 +141,10 @@ def build_inventory(geo: ModelGeometry) -> Inventory:
                 "attn",
                 L,
                 (
-                    TensorSpec(p + "attn_q.weight", h, h, True),
+                    TensorSpec(p + "attn_q.weight", q, h, True),
                     TensorSpec(p + "attn_k.weight", kv, h, True),
                     TensorSpec(p + "attn_v.weight", kv, h, True),
-                    TensorSpec(p + "attn_output.weight", h, h, True),
+                    TensorSpec(p + "attn_output.weight", h, q, True),
                 ),
             )
         )
@@ -152,13 +160,10 @@ def build_inventory(geo: ModelGeometry) -> Inventory:
                 ),
             )
         )
-        fixed += [
-            TensorSpec(p + "attn_norm.weight", 1, h, False),
-            TensorSpec(p + "ffn_norm.weight", 1, h, False),
-            TensorSpec(p + "attn_q.bias", 1, h, False),
-            TensorSpec(p + "attn_k.bias", 1, kv, False),
-            TensorSpec(p + "attn_v.bias", 1, kv, False),
-        ]
+        fixed += [TensorSpec(p + "attn_norm.weight", 1, h, False), TensorSpec(p + "ffn_norm.weight", 1, h, False)]
+        if geo.qkv_bias:
+            fixed += [TensorSpec(p + "attn_q.bias", 1, q, False), TensorSpec(p + "attn_k.bias", 1, kv, False),
+                      TensorSpec(p + "attn_v.bias", 1, kv, False)]
     fixed.append(TensorSpec("output_norm.weight", 1, h, False))
     return Inventory(geo, tuple(genes), tuple(fixed))
 

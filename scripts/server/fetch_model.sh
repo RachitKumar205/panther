@@ -18,6 +18,9 @@ EOF
 )
 
 HF_DIR="$DATA/hf/$MODEL"
+if [ -f "$DATA/store/$MODEL/$MODEL-BF16.gguf" ] || [ "$(cat "$HF_DIR/.panther-revision" 2>/dev/null)" = "$REPO@$REV" ]; then
+  echo "$MODEL already fetched"; exit 0
+fi
 "$PANTHER_HF" download "$REPO" --revision "$REV" --local-dir "$HF_DIR"
 echo "$REPO@$REV" > "$HF_DIR/.panther-revision"
 echo "fetched $REPO@$REV -> $HF_DIR"
