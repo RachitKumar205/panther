@@ -551,6 +551,34 @@ Full step list in [PIPELINE.md](PIPELINE.md#next-phase-a-gate-on-15b--planned). 
 
 ---
 
+### D46. How the rewrite runs the table (implementation choices) — decided 2026-11-11, within D45
+- **Per-matrix search with the existing tools:** a "matrix inventory" makes every weight matrix its own gene
+  (`attn_q.L`, …, `ffn_down.L`, `embd`, `head` / `embd_head`), so the assembler, read-back check, RAM model and
+  CP-SAT solver are reused unchanged. Blocks (`attn.L`, `mlp.L`, `embd`, `head`) are only used for sensitivity.
+- **Format menu per model** (from `configs/search.yaml`'s 12 formats): those with bits/weight between the model's
+  lowest budget average − 1.5 and its highest budget average + 2.5, so stores only hold formats that can be
+  chosen: 1.5B IQ1_S–Q5_K, 7B IQ1_S–Q6_K, 14B IQ1_S–Q5_K, 32B IQ1_S–IQ3_S.
+- **Importance matrix:** the existing ones (1.5B, 7B, 14B) are reused, so the PoC store files stay valid and only
+  missing formats are built; their output head keeps the PoC rule (no imatrix-only formats: IQ1_S, IQ1_M,
+  IQ2_XXS, IQ2_XS), which costs nothing at their bit widths. 32B gets a new one with `--process-output`
+  (calibration text, `-c 512`), so its head may use every format: without it, 32B at its smallest is ~7.08 GiB
+  and could not enter the 7 GiB contest.
+- **RAM model:** as `configs/search.yaml`: KV cache q8_0 (34 bytes per 32 values) at 4,096 context, overhead
+  0.40 GiB (placeholder until the Pi measures it, step 0.2).
+- **Sensitivity base per model:** the menu format whose uniform file is closest to (not above) the lower budget's
+  average bits/weight; genes that cannot use it take the next format up. Probe format: chosen by Phase 0.3.
+- **Scoring:** the top 3 and the same-model references get KL on the selection text; the contest winner is the
+  lowest KL of the top 3 (selection data only). Winner, references and cross-model references then get the PoC
+  verdict's evaluation (test subset: 4 tasks, GSM8K 300, perplexity) and paired-bootstrap comparisons.
+- **References:** largest uniform menu format that fits; the largest stock llama.cpp preset that fits (built
+  with `llama-quantize` and the same importance matrix); uniform with head and every `attn_v` raised (to Q6_K,
+  or the highest menu format), padded with whole layers raised one format, up to the budget. Cross-model
+  references (3B@3, 7B@7): uniform Q6_K, accuracy only; 3B is downloaded for this.
+- **Disk:** Hugging Face weights are deleted after conversion to BF16 GGUF (re-downloadable at the pinned
+  revision).
+
+---
+
 ## Open
 
 - Team value for R_max (`configs/budgets.yaml`), required before Phase C.
