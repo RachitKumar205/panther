@@ -5,7 +5,7 @@
 #
 # Stops at the FIRST SSH failure (exit 255: connection expired, refused, or unreachable) instead of
 # retrying: the server's sshd penalises repeated failed logins from one address (OpenSSH PerSourcePenalties,
-# banner "Not allowed at this time"), and a retry loop locks the user out (D30). Polls every 30 s.
+# banner "Not allowed at this time"), and a retry loop locks the user out (D30). Polls every 2 min (podman's state database locks up under frequent polling).
 set -uo pipefail
 # Site settings (host, user, health-check URL) live in the git-ignored deploy/server/local.env.
 PANTHER_LOCAL_ENV="${PANTHER_LOCAL_ENV:-$(cd "$(dirname "$0")" && pwd)/local.env}"
@@ -29,7 +29,7 @@ while :; do
   if [ "$rc" = 255 ]; then echo "SSH failed; stopping without retrying (reopen the control master)" >&2; exit 3; fi
   case "$s" in exited*) break ;; esac
   [ "$(date +%s)" -lt "$deadline" ] || { echo "still running after $MAX_MIN min: $s"; exit 4; }
-  sleep 30
+  sleep 120
 done
 echo "panther-$NAME: $s"
 "${SSH[@]}" "tail -20 /s3/panther/work/data/logs/$NAME.log; curl -sL -o /dev/null -w 'health %{http_code}\n' $PANTHER_HEALTH_URL"
