@@ -4,6 +4,7 @@
   python scripts/server/poc.py correct    MODEL   # P4: CPU correction for the output head and last MLP (7B)
   python scripts/server/poc.py penalties  MODEL   # P5: penalty table, 3 KL runs at a time
   python scripts/server/poc.py shortlist  MODEL   # P6: solver top 5 + uniform baseline, scored on selection
+  python scripts/server/poc.py verdict    all     # P7: test subset, decision rule (needs the user's approval)
 
 Every step is resumable: finished measurements (records labelled poc:...) are not repeated.
 Outputs: $PANTHER_DATA/poc/<model>/ and records in $PANTHER_DATA/results/<model>/.
@@ -264,8 +265,148 @@ def cmd_shortlist(model: str) -> int:
     return 0
 
 
+# --- P7 verdict on the fixed test subset (only after the user's approval) -----------------------------------
+
+SUBSET = {"mmlu": 1000, "hellaswag": 2000, "arc_challenge": None, "winogrande": None}  # None: all items
+GSM8K_N = 300
+SUBSET_SEED = 20261111
+
+
+def jsonl(path: Path) -> list[dict]:
+    return [json.loads(x) for x in path.read_text().split("\n") if x]
+
+
+def build_test_subset() -> None:
+    import numpy as np
+
+    from panther.quality.tasks import (mc_tasks, mmlu_fewshot_by_subject, read_mc_binary, write_mc_binary,
+                                       write_winogrande_csv, parse_winogrande_csv)
+    lt = DATA / "splits" / "llama_tasks"
+    manifest = json.loads((lt / "manifest.json").read_text())
+    if "poc_test/mmlu" in manifest["files"]:
+        return
+    rng = np.random.default_rng(SUBSET_SEED)
+    fewshot = mmlu_fewshot_by_subject(jsonl(DATA / "splits/tasks/fewshot/mmlu.jsonl"))
+    (lt / "poc_test").mkdir(exist_ok=True)
+    for task, n in SUBSET.items():
+        items = jsonl(DATA / "splits/tasks/test" / f"{task}.jsonl")
+        if n is not None:
+            items = [items[i] for i in sorted(rng.choice(len(items), size=n, replace=False).tolist())]
+        if task == "winogrande":
+            data = write_winogrande_csv(items).encode()
+            assert len(parse_winogrande_csv(data.decode())[0]) == len(items)
+            path = lt / "poc_test" / "winogrande.csv"
+        else:
+            tasks = mc_tasks(task, items, fewshot if task == "mmlu" else None)
+            data = write_mc_binary(tasks)
+            assert read_mc_binary(data) == tasks
+            path = lt / "poc_test" / f"{task}.bin"
+        path.write_bytes(data)
+        manifest["files"][f"poc_test/{task}"] = {"file": str(path.relative_to(DATA / "splits")), "n": len(items),
+                                                 "sha256": hashlib.sha256(data).hexdigest(),
+                                                 "ids": [it["id"] for it in items]}
+    g = jsonl(DATA / "splits/tasks/test/gsm8k.jsonl")
+    g = [g[i] for i in sorted(rng.choice(len(g), size=GSM8K_N, replace=False).tolist())]
+    (lt / "poc_test" / "gsm8k.jsonl").write_text("\n".join(json.dumps(x) for x in g) + "\n")
+    (lt / "manifest.json").write_text(json.dumps(manifest, indent=1))
+
+
+def run_gsm8k(model: str, path: Path, label: str) -> dict:
+    from panther.quality import gsm8k
+    from panther.quality.server import LlamaServer
+
+    rec_path = out_dir(model) / f"gsm8k-{label.replace(':', '_')}.json"
+    if rec_path.exists():
+        return json.loads(rec_path.read_text())
+    items = jsonl(DATA / "splits/llama_tasks/poc_test/gsm8k.jsonl")
+    fewshot = jsonl(DATA / "splits/tasks/fewshot/gsm8k.jsonl")
+    with LlamaServer(LLAMA, path, "cuda", parallel=8, ctx_per_slot=2048, threads=THREADS,
+                     log=out_dir(model) / "server.log") as srv:
+        comps = srv.map(lambda it: srv.complete(gsm8k.prompt(it["question"], fewshot), gsm8k.MAX_TOKENS,
+                                                gsm8k.STOP), items)
+    correct = [int(gsm8k.exact_match(gsm8k.strict_match(c), it["answer"])) for it, c in zip(items, comps)]
+    rec = {"ids": [it["id"] for it in items], "correct": correct, "completions": comps}
+    rec_path.write_text(json.dumps(rec))
+    return rec
+
+
+def evaluate_config(model: str, name: str, a: dict, store, inv, base_fmt: str):
+    import numpy as np
+
+    from panther.stats.decision import Evaluation
+    label = f"poc:test:{name}:{assignment_digest(a)[:12]}"
+    recs = records(model)
+    todo_tasks = [t for t in SUBSET if not find(recs, label, task=t, split="poc_test")]
+    todo_ppl = not find(recs, label, text="test_web")
+    gsm_path = out_dir(model) / f"gsm8k-{label.replace(':', '_')}.json"
+    path = None
+    if todo_tasks or todo_ppl or not gsm_path.exists():
+        path = build_file(inv, store, a, base_fmt, model)
+        for t in todo_tasks:
+            if evaluator.main(["task", "--model", model, "--gguf", str(path), "--build", "cuda", "--task", t,
+                               "--split", "poc_test", "--label", label, "--threads", str(THREADS)]) != 0:
+                raise SystemExit(f"{label} {t} failed")
+        if todo_ppl and evaluator.main(["ppl", "--model", model, "--gguf", str(path), "--build", "cuda",
+                                        "--text", "test_web", "--label", label, "--threads", str(THREADS)]) != 0:
+            raise SystemExit(f"{label} ppl failed")
+        g = run_gsm8k(model, path, label)
+        path.unlink()
+    else:
+        g = json.loads(gsm_path.read_text())
+    recs = records(model)
+    correct = {t: np.array(find(recs, label, task=t, split="poc_test")["per_item"]["correct"], dtype=np.int8)
+               for t in SUBSET}
+    correct["gsm8k"] = np.array(g["correct"], dtype=np.int8)
+    p = find(recs, label, text="test_web")["per_chunk"]
+    nll = np.array(p["mean_nll"]) * p["tokens"]
+    toks = np.full(len(nll), p["tokens"])
+    ram = int(estimate_ram(inv, a, CTX, OVERHEAD).total)
+    return Evaluation(f"{model.split('-')[1]}:{name}", correct, nll, toks, ram, 0.0)
+
+
+def cmd_verdict(_: str) -> int:
+    from panther.stats.decision import compare
+    if not (DATA / "poc" / "APPROVED_TEST_SUBSET").exists():
+        raise SystemExit("P7 uses the test subset and needs the user's explicit approval (D42); "
+                         "create $PANTHER_DATA/poc/APPROVED_TEST_SUBSET once approved")
+    build_test_subset()
+    evs = {}
+    for model in MENU:
+        inv, menu, store, _ = setup(model)
+        sl = json.loads((out_dir(model) / "shortlist.json").read_text())
+        for name in (sl["winner"], "uniform"):
+            if name in sl["rows"]:
+                evs[(model, name)] = evaluate_config(model, name, sl["rows"][name]["assignment"], store, inv,
+                                                     menu["base"])
+    m7, m14 = list(MENU)
+    w7 = json.loads((out_dir(m7) / "shortlist.json").read_text())["winner"]
+    w14 = json.loads((out_dir(m14) / "shortlist.json").read_text())["winner"]
+    pairs = {"7B winner vs 14B winner": (evs[(m7, w7)], evs[(m14, w14)])}
+    for m, w in ((m7, w7), (m14, w14)):
+        if (m, "uniform") in evs:
+            pairs[f"{m.split('-')[1]} winner vs uniform"] = (evs[(m, w)], evs[(m, "uniform")])
+    out = {"configs": {e.name: {"mean_accuracy_pct": 100 * e.mean_accuracy(), "ppl_test_web": e.perplexity(),
+                                "per_task_pct": {t: 100 * float(v.mean()) for t, v in e.task_correct.items()},
+                                "ram_gib": e.peak_ram_bytes / 2**30} for e in evs.values()},
+           "comparisons": {}}
+    for k, (a, b) in pairs.items():
+        c = compare(a, b)
+        out["comparisons"][k] = {"winner": c.winner, "decided_by": c.decided_by, "acc_diff_pts": 100 * c.acc_diff,
+                                 "acc_ci_pts": [100 * c.acc_ci[0], 100 * c.acc_ci[1]], "ppl_ratio": c.ppl_ratio,
+                                 "ppl_ratio_ci": list(c.ppl_ratio_ci)}
+    (DATA / "poc" / "verdict.json").write_text(json.dumps(out, indent=1))
+    for n, v in out["configs"].items():
+        print(f"{n:22s} RAM {v['ram_gib']:.2f} GiB  mean acc {v['mean_accuracy_pct']:.2f}%  PPL {v['ppl_test_web']:.3f}  "
+              + " ".join(f"{t[:4]} {x:.1f}" for t, x in v["per_task_pct"].items()))
+    for k, c in out["comparisons"].items():
+        print(f"{k}: winner {c['winner']} by {c['decided_by']} | acc diff {c['acc_diff_pts']:+.2f} pts "
+              f"CI [{c['acc_ci_pts'][0]:+.2f}, {c['acc_ci_pts'][1]:+.2f}] | PPL ratio {c['ppl_ratio']:.4f}")
+    return 0
+
+
 if __name__ == "__main__":
-    cmds = {"refs": cmd_refs, "correct": cmd_correct, "penalties": cmd_penalties, "shortlist": cmd_shortlist}
+    cmds = {"refs": cmd_refs, "correct": cmd_correct, "penalties": cmd_penalties, "shortlist": cmd_shortlist,
+            "verdict": cmd_verdict}
     if len(sys.argv) != 3 or sys.argv[1] not in cmds:
         sys.exit(__doc__)
     sys.exit(cmds[sys.argv[1]](sys.argv[2]))

@@ -49,6 +49,17 @@ def assignment_id(path: Path) -> str | None:
     return field.contents() if field is not None else None
 
 
+APPROVAL = "poc/APPROVED_TEST_SUBSET"  # created only on the user's explicit OK (D42)
+
+
+def test_data_allowed(name: str) -> bool:
+    """The full test split is for Phase D only (D34). The proof of concept may use its fixed test subset
+    (`poc_test` task files, `test_web` text) once the user has approved it."""
+    if not name.startswith(("test", "poc_test")):
+        return True
+    return name in ("poc_test", "test_web") and (DATA / APPROVAL).exists()
+
+
 def llama_commit() -> str:
     out = subprocess.run(["git", "-c", "safe.directory=*", "-C", str(LLAMA), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
@@ -91,8 +102,8 @@ def main(argv: list[str] | None = None) -> int:
     elif a.kind == "task":
         if not a.task or not a.split:
             ap.error("task needs --task and --split")
-        if a.split.startswith("test"):
-            ap.error("the test split is touched once, in Phase D, by its own script (D34)")
+        if not test_data_allowed(a.split):
+            ap.error("test data: full split only in Phase D (D34); PoC subset only after approval (D42)")
         task_manifest = json.loads((DATA / "splits" / "llama_tasks" / "manifest.json").read_text())
         entry = task_manifest["files"][f"{a.split}/{a.task}"]
         path = DATA / "splits" / entry["file"]
@@ -105,8 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if not a.text:
             ap.error("ppl needs --text")
-        if a.text.startswith("test"):
-            ap.error("the test split is touched once, in Phase D, by its own script (D34)")
+        if not test_data_allowed(a.text):
+            ap.error("test data: full split only in Phase D (D34); PoC subset only after approval (D42)")
         text = DATA / "splits" / "text" / f"{a.text}.txt"
         cmd = [str(binary), "-m", str(a.gguf), "-f", str(text), "-c", str(PPL_CTX), "-b", str(PPL_CTX),
                "--ppl-output-type", "1", "-t", str(a.threads), *gpu]
