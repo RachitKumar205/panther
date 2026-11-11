@@ -1041,18 +1041,18 @@ PRESET_BPW = [1.56, 1.75, 2.06, 2.31, 2.5, 2.7, 2.9, 3.06, 3.2, 3.3, 3.44, 3.5, 
 
 
 def cmd_preset(budget: int, model: str) -> int:
-    """The best existing quantization that fits the budget: llama.cpp's largest mixed preset (same BF16 file and
-    importance matrix) whose RAM is at most the budget's top. Built largest-first, tested like the genotypes, and
-    compared with the model's winner (paired bootstrap)."""
+    """The best existing quantization that fits the budget: of llama.cpp's mixed presets (same BF16 file and
+    importance matrix) whose RAM is at most the budget's top, the two largest are tested like the genotypes and the
+    better one (choose_winner) is compared with the model's winner (paired bootstrap)."""
     from panther.stats import compare
     store = DATA / "store" / model
     bf16, imat = store / f"{model}-BF16.gguf", store / f"{model}.imatrix.gguf"
     inv = inv_of(model)
     top = budget * (1 + WINDOW[1])
     room = (top * GIB - inv.geometry.kv_cache_bytes(CTX, KV_BPE) - OVERHEAD * GIB) * 8 / sum(g.n_weights for g in inv.genes)
-    chosen = None
+    fitting = []  # the two largest presets that fit; the better of them is "the best existing quantization"
     for ftype, bpw in sorted(zip(PRESETS, PRESET_BPW), key=lambda x: -x[1]):
-        if bpw > room + 0.3:
+        if bpw > room + 0.3 or len(fitting) == 2:
             continue
         path = store / f"preset-{ftype}.gguf"
         if not path.exists():
@@ -1062,19 +1062,25 @@ def cmd_preset(budget: int, model: str) -> int:
         ram = file_ram_gib(model, path)
         note(f"{model.split('-')[1]} preset {ftype}: {ram:.3f} GiB ({'fits' if ram <= top else 'too big'})")
         if ram <= top:
-            chosen = (ftype, path, ram)
-            break
-    if chosen is None:
+            fitting.append((ftype, path, ram))
+    if not fitting:
         note(f"{model.split('-')[1]} preset: none of llama.cpp's presets fits {budget} GiB")
         return 0
-    ftype, path, ram = chosen
-    name = f"preset-{ftype}"
-    label = test_label(budget, name, None)
-    run_all_tests(model, path, label, with_kl=True)
-    ev_p = evaluation(model, label, ram, name)
-    kl_p = find(records(model), label, reference="selection")["metrics"]["kl_mean"]
+    rows, evs, info = {}, {}, {}
+    for ftype, path, ram in fitting:
+        name = f"preset-{ftype}"
+        label = test_label(budget, name, None)
+        run_all_tests(model, path, label, with_kl=True)
+        evs[name] = evaluation(model, label, ram, name)
+        rows[name] = {"mean_accuracy_pct": 100 * evs[name].mean_accuracy(),
+                      "kl": find(records(model), label, reference="selection")["metrics"]["kl_mean"]}
+        info[name] = (ftype, ram)
+    name = choose_winner(rows, evs)[0]
+    ftype, ram = info[name]
+    ev_p, kl_p = evs[name], rows[name]["kl"]
+    tried = {n: {"ram_gib": info[n][1], **rows[n], "ppl": evs[n].perplexity()} for n in rows}
     result = {"preset": ftype, "ram_gib": ram, "kl": kl_p, "mean_accuracy_pct": 100 * ev_p.mean_accuracy(),
-              "ppl": ev_p.perplexity()}
+              "ppl": ev_p.perplexity(), "tried": tried}
     wfile = out(f"budget-{budget}", f"winner-{model}.json")
     if wfile.exists():
         w = json.loads(wfile.read_text())
