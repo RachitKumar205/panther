@@ -88,7 +88,7 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
 | Budget | Model | Peak RAM (predicted) | Writing tok/s | Prompt tok/s | Clock | Notes |
 |---|---|---|---|---|---|---|
 | 7 GiB | 14B ours | **6.70 GiB** (7.04) | **1.00** | 1.46 | 2.4 GHz, heat-limited | good supply; a repeat run gave 1.01 / 1.46 / 6.69 GiB. Capped at 1.8 GHz on the weak supply: 0.76 / 1.09 |
-| 7 GiB | 32B ours | **6.78 GiB** (7.04) | 0.49 | 0.61 | 2.4 GHz, heat-limited (83–84 °C) | supply 5.02–5.04 V, no under-voltage |
+| 7 GiB | 32B ours | **6.78 GiB** (7.04) | 0.49 | 0.61 | 2.4 GHz, heat-limited (83–84 °C) | supply 5.02–5.04 V; a repeat gave 0.49 / 0.60 / 6.69 GiB |
 | 7 GiB | 7B Q6_K | **6.07 GiB** (6.34) | 1.75 | 7.83 | 2.4 GHz, heat-limited | good supply; same as on the weak one (1.74 / 7.98): memory-bound |
 | 1 GiB | 1.5B pick (uniform IQ2_S, padded) | **0.70 GiB** (0.99) | **9.40** | 13.9 | 2.4 GHz | good supply; RAM 0.3 GiB under the prediction |
 | 3 GiB | 7B pick (uniform IQ2_S, padded) | **2.72 GiB** (2.98) | 1.86 | 2.44 | 2.4 GHz | |
