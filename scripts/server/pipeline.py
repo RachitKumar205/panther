@@ -46,10 +46,10 @@ KV_BPE = {"Q8_0": 34 / 32, "F16": 2.0}[CFG["kv_cache_type"]]
 MENU_ALL = CFG["formats"]
 CONCURRENT = int(os.environ.get("PANTHER_KL_CONCURRENT", "10"))
 LANE_SCRATCH_GB = 25  # part-cost files one lane may hold on disk at once
-# PANTHER_ANCHOR=preset: the search starts from the budget's best llama.cpp preset (its layout, mapped to the menu)
-# instead of one uniform type, probes each part one type up and one down from there, and lists the padded preset
-# layout as a candidate. Its files carry the suffix below, so the uniform-start results stay as they are.
-ANCHOR = os.environ.get("PANTHER_ANCHOR") == "preset"
+# The search starts from the budget's best llama.cpp preset (its layout, mapped to the menu), probes each part one
+# type up and one down from there, and lists the padded preset layout as a control. Where no preset fits, it starts
+# from one uniform type. PANTHER_ANCHOR=none runs the first method (uniform start only), whose files have no suffix.
+ANCHOR = os.environ.get("PANTHER_ANCHOR", "preset") != "none"
 SUFFIX = "-anchored" if ANCHOR else ""
 
 
@@ -290,11 +290,17 @@ def probe_format(model: str) -> str:
 
 
 @lru_cache(maxsize=None)
-def anchor(model: str) -> tuple[str, dict[str, str]]:
-    """The budget's best fitting llama.cpp preset (from the uniform-start preset step) as a genotype: each matrix
-    takes the preset's type for it, or the allowed menu type nearest in bits per weight (the higher on a tie)."""
+def anchor(model: str) -> tuple[str, dict[str, str]] | None:
+    """The budget's best fitting llama.cpp preset (from the preset step) as a genotype: each matrix takes the
+    preset's type for it, or the allowed menu type nearest in bits per weight (the higher on a tie). None if no
+    preset fits the budget (or the preset step has not run)."""
     import gguf
-    ftype = json.loads(out(f"budget-{BUDGET}", f"preset-{model}.json").read_text())["preset"]
+    pj = out(f"budget-{BUDGET}", f"preset-{model}.json")
+    if not pj.exists():
+        raise SystemExit(f"{model} at {BUDGET} GiB: run the preset step first (the search starts from its result)")
+    ftype = json.loads(pj.read_text()).get("preset")
+    if not ftype:
+        return None
     path = DATA / "store" / model / f"preset-{ftype}.gguf"
     types = {t.name: t.tensor_type.name for t in gguf.GGUFReader(path).tensors}
     a = {}
@@ -305,13 +311,18 @@ def anchor(model: str) -> tuple[str, dict[str, str]]:
     return ftype, a
 
 
+def method_suffix(model: str) -> str:
+    """Where no preset fits, the preset-start search is the uniform-start one, so its files are shared."""
+    return SUFFIX if ANCHOR and anchor(model) else ""
+
+
 def start_assignment(model: str) -> dict[str, str]:
     """Where the part costs are measured from: the preset layout (anchored) or one uniform type."""
-    return dict(anchor(model)[1]) if ANCHOR else fill(model, base_format(model))
+    return dict(anchor(model)[1]) if ANCHOR and anchor(model) else fill(model, base_format(model))
 
 
 def start_tag(model: str) -> str:
-    return f"anchor{BUDGET}-{anchor(model)[0]}" if ANCHOR else base_format(model)
+    return f"anchor{BUDGET}-{anchor(model)[0]}" if ANCHOR and anchor(model) else base_format(model)
 
 
 def anchor_probes(model: str) -> tuple[str, str]:
@@ -454,7 +465,7 @@ def reflink_ok(model: str) -> bool:
     if flag.exists():
         return json.loads(flag.read_text())["identical"]
     b0 = sorted(blocks(model))[len(blocks(model)) // 2]
-    a = block_assignment(model, b0, anchor_probes(model)[0] if ANCHOR else probe_format(model))
+    a = block_assignment(model, b0, anchor_probes(model)[0] if ANCHOR and anchor(model) else probe_format(model))
     same, kls = False, {}
     try:
         fast = fast_probe(model, a)
@@ -672,7 +683,7 @@ def cmd_sens(model: str) -> int:
 
 def _cmd_sens(model: str) -> int:
     base = start_tag(model)
-    probes = anchor_probes(model) if ANCHOR else (probe_format(model),)
+    probes = anchor_probes(model) if ANCHOR and anchor(model) else (probe_format(model),)
     probe = "/".join(probes)
     stats = []
     todo = {("base", base)} | {(b, f) for b in blocks(model) for f in probes}
@@ -811,12 +822,12 @@ def solution_list(budget: int, pen_fn=None, models: list[str] | None = None) -> 
         for i, sol in enumerate(sols):
             if not in_window(model, sol.assignment, budget):
                 raise SystemExit(f"{short} sol{i + 1} outside the window ({ram_gib(model, sol.assignment):.3f} GiB)")
-            items[f"{short}:{'a-' if ANCHOR else ''}sol{i + 1}"] = {"model": model, "assignment": sol.assignment,
+            items[f"{short}:{'a-' if method_suffix(model) else ''}sol{i + 1}"] = {"model": model, "assignment": sol.assignment,
                                             "predicted_penalty": sol.penalty}
         pu = padded_uniform(model, budget)
         if pu:
             items[f"{short}:uniform-{pu[0]}-padded"] = {"model": model, "assignment": pu[1]}
-        if ANCHOR:
+        if ANCHOR and anchor(model):
             pa = padded_from(model, anchor(model)[1], budget)
             if pa:
                 items[f"{short}:preset-{anchor(model)[0]}-layout-padded"] = {"model": model, "assignment": pa}
@@ -826,7 +837,7 @@ def solution_list(budget: int, pen_fn=None, models: list[str] | None = None) -> 
 
 
 def list_path(budget: int, model: str) -> Path:
-    return out(f"budget-{budget}", f"list-{model}{SUFFIX}.json")
+    return out(f"budget-{budget}", f"list-{model}{method_suffix(model)}.json")
 
 
 def load_list(budget: int) -> dict[str, dict]:
@@ -1048,7 +1059,7 @@ def cmd_pick_model(budget: int, model: str) -> int:
               f"PPL {r['ppl']:.3f} | " + " ".join(f"{t[:4]} {v:.1f}" for t, v in r["per_task_pct"].items())
               + ("   <- winner" if n == win else "   (tied on accuracy)" if n in tied else
                  "" if is_searched(n) else "   (control)"), flush=True)
-    out(f"budget-{budget}", f"winner-{model}{SUFFIX}.json").write_text(
+    out(f"budget-{budget}", f"winner-{model}{method_suffix(model)}.json").write_text(
         json.dumps({"winner": win, "tied_on_accuracy": tied, "rows": rows}, indent=1))
     return 0
 
@@ -1095,12 +1106,12 @@ def cmd_bundle_model(budget: int, model: str) -> int:
     short = model.split("-")[1].lower()
     if model in contests()[budget]["reference"]:
         return bundle_reference(budget, model, short)
-    name = json.loads(out(f"budget-{budget}", f"winner-{model}{SUFFIX}.json").read_text())["winner"]
+    name = json.loads(out(f"budget-{budget}", f"winner-{model}{method_suffix(model)}.json").read_text())["winner"]
     a = json.loads(list_path(budget, model).read_text())[name]["assignment"]
-    bundle = DATA / "pi_bundle" / f"budget-{budget}-{short}"
+    bundle = DATA / "pi_bundle" / f"budget-{budget}-{short}{method_suffix(model)}"
     bundle.mkdir(parents=True, exist_ok=True)
     shutil.copy(DATA / "splits/text/agreement.txt", bundle / "agreement.txt")
-    dst = bundle / f"qwen2.5-{short}-b{budget}-winner.gguf"
+    dst = bundle / f"{model.lower()}-b{budget}-winner{method_suffix(model)}.gguf"
     if not dst.exists():
         build_file(model, a).rename(dst)
     h = hashlib.sha256()
@@ -1155,6 +1166,8 @@ def cmd_preset(budget: int, model: str) -> int:
             path.unlink()  # a preset that doesn't fit is never used; it only takes disk
     if not fitting:
         note(f"{model.split('-')[1]} preset: none of llama.cpp's presets fits {budget} GiB")
+        pfile = out(f"budget-{budget}", f"preset-{model}.json")
+        pfile.write_text(json.dumps({**(json.loads(pfile.read_text()) if pfile.exists() else {}), "preset": None}))
         return 0
     rows, evs, info = {}, {}, {}
     for ftype, path, ram in fitting:
@@ -1171,17 +1184,19 @@ def cmd_preset(budget: int, model: str) -> int:
     tried = {n: {"ram_gib": info[n][1], **rows[n], "ppl": evs[n].perplexity()} for n in rows}
     result = {"preset": ftype, "ram_gib": ram, "kl": kl_p, "mean_accuracy_pct": 100 * ev_p.mean_accuracy(),
               "ppl": ev_p.perplexity(), "tried": tried}
-    wfile = out(f"budget-{budget}", f"winner-{model}{SUFFIX}.json")
+    pfile = out(f"budget-{budget}", f"preset-{model}.json")  # the presets themselves don't depend on the method
+    result = {**(json.loads(pfile.read_text()) if pfile.exists() else {}), **result}
+    wfile = out(f"budget-{budget}", f"winner-{model}{method_suffix(model)}.json")
     if wfile.exists():
         w = json.loads(wfile.read_text())
         it = json.loads(list_path(budget, model).read_text())[w["winner"]]
         ev_w = evaluation(model, test_label(budget, w["winner"], it["assignment"]), it["ram_gib"], w["winner"])
         c = compare(ev_w, ev_p)
-        result["vs_winner"] = {"winner": w["winner"], "acc_diff_pts": 100 * c.acc_diff,
+        result[f"vs_winner{method_suffix(model)}"] = {"winner": w["winner"], "acc_diff_pts": 100 * c.acc_diff,
                                "acc_ci_pts": [100 * c.acc_ci[0], 100 * c.acc_ci[1]], "ppl_ratio": c.ppl_ratio,
                                "kl_winner": w["rows"][w["winner"]]["kl"]}
-    out(f"budget-{budget}", f"preset-{model}{SUFFIX}.json").write_text(json.dumps(result, indent=1))
-    v = result.get("vs_winner")
+    pfile.write_text(json.dumps(result, indent=1))
+    v = result.get(f"vs_winner{method_suffix(model)}") if wfile.exists() else None
     note(f"{model.split('-')[1]} preset {ftype}: acc {result['mean_accuracy_pct']:.2f}, KL {kl_p:.4f}, PPL "
          f"{result['ppl']:.3f}" + (f" | our winner {v['acc_diff_pts']:+.2f} pts [{v['acc_ci_pts'][0]:+.2f}, "
                                    f"{v['acc_ci_pts'][1]:+.2f}], KL {v['kl_winner']:.4f}, PPL ratio "
@@ -1195,10 +1210,12 @@ def cmd_upload(budget: int, model: str) -> int:
     Files already there with the same content are not sent again."""
     from huggingface_hub import HfApi
     short = model.split("-")[1].lower()
-    repo = os.environ["PANTHER_HF_REPO"].format(size=short, budget=budget)
+    ref = model in contests()[budget]["reference"]  # a reference's uniform file doesn't depend on the method
+    sfx = "" if ref else method_suffix(model)
+    repo = os.environ["PANTHER_HF_REPO"].format(size=short, budget=budget) + sfx
     api = HfApi()
     api.create_repo(repo, private=True, exist_ok=True)
-    api.upload_folder(repo_id=repo, folder_path=DATA / "pi_bundle" / f"budget-{budget}-{short}")
+    api.upload_folder(repo_id=repo, folder_path=DATA / "pi_bundle" / f"budget-{budget}-{short}{sfx}")
     note(f"{short.upper()} Pi bundle uploaded to {repo}")
     return 0
 

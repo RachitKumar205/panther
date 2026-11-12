@@ -16,6 +16,7 @@ M15, M14, M32 = "Qwen2.5-1.5B-Instruct", "Qwen2.5-14B-Instruct", "Qwen2.5-32B-In
 @pytest.fixture
 def budget():
     def set_(b):
+        p.ANCHOR, p.SUFFIX = False, ""  # the uniform start: these tests have no preset files
         p.BUDGET = b
         p.menu.cache_clear()
         p.allowed.cache_clear()
