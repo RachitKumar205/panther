@@ -107,6 +107,12 @@ def lane(chain: str) -> dict | None:
             "t1": t1, "stopped": bool(lines) and "stopped at" in lines[-1]}
 
 
+def clock_min(line: str) -> int:
+    """Minutes since midnight of a progress line's HH:MM (IST)."""
+    h, m = line[:5].split(":")
+    return 60 * int(h) + int(m)
+
+
 def bar(frac: float) -> str:
     n = max(0, min(10, round(10 * frac)))
     return "█" * n + "░" * (10 - n) + f" {100 * frac:.0f}%"
@@ -128,17 +134,25 @@ def render() -> str:
         prog = LOGS / f"progress-b{B}.log"
         pl = [ln for ln in prog.read_text().splitlines() if f"{short} " in ln] if prog.exists() else []
         last = lambda key: next((ln for ln in reversed(pl) if key in ln), None)  # noqa: E731
+        starts = [i for i, ln in enumerate(pl) if "starting genomes" in ln]
+        since = pl[starts[-1]:] if starts else []  # the latest GA run's lines
+        ga_done = next((ln for ln in since if "GA done" in ln), None)
+        cands = [ln for ln in since if re.search(r"GA \S+:ga\d+: selection accuracy", ln)]
         rows, clock = [], now
         for s in L["steps"]:
             k, st = kind(s), L["state"].get(s, "waiting")
             ts = ga_times(L["model"], B) if k == "ga" else []
-            if k == "ga" and st == "waiting" and ts and ts[-1] > now - 900:
+            if k == "ga" and st != "done" and ga_done:
+                st = "done"  # a GA started before its lane got there finished on its own
+            elif k == "ga" and st == "waiting" and ts and ts[-1] > now - 900:
                 st = "running"  # a GA started before its lane got there (adopted later)
             typ = typical_min(k, size)
             frac, spent, left, how = 0.0, 0.0, typ, "est."
             if st == "done":
                 frac, left = 1.0, 0.0
                 spent = (L["t1"].get(s, 0) - L["t0"][s]) / 60 if s in L["t0"] and s in L["t1"] else 0
+                if k == "ga" and ts:
+                    spent, how = (ts[-1] - ts[0]) / 60, (ga_done or "")[6:].split(";")[0]
             elif st == "running":
                 start = L["t0"].get(s) or t_start.get(s) or (ts[0] if ts else now)
                 spent = (now - start) / 60
@@ -150,14 +164,24 @@ def render() -> str:
                     frac, how = n / expect, f"{n} individuals of {GA_MIN}-{GA_MAX} (stops on a plateau), {rate:.2f}/min"
                     left = max(0, expect - n) / rate if rate else typ
                 elif k == "gascore":
-                    done = sum(1 for ln in pl if re.search(r"GA \S+:ga\d+: selection accuracy", ln))
-                    stage = (3 if last("GA winner") else 2 if last("guard:") else 1 if done >= GA_TOP else 0)
-                    frac = [0.1 + 0.4 * done / GA_TOP, 0.55, 0.65, 1.0][stage]
-                    how = (f"{done}/{GA_TOP} candidates scored" if stage == 0 else "guard vs the preset" if stage == 1
-                           else "full test of the winner" if stage == 2 else "done")
-                    left = max(1.0, typ * (1 - frac))
+                    done = len(cands)
+                    guard = next((ln for ln in since if "guard:" in ln), None)
+                    per = 0.5 * size  # minutes per candidate on 4,500 questions, until measured
+                    if done and ga_done:
+                        per = max(1.0, ((clock_min(cands[-1]) - clock_min(ga_done)) % 1440) / done)
+                    final_test = 2 * size  # held-out test of the winner, GSM8K included
+                    if guard:
+                        left, how = max(1.0, final_test - spent + done * per + per), "full test of the winner"
+                        frac = 0.7
+                    else:
+                        left = (GA_TOP - done + 1) * per + final_test  # candidates left + the preset + the test
+                        frac = done / (GA_TOP + 1 + final_test / per)
+                        how = f"{done}/{GA_TOP} candidates scored ({per:.0f} min each), then the guard and the full test"
                 else:
-                    frac, left = min(0.95, spent / typ), max(1.0, typ - spent)
+                    frac = min(0.95, spent / typ)
+                    left = typ - spent
+                    if left < 1:
+                        left, how = 5.0, f"taking longer than the usual ~{typ:.0f} min"
             elif st == "failed":
                 left = 0.0
             if st == "running":  # steps can overlap (a GA adopted while its lane finishes an earlier step)
@@ -180,8 +204,12 @@ def render() -> str:
         if g := last("new best fitness"):
             if mm := re.search(r"individual (\d+): new best fitness ([\d.]+) \(subset accuracy ([\d.]+), bench KL ([\d.]+)", g):
                 out.append(f"- **Our best so far** (individual {mm.group(1)}): accuracy **{mm.group(3)}**, KL {mm.group(4)}")
-        for key in ("guard:", "GA winner"):
-            if x := last(key):
+        if cands:
+            out.append("- **On all 4,500 selection questions:** " + "; ".join(
+                re.sub(r".*GA \S+:(ga\d+): selection accuracy ([\d.]+), bench KL ([\d.]+).*", r"our \1 **\2** (KL \3)", c)
+                for c in cands))
+        for key in ("on all selection questions", "guard:", "GA winner"):
+            if (x := last(key)) and (not since or pl.index(x) >= pl.index(since[0])):
                 out.append(f"- {x[6:]}")
         out += ["", "| | step | progress | spent | left | ends | detail |", "|---|---|---|---|---|---|---|", *rows, ""]
     if not lanes:
