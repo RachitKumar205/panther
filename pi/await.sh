@@ -19,6 +19,9 @@ while [ ${#pending[@]} -gt 0 ]; do
       echo "$(date +%H:%M) $B GiB $S downloaded; checking"
       git pull -q
       flock /tmp/panther-check.lock python3 pi/panther_pi.py run --quick --bundle "$D" | tail -4
+      # the result line goes to the status page's repo, which shows it under "On the Pi"
+      grep "peak RAM" "$D/results/queue.log" | tail -1 > "$D/results/pi-result.txt" && ~/hf-venv/bin/hf upload \
+        "$USER_NS/panther-status" "$D/results/pi-result.txt" "pi/$B-$S.txt" --commit-message "Pi $B GiB $S" >/dev/null 2>&1
     else
       left+=("$item")
     fi

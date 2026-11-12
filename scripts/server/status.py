@@ -173,6 +173,27 @@ def verdict(since: list[str]) -> tuple[str, str, str] | None:
     return None
 
 
+PI_RESULTS: dict[str, str] = {}  # "B-size" -> the Pi's result line, fetched from the status repo by main()
+
+
+def pi_section() -> list[str]:
+    rows = []
+    for k in sorted(PI_RESULTS, key=lambda x: (int(x.split("-")[0]), x)):
+        m = re.search(r"decode ([\d.]+) t/s, prefill ([\d.]+) t/s, peak RAM ([\d.]+) GiB \(predicted ([\d.]+)\)"
+                      r"(?:, throttled: (.*))?", PI_RESULTS[k])
+        if m:
+            b, size = k.split("-", 1)
+            thr = "no" if not m.group(5) or "0x0" in m.group(5) else m.group(5)
+            rows.append(f"| {size.upper()} @ {b} GiB | **{m.group(3)} GiB** (predicted {m.group(4)}) | **{m.group(1)}** | "
+                        f"{m.group(2)} | {thr} |")
+    if not rows:
+        return ["## On the Pi", "", "No Pi results yet.", ""]
+    return ["## On the Pi (our winners only)", "",
+            "Raspberry Pi 5, 8 GB; 256-token prompt, 64 tokens written, 4 threads, 4,096-token context, 8-bit KV cache.", "",
+            "| Winner | Peak RAM | Writing (tokens/s) | Reading the prompt (tokens/s) | Throttled |",
+            "|---|---|---|---|---|", *rows, ""]
+
+
 def clock_min(line: str) -> int:
     """Minutes since midnight of a progress line's HH:MM (IST)."""
     h, m = line[:5].split(":")
@@ -320,7 +341,7 @@ def render() -> str:
             "quantization with llama.cpp's best preset that fits the same RAM budget (same original model and "
             "importance matrix). WIN / LOSE = the 95% interval of the accuracy difference is entirely above / below 0; "
             "otherwise TIE.", ""]
-    return "\n".join(head + summary + [""] + body) + "\n"
+    return "\n".join(head + summary + [""] + pi_section() + body) + "\n"
 
 
 def main() -> None:
@@ -338,6 +359,13 @@ def main() -> None:
             tmp.write_text(render())
             tmp.replace(path)
             if i % 2 == 0:
+                try:  # the Pi's results, uploaded by pi/await.sh
+                    from huggingface_hub import hf_hub_download
+                    for f in api.list_repo_files(repo):
+                        if f.startswith("pi/") and f.endswith(".txt"):
+                            PI_RESULTS[f[3:-4]] = Path(hf_hub_download(repo, f, force_download=True)).read_text().strip()
+                except Exception as e:  # noqa: BLE001
+                    print(f"{time.strftime('%H:%M')} Pi results not read: {e}", flush=True)
                 api.upload_file(path_or_fileobj=str(path), path_in_repo="README.md", repo_id=repo, commit_message="status")
         except Exception as e:  # noqa: BLE001  (a failed refresh is retried next time)
             print(f"{time.strftime('%H:%M')} refresh failed: {e}", flush=True)
