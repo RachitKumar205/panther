@@ -1264,8 +1264,12 @@ def cmd_upload(budget: int, model: str) -> int:
 # bred from the current population and started, so the GPU never waits for a generation to end.
 
 GA_POP, GA_ELITE, GA_INFLIGHT = 16, 4, 4
-GA_EVALS, GA_PATIENCE = 110, 60   # at most this many individuals; stop after this many without a new best
-GA_TOP = 5                        # the best by KL, then scored on the selection benchmarks
+GA_EVALS, GA_PATIENCE = 70, 40    # at most this many individuals; stop after this many without a new best
+GA_TOP = 3                        # the best by fitness, then confirmed on all selection questions
+# Fitness: accuracy on a fixed subset of the selection questions (never the test split), with KL on the benchmark
+# questions as a mild tie-break: F = accuracy points - GA_KL_WEIGHT x KL (0.01 KL weighs 0.1 points).
+GA_FIT_TASKS = {"mmlu": 300, "arc_challenge": 200, "hellaswag": 200, "winogrande": 200}
+GA_KL_WEIGHT = 10.0
 GA_SOLVED = 4                     # children per round proposed by the solver on the fitted sensitivities
 
 
@@ -1418,21 +1422,39 @@ def ga_label(budget: int, a: dict[str, str]) -> str:
     return f"rw:ga{budget}:{assignment_digest(a)[:12]}"
 
 
-def _ga_eval(job: tuple[int, str, dict, bool]) -> float:
+def ga_scores(model: str, label: str) -> tuple[float, float] | None:
+    """(subset accuracy %, bench KL) if both are measured."""
+    recs = records(model)
+    r = find(recs, label, reference="bench")
+    accs = [find(recs, label, task=t, split="selection", n_tasks=n) for t, n in GA_FIT_TASKS.items()]
+    if r is None or not all(accs):
+        return None
+    return float(np.mean([x["metrics"]["accuracy_pct"] for x in accs])), r["metrics"]["kl_mean"]
+
+
+def ga_fitness(acc: float, kl_: float) -> float:
+    return acc - GA_KL_WEIGHT * kl_
+
+
+def _ga_eval(job: tuple[int, str, dict, bool]) -> tuple[float, float]:
+    """One individual: built once; KL on the benchmark questions and the subset accuracy on that one file."""
     global BUDGET
     budget, model, a, fast = job
     BUDGET = budget
     label = ga_label(budget, a)
-    r = find(records(model), label, reference="bench")
-    if r is None:
+    if ga_scores(model, label) is None:
         path = fast_probe(model, a) if fast else build_file(model, a)
         try:
-            with gpu_booking(path.stat().st_size + 6 * 2**30, hold_s=1800):
-                kl(model, path, "bench", label)
+            with gpu_booking(path.stat().st_size + 8 * 2**30, hold_s=1800):
+                if not find(records(model), label, reference="bench"):
+                    kl(model, path, "bench", label)
+                for t, n in GA_FIT_TASKS.items():
+                    if not find(records(model), label, task=t, split="selection", n_tasks=n):
+                        if not evaluate.run("task", model, path, label, THREADS, task=t, split="selection", n_tasks=n):
+                            raise SystemExit(f"{label} {t} failed")
         finally:
             path.unlink(missing_ok=True)
-        r = find(records(model), label, reference="bench")
-    return r["metrics"]["kl_mean"]
+    return ga_scores(model, label)
 
 
 def cmd_ga(budget: int, model: str) -> int:
@@ -1441,11 +1463,14 @@ def cmd_ga(budget: int, model: str) -> int:
     sm = short_name(model)
     G = Genes(model, budget)
     fast = reflink_ok(model)
-    pop: list[tuple[float, str, dict]] = []  # (KL, digest, genome), the best GA_POP kept
+    pop: list[tuple[float, str, dict]] = []  # (-fitness, digest, genome), the best GA_POP kept
     seen: dict[str, float] = {}
     history = []
     measured: list[tuple[float, dict[str, str]]] = []
     queue = G.initial()
+    lb = out(f"budget-{budget}", f"ga-{model}-live.json")  # a best genome from an earlier run joins the start
+    if lb.exists():
+        queue.insert(0, json.loads(lb.read_text())["assignment"])
     best, last_gain, n = float("inf"), 0, 0
     note(f"{sm} GA: {len(queue)} starting genomes (preset layout, padded uniforms, random mixes, preset mutants)")
 
@@ -1473,25 +1498,27 @@ def cmd_ga(budget: int, model: str) -> int:
             fut = next(as_completed(running))
             d, a = running.pop(fut)
             try:
-                k = fut.result()
+                acc, kl_ = fut.result()
+                k = -ga_fitness(acc, kl_)
             except BaseException as e:  # noqa: BLE001  (one failed individual never stops the search)
                 note(f"{sm} GA: an individual failed ({e})")
-                k = float("inf")
+                acc, kl_, k = float("nan"), float("nan"), float("inf")
             n += 1
             seen[d] = k
-            history.append({"n": n, "digest": d, "kl": k, "ram_gib": G.ram(a) / GIB})
+            history.append({"n": n, "digest": d, "fitness": -k, "accuracy": acc, "kl": kl_, "ram_gib": G.ram(a) / GIB})
             if k != float("inf"):
                 measured.append((k, a))
             pop.append((k, d, a))
             pop.sort(key=lambda t: t[0])
             del pop[GA_POP:]
-            if k < best * (1 - 1e-5):  # KL is deterministic: any real decrease is a gain
+            if k < best - 1e-9:
                 best, last_gain = k, n
                 out(f"budget-{budget}", f"ga-{model}-live.json").write_text(json.dumps(  # for an early check
-                    {"n": n, "kl": k, "assignment": a, "ram_gib": G.ram(a) / GIB}))
-                note(f"{sm} GA: individual {n}: new best KL {k:.4f} (RAM {G.ram(a) / GIB:.3f} GiB)")
+                    {"n": n, "fitness": -k, "accuracy": acc, "kl": kl_, "assignment": a, "ram_gib": G.ram(a) / GIB}))
+                note(f"{sm} GA: individual {n}: new best fitness {-k:.2f} (subset accuracy {acc:.2f}, bench KL "
+                     f"{kl_:.4f}, RAM {G.ram(a) / GIB:.3f} GiB)")
             elif n % 10 == 0:
-                note(f"{sm} GA: {n} individuals, best KL {best:.4f}")
+                note(f"{sm} GA: {n} individuals, best fitness {-best:.2f}")
             if n + len(running) < GA_EVALS and n - last_gain < GA_PATIENCE:
                 if not queue and len(measured) >= 8:
                     try:  # a round: the solver's picks under the fit, then GA children around them
@@ -1505,13 +1532,15 @@ def cmd_ga(budget: int, model: str) -> int:
     top = pop[:GA_TOP]
     items = {}
     for i, (k, d, a) in enumerate(top, 1):
-        items[f"{model.split('-')[1]}:ga{i}"] = {"model": model, "assignment": a, "bench_kl": k,
-                                                 "ram_gib": ram_gib(model, a)}
+        acc, kl_ = ga_scores(model, ga_label(budget, a))
+        items[f"{model.split('-')[1]}:ga{i}"] = {"model": model, "assignment": a, "fitness": -k, "subset_accuracy": acc,
+                                                 "bench_kl": kl_, "ram_gib": ram_gib(model, a)}
     list_path(budget, model).write_text(json.dumps(items, indent=1))
-    out(f"budget-{budget}", f"ga-{model}.json").write_text(json.dumps({"evaluated": n, "best_kl": best,
+    out(f"budget-{budget}", f"ga-{model}.json").write_text(json.dumps({"evaluated": n, "best_fitness": -best,
                                                                        "history": history}, indent=1))
-    note(f"{sm} GA done: {n} individuals; best bench KL {best:.4f}; top {len(items)}: "
-         + ", ".join(f"{v['bench_kl']:.4f}" for v in items.values()))
+    note(f"{sm} GA done: {n} individuals; top {len(items)}: "
+         + ", ".join(f"fitness {v['fitness']:.2f} (accuracy {v['subset_accuracy']:.2f}, KL {v['bench_kl']:.4f})"
+                     for v in items.values()))
     return 0
 
 

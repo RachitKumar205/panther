@@ -95,9 +95,10 @@ def parse_winogrande(text: str, n: int) -> np.ndarray:
 # --- one llama-perplexity run --------------------------------------------------------------------------------
 
 def run(kind: str, model: str, gguf: Path, label: str, threads: int = 16, reference: str | None = None,
-        text: str | None = None, task: str | None = None, split: str | None = None) -> bool:
+        text: str | None = None, task: str | None = None, split: str | None = None, n_tasks: int = 0) -> bool:
     """kind: "kl" (against data/reference/<model>/<reference>.kld), "ppl" (data/splits/text/<text>.txt) or
-    "task" (data/splits/llama_tasks/<split>/<task>). Writes the record; True if the run parsed."""
+    "task" (data/splits/llama_tasks/<split>/<task>; n_tasks > 0: a fixed random subset of that many, the same one
+    every time: llama.cpp seeds its choice with 1). Writes the record; True if the run parsed."""
     out_dir = DATA / "results" / model
     (out_dir / "logs").mkdir(parents=True, exist_ok=True)
     started = dt.datetime.now(dt.timezone.utc)
@@ -115,10 +116,10 @@ def run(kind: str, model: str, gguf: Path, label: str, threads: int = 16, refere
     else:
         entry = json.loads((DATA / "splits" / "llama_tasks" / "manifest.json").read_text())["files"][f"{split}/{task}"]
         path = str(DATA / "splits" / entry["file"])
-        mode = (["-f", path, "--winogrande", "--winogrande-tasks", "0"] if task == "winogrande"
-                else ["-bf", path, "--multiple-choice", "--multiple-choice-tasks", "0"])
+        mode = (["-f", path, "--winogrande", "--winogrande-tasks", str(n_tasks)] if task == "winogrande"
+                else ["-bf", path, "--multiple-choice", "--multiple-choice-tasks", str(n_tasks)])
         cmd = base + mode + ["-c", str(TASK_CTX), "-np", str(TASK_PARALLEL)]
-        how |= {"task": task, "split": split}
+        how |= {"task": task, "split": split} | ({"n_tasks": n_tasks} if n_tasks else {})
     t0 = time.monotonic()
     proc = subprocess.run(cmd, capture_output=True, text=True)
     output = proc.stdout + proc.stderr
@@ -135,9 +136,11 @@ def run(kind: str, model: str, gguf: Path, label: str, threads: int = 16, refere
             rec["per_chunk"] = {"mean_nll": [round(x, 7) for x in chunk], "tokens": tokens}
             summary = f"PPL {ppl:.4f}"
         else:
-            correct = (parse_winogrande if task == "winogrande" else parse_multiple_choice)(output, entry["n"])
+            n = n_tasks or entry["n"]
+            correct = (parse_winogrande if task == "winogrande" else parse_multiple_choice)(output, n)
             rec["metrics"] = {"accuracy_pct": 100 * float(correct.mean()), "n": len(correct)}
-            rec["per_item"] = {"ids": entry["ids"], "correct": correct.tolist()}
+            rec["per_item"] = {"ids": entry["ids"] if not n_tasks else f"llama.cpp subset of {n}, seed 1",
+                               "correct": correct.tolist()}
             summary = f"{task} {rec['metrics']['accuracy_pct']:.2f}% (n={len(correct)})"
         rec["ok"] = True
     except ParseError as e:
