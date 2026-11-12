@@ -65,6 +65,7 @@ run_args() {  # run_args cpu|gpu
   )
   [ -n "${PANTHER_FORMATS:-}" ] && RUN_ARGS+=(-e "PANTHER_FORMATS=$PANTHER_FORMATS")
   [ -n "${PANTHER_HF_REPO:-}" ] && RUN_ARGS+=(-e "PANTHER_HF_REPO=$PANTHER_HF_REPO")
+  [ -n "${PANTHER_ANCHOR:-}" ] && RUN_ARGS+=(-e "PANTHER_ANCHOR=$PANTHER_ANCHOR")
   case "$1" in
     cpu) RUN_ARGS+=(--network pasta) ;;
     gpu) RUN_ARGS+=(--device nvidia.com/gpu=all --security-opt label=disable --network none
