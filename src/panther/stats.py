@@ -77,9 +77,12 @@ def compare(a: Evaluation, b: Evaluation, seed: int = 0, n_boot: int = N_BOOT,
     rng = np.random.default_rng(seed)
     acc = _boot_acc_diff(a, b, rng, n_boot)
     lo, hi = np.quantile(acc, [alpha / 2, 1 - alpha / 2])
-    lppl = _boot_log_ppl_ratio(a, b, rng, n_boot)
-    plo, phi = np.exp(np.quantile(lppl, [alpha / 2, 1 - alpha / 2]))
-    ratio = a.perplexity() / b.perplexity()
+    if np.array_equal(a.chunk_tokens, b.chunk_tokens):
+        lppl = _boot_log_ppl_ratio(a, b, rng, n_boot)
+        plo, phi = np.exp(np.quantile(lppl, [alpha / 2, 1 - alpha / 2]))
+        ratio = a.perplexity() / b.perplexity()
+    else:  # different tokenizers (models from different families): perplexities are not comparable, so no PPL tiebreak
+        plo = phi = ratio = float("nan")
     common: dict[str, Any] = dict(
         acc_diff=a.mean_accuracy() - b.mean_accuracy(),
         acc_ci=(float(lo), float(hi)),
