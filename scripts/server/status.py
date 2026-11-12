@@ -219,6 +219,17 @@ def render() -> str:
     t_start = started_at()
     out: list[str] = []
     lanes = [x for x in (lane(p.stem[len("chain-"):]) for p in sorted(LOGS.glob("chain-g*.log"))) if x]
+    originals = {}
+    for f in (DATA / "rewrite").glob("original-*.json"):
+        try:
+            o = json.loads(f.read_text())
+            originals[o["model"]] = o
+        except Exception:  # noqa: BLE001  (being written)
+            pass
+    held = ["## Held-out test accuracy: the unquantized original, llama.cpp's preset, ours", "",
+            "Same questions for all three (MMLU, HellaSwag, ARC-Challenge, WinoGrande, GSM8K; never used in the search). "
+            "Points lost = how far below the original.", "",
+            "| Contest | Original (16-bit) | Preset | Ours | Preset loses | We lose |", "|---|---|---|---|---|---|"]
     summary = ["## Verdict per contest", "",
                "| Contest | Verdict | Accuracy difference vs preset [95% interval] | Measured on |", "|---|---|---|---|"]
     body: list[str] = []
@@ -237,6 +248,16 @@ def render() -> str:
         cands = list(cands_by.values())
         rows, clock = [], now
         v = verdict(since)
+        w_line = next((ln for ln in reversed(since) if "GA winner" in ln), None)
+        p_line = next((ln for ln in reversed(since) if "| our winner" in ln), None)
+        orig = originals.get(L["model"])
+        if orig or (w_line and p_line):
+            ours = float(re.search(r"test accuracy ([\d.]+)", w_line).group(1)) if w_line else None
+            pre = float(re.search(r": acc ([\d.]+)", p_line).group(1)) if p_line else None
+            o = orig["mean_accuracy_pct"] if orig else None
+            f2 = lambda x: f"{x:.2f}" if x is not None else "pending"  # noqa: E731
+            loss = lambda x: f"{o - x:.2f} pts" if (o is not None and x is not None) else "pending"  # noqa: E731
+            held.append(f"| {L['model']} @ {B} GiB | {f2(o)} | {f2(pre)} | **{f2(ours)}** | {loss(pre)} | **{loss(ours)}** |")
         sub_ours = next((ln for ln in reversed(since) if "new best fitness" in ln), None)
         sub_pre = last("on the GA subset")
         if v:
@@ -346,7 +367,11 @@ def render() -> str:
             "quantization with llama.cpp's best preset that fits the same RAM budget (same original model and "
             "importance matrix). WIN / LOSE = the 95% interval of the accuracy difference is entirely above / below 0; "
             "otherwise TIE.", ""]
-    return "\n".join(head + summary + [""] + pi_section() + body) + "\n"
+    if originals:
+        held += ["", "Originals: " + "; ".join(
+            f"{m} {o['mean_accuracy_pct']:.2f} (" + ", ".join(f"{t[:4]} {v:.1f}" for t, v in o["per_task_pct"].items())
+            + f", PPL {o['ppl']:.2f})" for m, o in sorted(originals.items()))]
+    return "\n".join(head + summary + [""] + held + [""] + pi_section() + body) + "\n"
 
 
 def main() -> None:

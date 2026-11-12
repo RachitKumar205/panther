@@ -1551,6 +1551,22 @@ def cmd_ga(budget: int, model: str) -> int:
     return 0
 
 
+def cmd_original(model: str) -> int:
+    """The unquantized (16-bit) original on the same held-out test as every winner and preset: the ceiling that
+    quantization falls short of. Writes rewrite/original-<model>.json."""
+    bf16 = DATA / "store" / model / f"{model}-BF16.gguf"
+    label = "rw:original:bf16"
+    if not tests_done(model, label, with_kl=False):
+        with gpu_booking(bf16.stat().st_size + 12 * 2**30, hold_s=4 * 3600):
+            run_all_tests(model, bf16, label, with_kl=False)
+    ev = evaluation(model, label, file_ram_gib(model, bf16), "original")
+    res = {"model": model, "mean_accuracy_pct": 100 * ev.mean_accuracy(), "ppl": ev.perplexity(),
+           "per_task_pct": {t: 100 * float(v.mean()) for t, v in ev.task_correct.items()}}
+    out(f"original-{model}.json").write_text(json.dumps(res, indent=1))
+    print(f"{model} original: accuracy {res['mean_accuracy_pct']:.2f}, PPL {res['ppl']:.3f}", flush=True)
+    return 0
+
+
 def cmd_gacheck(budget: int, model: str) -> int:
     """Early check while the GA runs: its current best and the budget's preset, both on the selection benchmarks
     (multiple choice, never the test split), compared by the paired bootstrap."""
@@ -1655,6 +1671,8 @@ def cmd_gascore(budget: int, model: str) -> int:
 def main() -> int:
     cmd, args = sys.argv[1], sys.argv[2:]
     global BUDGET
+    if cmd == "original":
+        return cmd_original(args[-1])
     if cmd == "refs":
         with locked(f"{args[-1]}-refs"):
             return cmd_refs(args[-1])
