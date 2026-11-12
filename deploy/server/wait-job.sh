@@ -3,6 +3,9 @@
 #
 #   deploy/server/wait-job.sh NAME [max-minutes]
 #
+# Every call uses the control master only (ProxyCommand=false: if it refuses a session, fail locally instead of
+# falling back to a login that would fail), and podman calls time out after 60 s so a locked podman database
+# cannot hold sessions open (10 hung ones once exhausted the master's session limit).
 # Stops at the FIRST SSH failure (exit 255: connection expired, refused, or unreachable) instead of
 # retrying: the server's sshd penalises repeated failed logins from one address (OpenSSH PerSourcePenalties,
 # banner "Not allowed at this time"), and a retry loop locks the user out (D30). Polls every 2 min (podman's state database locks up under frequent polling).
@@ -16,7 +19,7 @@ NAME="$1"
 MAX_MIN="${2:-120}"
 HOST="${PANTHER_HOST:?set PANTHER_HOST in deploy/server/local.env}"
 CP="${PANTHER_SSH_CONTROL:?set PANTHER_SSH_CONTROL in deploy/server/local.env}"
-SSH=(ssh -o "ControlPath=$CP" -o BatchMode=yes -o ConnectTimeout=10 "$HOST")
+SSH=(ssh -o "ControlPath=$CP" -o ProxyCommand=false -o BatchMode=yes -o ConnectTimeout=10 "$HOST")
 PODMAN='podman --root /s3/panther/work/containers/storage --runroot /run/user/$(id -u)/panther --events-backend file'
 
 # Never even try without a live control master: a failed attempt counts against us.
@@ -24,7 +27,7 @@ ssh -o "ControlPath=$CP" -O check "$HOST" 2>/dev/null || { echo "no SSH control 
 
 deadline=$(( $(date +%s) + MAX_MIN * 60 ))
 while :; do
-  s="$("${SSH[@]}" "$PODMAN inspect -f '{{.State.Status}} {{.State.ExitCode}}' panther-$NAME")"
+  s="$("${SSH[@]}" "timeout 60 $PODMAN inspect -f '{{.State.Status}} {{.State.ExitCode}}' panther-$NAME")"
   rc=$?
   if [ "$rc" = 255 ]; then echo "SSH failed; stopping without retrying (reopen the control master)" >&2; exit 3; fi
   case "$s" in exited*) break ;; esac

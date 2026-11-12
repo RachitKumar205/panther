@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 . "$ROOT/deploy/server/local.env"
 PI="${PANTHER_PI:-jia@100.89.94.89}"
-ssh_s() { ssh -o ControlPath="$PANTHER_SSH_CONTROL" -o BatchMode=yes "$PANTHER_HOST" "$@"; }
+ssh_s() { ssh -o ControlPath="$PANTHER_SSH_CONTROL" -o ProxyCommand=false -o BatchMode=yes "$PANTHER_HOST" "$@"; }
 sizes() { grep -E "^  $1: " "$ROOT/configs/search.yaml" | sed -E 's/.*searched: \[([^]]*)\], reference: \[([^]]*)\].*/\2,\1/' | tr ',' '\n' | grep . |
           sed -E 's/^ *[^-]+-([0-9.]+B).*/\1/' | tr 'A-Z' 'a-z'; }
 cmd="${1:?usage: ./panther run|status|watch BUDGET}"; B="${2:?budget in GiB}"

@@ -12,7 +12,7 @@ HOST="${PANTHER_HOST:?set PANTHER_HOST in deploy/server/local.env}"
 CP="${PANTHER_SSH_CONTROL:?set PANTHER_SSH_CONTROL in deploy/server/local.env}"
 DEST="${PANTHER_WORK:-/s3/panther/work}/repo/"
 
-rsync -a --delete -e "ssh -o ControlPath=$CP -o BatchMode=yes" \
+rsync -a --delete -e "ssh -o ControlPath=$CP -o ProxyCommand=false -o BatchMode=yes" \
   --exclude .git/ --exclude .venv/ --exclude /data/ --exclude /third_party/ --exclude /results/ \
   --exclude __pycache__/ --exclude .pytest_cache/ --exclude '*.gguf' \
   "$ROOT/" "$HOST:$DEST"
