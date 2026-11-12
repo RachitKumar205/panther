@@ -1462,6 +1462,10 @@ def cmd_ga(budget: int, model: str) -> int:
     """The genetic search: steady state, fitness = KL on benchmark questions. Writes the GA_TOP best as the
     model's list (names <size>:ga1..) and the whole history to budget-B/ga-<model>.json."""
     sm = short_name(model)
+    import time
+    for f in out(model, "tmp", "x").parent.glob("*.gguf*"):  # files a killed earlier run never removed
+        if time.time() - f.stat().st_mtime > 3600:
+            f.unlink(missing_ok=True)
     G = Genes(model, budget)
     fast = reflink_ok(model)
     pop: list[tuple[float, str, dict]] = []  # (-fitness, digest, genome), the best GA_POP kept
