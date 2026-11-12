@@ -45,6 +45,7 @@ OVERHEAD = CFG["overhead_gib"]
 KV_BPE = {"Q8_0": 34 / 32, "F16": 2.0}[CFG["kv_cache_type"]]
 MENU_ALL = CFG["formats"]
 CONCURRENT = int(os.environ.get("PANTHER_KL_CONCURRENT", "10"))
+LANE_SCRATCH_GB = 25  # part-cost files one lane may hold on disk at once
 
 
 GPU_BOOKABLE = 88 * 2**30  # of the GPU's 96 GiB; the rest is margin
@@ -643,7 +644,9 @@ def _cmd_sens(model: str) -> int:
             run.remove(("base", base))
         fast = bool(run) and reflink_ok(model)  # checked once, here, before the parallel runs
         note(f"{short_name(model)} part costs round {rnd}: {len(run)} KL runs to do ({len(done)} measured so far)")
-        with ProcessPoolExecutor(CONCURRENT) as ex:
+        # Each worker holds a whole-model file on disk; four lanes of ten once held 170 GB and filled the disk.
+        workers = max(1, min(CONCURRENT, int(LANE_SCRATCH_GB * 1e9 // (base_file(model).stat().st_size * 1.2))))
+        with ProcessPoolExecutor(workers) as ex:
             futs = {ex.submit(_sens_one, (model, b, f, fast)): (b, f) for b, f in run}
             failed = []
             for i, fut in enumerate(as_completed(futs), 1):  # count runs as they finish
