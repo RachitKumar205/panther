@@ -183,7 +183,12 @@ def pi_section() -> list[str]:
                       r"(?:, throttled: (.*))?", PI_RESULTS[k])
         if m:
             b, size = k.split("-", 1)
-            thr = "no" if not m.group(5) or "0x0" in m.group(5) else m.group(5)
+            flags = 0
+            for h in re.findall(r"0x([0-9a-f]+)", m.group(5) or ""):
+                flags |= int(h, 16)
+            # Raspberry Pi throttle bits: 0/16 under-voltage, 1/17 clock capped, 2/18 throttled, 3/19 soft heat limit
+            why = [w for bit, w in ((0x10001, "power (under-voltage)"), (0x80008, "heat (soft limit)")) if flags & bit]
+            thr = ("yes: " + ", ".join(why)) if why else ("yes" if flags else "no")
             rows.append(f"| {size.upper()} @ {b} GiB | **{m.group(3)} GiB** (predicted {m.group(4)}) | **{m.group(1)}** | "
                         f"{m.group(2)} | {thr} |")
     if not rows:
