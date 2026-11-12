@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pause Panther's containers if the co-located service degrades; resume when it recovers (D43).
+# Pause Panther's containers if the co-located service degrades; resume when it recovers.
 #
 #   setsid nohup deploy/server/guard.sh >/dev/null 2>&1 &
 #

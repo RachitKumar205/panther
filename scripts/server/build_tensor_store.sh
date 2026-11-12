@@ -45,7 +45,7 @@ if [ ! -f "$BF16" ]; then
   # (uv pip install --target, inside the container), used by the converter only.
   PYTHONPATH="$DATA/pydeps-convert${PYTHONPATH:+:$PYTHONPATH}" timed convert "$PANTHER_CONVERT_PY" "$LLAMA/convert_hf_to_gguf.py" "$HF_DIR" --outtype bf16 --outfile "$BF16.part"
   mv "$BF16.part" "$BF16"
-  rm -rf "$HF_DIR"   # the 16-bit GGUF is the original from here on (docs/STANDARD.md)
+  rm -rf "$HF_DIR"   # the 16-bit GGUF is the original from here on
 fi
 
 IMAT="$OUT/$MODEL.imatrix.gguf"
@@ -70,7 +70,7 @@ inv = build_inventory(load_geometry(sys.argv[1]))
 embd = next(g.gene_id for g in inv.genes if g.kind in ("embd", "embd_head"))
 head = next((g.gene_id for g in inv.genes if g.kind == "head"), embd)  # tied models: the same gene
 import os
-wanted = os.environ.get("PANTHER_FORMATS", "").split() or candidate_formats()  # PoC: per-model menus (D42)
+wanted = os.environ.get("PANTHER_FORMATS", "").split() or candidate_formats()  # per-model type lists
 for f in wanted:
     sa = source_assignment(inv, f)
     print(f, sa[embd], sa[head])

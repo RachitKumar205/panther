@@ -1,4 +1,4 @@
-"""The Panther pipeline (docs/STANDARD.md). Every command works for one budget and one model; run-budget.sh chains
+"""The Panther pipeline (scripts/server/README.md). Every command works for one budget and one model; run-budget.sh chains
 them. Runs in the GPU container; every step checks the disk and skips work already done.
 
   pipeline.py store  BUDGET MODEL  # the quantized copies the model needs for this budget (missing ones only)

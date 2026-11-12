@@ -1,4 +1,4 @@
-# Settings for the pipeline (docs/STANDARD.md). Byte sizes always come from gguf-py; nothing here restates them.
+# Settings for the pipeline (scripts/server/README.md). Byte sizes always come from gguf-py; nothing here restates them.
 
 # RAM model: total RAM on the Pi = weights + KV cache + runtime overhead, at `context_tokens`.
 context_tokens: 4096

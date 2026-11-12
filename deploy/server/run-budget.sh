@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The whole standard (docs/STANDARD.md) for one RAM budget, unattended, in one command. Run on the server:
+# The whole pipeline (scripts/server/README.md) for one RAM budget, unattended, in one command. Run on the server:
 #
 #   deploy/server/run-budget.sh 7                                         # every searched model of the budget
 #   deploy/server/run-budget.sh 7 Qwen2.5-14B-Instruct Mistral-24B-Instruct  # only these (must be searched at 7)

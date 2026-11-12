@@ -1,22 +1,33 @@
 # Panther on the server
 
-How Panther runs on the shared server `the server` (RHEL 10, SELinux enforcing, RTX PRO 6000 Blackwell 96 GB,
-EPYC 9224 24C/48T, 124 GB RAM), which also hosts production GitLab. Decisions referenced as D-numbers
-are in [docs/DECISIONS.md](../../docs/DECISIONS.md).
+How Panther runs on the shared server (RHEL 10, SELinux enforcing, RTX PRO 6000 Blackwell 96 GB, EPYC 9224 24C/48T,
+124 GB RAM), which also hosts production GitLab.
+
+## Running a budget
+
+```bash
+deploy/server/run-budget.sh 7                                            # every searched model of the 7 GiB budget
+deploy/server/run-budget.sh 7 Qwen2.5-14B-Instruct Mistral-24B-Instruct    # only these
+```
+
+One lane per model (`chain.sh`: one step after another, each a container job; a step whose job already exited 0 is
+skipped and a running one adopted, so a lane can be restarted at any time). The steps are in
+[scripts/server](../../scripts/server/README.md). Progress: `data/logs/progress-b<B>.log` and the status page.
 
 ## Site settings
 
 Host, account and health-check URL are not in the repository. Copy `local.env.example` to `local.env`
-(git-ignored) next to it and fill it in; `push.sh` and `wait-job.sh` read it on your machine, and
+(git-ignored) next to it and fill it in; `push.sh` reads it on your machine, and
 `push.sh` copies it to the server, where `panther.sh`, `host-setup.sh` and `uninstall.sh` read it.
 Below, `svcuser` stands for that account and "the server" for that host.
 
 ## Principles
 
-- **Nothing installed on the host.** All tools run in one rootless Podman image (D9).
-- **Three host changes in total**, made once by an admin as root, each logged with its undo (D10).
+- **Nothing installed on the host.** All tools run in one rootless Podman image.
+- **Three host changes in total**, made once by an admin as root, each logged with its undo.
 - **Removable.** `uninstall.sh` restores the host exactly, from the ledger.
-- **GitLab first.** Jobs are capped, deprioritised, and refuse to start if GitLab isn't healthy (D15).
+- **GitLab first.** Jobs are capped, deprioritised, refuse to start if GitLab isn't healthy, and `guard.sh` pauses
+  them if it degrades.
 
 ## Layout on the host
 
@@ -50,16 +61,16 @@ loginctl disable-linger svcuser
 
 ## The image (Containerfile)
 
-- Base `nvidia/cuda:12.9.1-devel-ubi9`, uv `0.9.5`, both pinned by digest (D12).
+- Base `nvidia/cuda:12.9.1-devel-ubi9`, uv `0.9.5`, both pinned by digest.
 - llama.cpp at the commit in `configs/models.yaml`, shallow-fetched and checked: `build-cpu`
   (`GGML_NATIVE`, for final numbers) and `build-cuda` (`sm_120`, for imatrix and screening).
-- `/opt/venv`: Panther's dependencies from `uv.lock` (torch 2.13.0+cu129, D13).
+- `/opt/venv`: Panther's dependencies from `uv.lock` (torch 2.13.0+cu129).
   `/opt/venv-convert`: llama.cpp's converter requirements at the same commit.
 - Source code is **not** in the image; it is mounted from `work/repo`, so code changes need no rebuild.
 - Tag = hash of Containerfile + pyproject.toml + uv.lock + llama.cpp commit; `current` points at the
   latest build. Current: `localhost/panther:5b6c7bcf98f4` (~17 GB).
 
-## Two kinds of container (D14)
+## Two kinds of container
 
 | | CPU (`run`, `job`) | GPU (`gpurun`, `gpujob`) |
 |---|---|---|
@@ -86,9 +97,9 @@ deploy/server/panther.sh status       # jobs, GPU, memory, GitLab
 deploy/server/panther.sh logs NAME | stop NAME | clean
 ```
 
-From the Mac: `deploy/server/push.sh` syncs code (not data) to `work/repo`, and
-`deploy/server/wait-job.sh NAME` waits for a job. Never poll the server in an unguarded loop: its sshd
-blocks an address after repeated failed logins (D30), which also locks out the hardware key login.
+From the Mac: `deploy/server/push.sh` syncs code (not data) to `work/repo` over the open SSH control master. Never
+poll the server in an unguarded loop or let SSH fall back to a password login: its sshd blocks an address after
+repeated failed logins, which also locks out the hardware key login.
 
 Resource caps: `PANTHER_CPUS`, `PANTHER_MEM`. Don't run large jobs while the LLM stack (`llm-llama`,
 88 GB) is running; together they exceed RAM.

@@ -169,7 +169,7 @@ def build_inventory(geo: ModelGeometry) -> Inventory:
 
 
 def build_matrix_inventory(geo: ModelGeometry) -> Inventory:
-    """Every weight matrix its own gene (D46): attn_q.L, attn_k.L, attn_v.L, attn_output.L, ffn_gate.L,
+    """Every weight matrix its own gene: attn_q.L, attn_k.L, attn_v.L, attn_output.L, ffn_gate.L,
     ffn_up.L, ffn_down.L, plus embd/head (or embd_head). Kinds and layers are those of the matrix's block, so
     format rules (gene_formats) and the RAM model apply unchanged."""
     blocks = build_inventory(geo)
@@ -185,7 +185,7 @@ def build_matrix_inventory(geo: ModelGeometry) -> Inventory:
 
 
 def block_of(gene: Gene) -> str:
-    """Sensitivity block of a (matrix) gene: attn.L, mlp.L, embd, head or embd_head (D45)."""
+    """Sensitivity block of a (matrix) gene: attn.L, mlp.L, embd, head or embd_head."""
     return f"{gene.kind}.{gene.layer}" if gene.kind in ("attn", "mlp") else gene.kind
 
 
@@ -224,7 +224,7 @@ NO_IMATRIX_GENE_KINDS = frozenset({"embd", "embd_head", "head"})
 
 def head_has_imatrix(model: str) -> bool:
     """True if the model's importance matrix was collected with --process-output (configs/models.yaml), so the
-    untied output head may use imatrix-only formats (D46)."""
+    untied output head may use imatrix-only formats."""
     m = next((m for m in load_registry()["models"] if m["name"] == model), {})
     return bool(m.get("imatrix_process_output"))
 

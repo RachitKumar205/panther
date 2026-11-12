@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a chain of Panther jobs one after another on the server, unattended (D42). Each line of STEPS is
+# Run a chain of Panther jobs one after another on the server, unattended. Each line of STEPS is
 #   cpu|gpu  NAME  CMD...
 # Each step starts as `panther.sh job|gpujob NAME CMD...`, the chain waits for it, and stops at the first
 # step that exits non-zero. Steps whose container already exited 0 are skipped, so a chain can be rerun.
