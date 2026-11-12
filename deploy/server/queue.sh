@@ -19,7 +19,8 @@ clean() {  # type copies of models with no running lane and nothing queued
   for f in "$D"/store/*/*-*.gguf; do
     m="$(basename "$(dirname "$f")")"; t="$(basename "$f" .gguf)"; t="${t#"$m"-}"
     [ "$t" = BF16 ] && continue
-    [[ "$(basename "$f")" == preset-* ]] && continue
+    [[ "$(basename "$f")" == preset-* || "$(basename "$f")" == *.imatrix.gguf ]] && continue  # kept: presets, imatrix
+    [ "$(basename "$f")" = "$m-$t.gguf" ] || continue  # only <model>-<TYPE>.gguf is a type copy
     for l in $(lanes); do [ "$(lane_model "$l")" = "$m" ] && continue 2; done
     grep -qw -- "$m" <<< "$*" && continue
     for c in "$D"/logs/chain-g*.log; do  # a lane that stopped on a failure may be restarted: keep its copies
