@@ -4,8 +4,10 @@
 #   deploy/server/run-budget.sh 7
 #
 # One lane per model, all in parallel. A searched model goes straight through:
-#   format files -> offline error -> references -> llama.cpp presets (the search starts from the best one) ->
-#   part costs -> solver list -> tests -> winner -> winner vs preset -> Pi bundle -> upload
+#   download -> type copies -> offline error -> the original's reference outputs -> llama.cpp presets (the best one
+#   is the competitor and joins the GA's start) -> genetic search (fitness: accuracy on selection questions, KL as a
+#   tie-break) -> top genomes on all selection questions + guard against the real preset -> full test of the winner
+#   -> winner vs preset -> Pi bundle -> upload
 # (to a private Hugging Face repo, PANTHER_HF_REPO in local.env; the Pi downloads it from there)
 # without waiting for the other models. A reference model only needs its uniform Q6_K file, then its tests.
 # When every lane is done: pick the winners, bundle them for the Pi.
@@ -28,22 +30,13 @@ start() { running "$2" && { echo "lane $2 already running"; return; }
           PANTHER_CPUS="${PANTHER_CPUS:-16}" setsid nohup "${@:3}" >/dev/null 2>&1 < /dev/null & echo "started $2"; }
 lanes=""
 for m in $(list searched); do
-  s="$(short "$m")"; c="a$B-$s"; lanes="$lanes $c"
+  s="$(short "$m")"; c="g$B-$s"; lanes="$lanes $c"
   running "$c" && { echo "lane $c already running"; continue; }  # never rewrite a running lane's steps
-  # rw-: steps that don't depend on the search method (shared with the first method's runs); ra-: preset-start search
-  printf "%s\n" "cpu rw-fetch-$s bash scripts/server/fetch_model.sh $m" "gpu rw-store$B-$s $R store $B $m" "gpu rw-err$B-$s $R error $B $m" "gpu rw-refs-$s $R refs $m" \
-    "gpu ra-preset$B-$s $R preset $B $m" "gpu ra-sens$B-$s $R sens $B $m" "gpu ra-list$B-$s $R list $B $m" "gpu ra-test$B-$s $R test $B $m" \
-    "gpu ra-pick$B-$s $R pick $B $m" "gpu ra-vspreset$B-$s $R preset $B $m" "gpu ra-bundle$B-$s $R bundle $B $m" "cpu ra-upload$B-$s $R upload $B $m" \
-    > "$P/$c.steps"
+  # steps are named by method (rg-: genetic search), so a finished step of another method is never taken as done
+  printf "%s\n" "cpu rg-fetch-$s bash scripts/server/fetch_model.sh $m" "gpu rg-store$B-$s $R store $B $m" \
+    "gpu rg-err$B-$s $R error $B $m" "gpu rg-refs-$s $R refs $m" "gpu rg-preset$B-$s $R preset $B $m" \
+    "gpu rg-ga$B-$s $R ga $B $m" "gpu rg-gascore$B-$s $R gascore $B $m" "gpu rg-vspreset$B-$s $R preset $B $m" \
+    "gpu rg-bundle$B-$s $R bundle $B $m" "cpu rg-upload$B-$s $R upload $B $m" > "$P/$c.steps"
   start x "$c" "$HERE/chain.sh" "$c" "$P/$c.steps"
 done
-for m in $(list reference); do
-  s="$(short "$m")"; c="b$B-ref-$s"; lanes="$lanes $c"
-  running "$c" && { echo "lane $c already running"; continue; }
-  # tested on the server for quality only: existing quantizations never go to the Pi
-  printf "%s\n" "gpu rw-store$B-$s $R store $B $m" "gpu rw-test$B-ref-$s $R test $B $m" > "$P/$c.steps"
-  start x "$c" "$HERE/chain.sh" "$c" "$P/$c.steps"
-done
-running "a$B" || printf "%s\n" "gpu ra-pick$B $R pick $B" > "$P/a$B.steps"  # comparison across models
-start x "a$B" "$HERE/after-chains.sh" "${lanes# }" "a$B" "$P/a$B.steps"
-echo "budget $B: lanes${lanes}; then the pick across models (chain a$B). Logs: $W/data/logs/chain-*.log"
+echo "budget $B: lanes${lanes}. Logs: $W/data/logs/chain-*.log, progress in $W/data/logs/progress-b$B.log"
