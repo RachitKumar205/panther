@@ -136,3 +136,14 @@ def test_accuracy_tie_goes_to_lower_kl():
     assert (win, sorted(tied)) == ("b", ["a", "b"])
     top = max("ac", key=lambda n: rows[n]["mean_accuracy_pct"])
     assert p.choose_winner({n: rows[n] for n in "ac"}, evs)[0] == top
+
+
+@pytest.mark.parametrize("b,model,start", [(7, M14, "IQ2_S"), (1, M15, "IQ2_XXS")])
+def test_padded_preset_layout_is_inside_the_window_and_only_raises(budget, b, model, start):
+    budget(b)
+    a = p.fill(model, start)
+    a[next(iter(a))] = "Q4_K"  # a mixed start, like a preset layout
+    padded = p.padded_from(model, a, b)
+    assert padded is not None and p.in_window(model, padded, b)
+    bpw = p.bits_per_weight
+    assert all(bpw(padded[g]) >= bpw(a[g]) for g in a)

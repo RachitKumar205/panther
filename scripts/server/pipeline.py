@@ -46,6 +46,11 @@ KV_BPE = {"Q8_0": 34 / 32, "F16": 2.0}[CFG["kv_cache_type"]]
 MENU_ALL = CFG["formats"]
 CONCURRENT = int(os.environ.get("PANTHER_KL_CONCURRENT", "10"))
 LANE_SCRATCH_GB = 25  # part-cost files one lane may hold on disk at once
+# PANTHER_ANCHOR=preset: the search starts from the budget's best llama.cpp preset (its layout, mapped to the menu)
+# instead of one uniform type, probes each part one type up and one down from there, and lists the padded preset
+# layout as a candidate. Its files carry the suffix below, so the uniform-start results stay as they are.
+ANCHOR = os.environ.get("PANTHER_ANCHOR") == "preset"
+SUFFIX = "-anchored" if ANCHOR else ""
 
 
 GPU_BOOKABLE = 88 * 2**30  # of the GPU's 96 GiB; the rest is margin
@@ -284,6 +289,42 @@ def probe_format(model: str) -> str:
     return up[-1] if up else m[m.index(base_format(model)) - 1]
 
 
+@lru_cache(maxsize=None)
+def anchor(model: str) -> tuple[str, dict[str, str]]:
+    """The budget's best fitting llama.cpp preset (from the uniform-start preset step) as a genotype: each matrix
+    takes the preset's type for it, or the allowed menu type nearest in bits per weight (the higher on a tie)."""
+    import gguf
+    ftype = json.loads(out(f"budget-{BUDGET}", f"preset-{model}.json").read_text())["preset"]
+    path = DATA / "store" / model / f"preset-{ftype}.gguf"
+    types = {t.name: t.tensor_type.name for t in gguf.GGUFReader(path).tensors}
+    a = {}
+    for g in inv_of(model).genes:
+        want, fs = types[g.tensors[0].name], allowed(model)[g.gene_id]
+        a[g.gene_id] = want if want in fs else min(
+            fs, key=lambda f: (abs(bits_per_weight(f) - bits_per_weight(want)), -bits_per_weight(f)))
+    return ftype, a
+
+
+def start_assignment(model: str) -> dict[str, str]:
+    """Where the part costs are measured from: the preset layout (anchored) or one uniform type."""
+    return dict(anchor(model)[1]) if ANCHOR else fill(model, base_format(model))
+
+
+def start_tag(model: str) -> str:
+    return f"anchor{BUDGET}-{anchor(model)[0]}" if ANCHOR else base_format(model)
+
+
+def anchor_probes(model: str) -> tuple[str, str]:
+    """One menu type above and one below the type holding most of the preset layout's weights."""
+    a = anchor(model)[1]
+    w: dict[str, int] = {}
+    for g in inv_of(model).genes:
+        w[a[g.gene_id]] = w.get(a[g.gene_id], 0) + g.n_weights
+    m = sorted(menu(model), key=bits_per_weight)
+    i = m.index(max(w, key=w.get))
+    return m[min(i + 1, len(m) - 1)], m[max(i - 1, 0)]
+
+
 def store(model: str) -> TensorStore:
     return TensorStore({f: DATA / "store" / model / f"{model}-{f}.gguf" for f in menu(model)})
 
@@ -306,8 +347,8 @@ _SRC_READERS: dict[Path, dict] = {}
 
 def base_file(model: str) -> Path:
     """The sensitivity base, assembled once per model and kept for the whole sweep."""
-    a = fill(model, base_format(model))
-    path = out(model, f"base-{base_format(model)}.gguf")
+    a = start_assignment(model)
+    path = out(model, f"base-{start_tag(model)}.gguf")
     if not path.exists():
         part = path.with_suffix(".part")
         assemble(inv_of(model), a, store(model), part, base_format=base_format(model))
@@ -323,7 +364,7 @@ def fast_probe(model: str, a: dict[str, str]) -> Path:
     import gguf
     need_disk()  # every worker writes a whole-model file; several at once once filled the disk
     base = base_file(model)
-    base_a = fill(model, base_format(model))
+    base_a = start_assignment(model)
     inv = inv_of(model)
     new_type = {t.name: a[g.gene_id] for g in inv.genes for t in g.tensors if a[g.gene_id] != base_a[g.gene_id]}
     dst = out(model, "tmp", f"{assignment_digest(a)[:16]}.gguf")
@@ -409,18 +450,18 @@ def fast_probe(model: str, a: dict[str, str]) -> Path:
 def reflink_ok(model: str) -> bool:
     """Probe files built by copy_file_range are used only if llama.cpp loads one and its KL equals that of the
     same genotype assembled normally (2 KL runs, once per model and starting type; the answer is stored)."""
-    flag = out(model, f"probe-check-{base_format(model)}.json")
+    flag = out(model, f"probe-check-{start_tag(model)}.json")
     if flag.exists():
         return json.loads(flag.read_text())["identical"]
     b0 = sorted(blocks(model))[len(blocks(model)) // 2]
-    a = block_assignment(model, b0, probe_format(model))
+    a = block_assignment(model, b0, anchor_probes(model)[0] if ANCHOR else probe_format(model))
     same, kls = False, {}
     try:
         fast = fast_probe(model, a)
         slow = out(model, "tmp", "probe-check-normal.gguf")
         assemble(inv_of(model), a, store(model), slow, base_format=base_format(model))
         for name, path in (("copied", fast), ("normal", slow)):
-            label = f"rw:probecheck:{base_format(model)}:{name}:{b0}"
+            label = f"rw:probecheck:{start_tag(model)}:{name}:{b0}"
             with gpu_booking(path.stat().st_size + 6 * 2**30, hold_s=1800):
                 ok = evaluate.run("kl", model, path, label, THREADS, reference="sensitivity")
             if ok:
@@ -515,8 +556,8 @@ def _cmd_error(model: str) -> int:
 # --- sensitivity ------------------------------------------------------------------------------
 
 def block_assignment(model: str, block: str | None, fmt: str | None = None) -> dict[str, str]:
-    """The base, with every matrix of `block` moved to `fmt` where allowed."""
-    a = fill(model, base_format(model))
+    """The start, with every matrix of `block` moved to `fmt` where allowed."""
+    a = start_assignment(model)
     if block is not None:
         for g in blocks(model)[block]:
             if fmt in allowed(model)[g]:
@@ -525,7 +566,7 @@ def block_assignment(model: str, block: str | None, fmt: str | None = None) -> d
 
 
 def sens_label(model: str, block: str, fmt: str) -> str:
-    return f"rw:sens:{base_format(model)}:{block}:{fmt}"
+    return f"rw:sens:{start_tag(model)}:{block}:{fmt}"
 
 
 def _sens_one(job: tuple[str, str, str, bool]) -> None:
@@ -541,7 +582,7 @@ def _sens_one(job: tuple[str, str, str, bool]) -> None:
 
 def measured_table(model: str) -> tuple[float | None, dict[str, dict[str, float]]]:
     """Base KL and measured dKL per (block, format), from the KL records."""
-    base = base_format(model)
+    base = start_tag(model)
     pre = f"rw:sens:{base}:"
     kls = {}
     for r in records(model):
@@ -625,14 +666,16 @@ def next_measurements(model: str, pen: dict[str, dict[str, float]], measured: se
 
 
 def cmd_sens(model: str) -> int:
-    with locked(f"{model}-sens-{base_format(model)}"):
+    with locked(f"{model}-sens-{start_tag(model)}"):
         return _cmd_sens(model)
 
 
 def _cmd_sens(model: str) -> int:
-    base, probe = base_format(model), probe_format(model)
+    base = start_tag(model)
+    probes = anchor_probes(model) if ANCHOR else (probe_format(model),)
+    probe = "/".join(probes)
     stats = []
-    todo = {("base", base)} | {(b, probe) for b in blocks(model)}
+    todo = {("base", base)} | {(b, f) for b in blocks(model) for f in probes}
     for rnd in range(CFG["remeasure_rounds"] + 1):
         base_kl, table = measured_table(model)
         done = {(b, f) for b, row in table.items() for f in row} | ({("base", base)} if base_kl is not None else set())
@@ -724,6 +767,35 @@ def padded_uniform(model: str, budget: float) -> tuple[str, dict[str, str]] | No
     return None
 
 
+def padded_from(model: str, a: dict[str, str], budget: float) -> dict[str, str] | None:
+    """`a` with whole layers raised one menu type per matrix (alternating from both ends) until its RAM is inside
+    the window, as padded_uniform does from a uniform start."""
+    m = sorted(menu(model), key=bits_per_weight)
+    inv = inv_of(model)
+    a = dict(a)
+    if ram_gib(model, a) > budget * (1 + WINDOW[1]):
+        return None
+    order, lo_, hi_ = [], 0, inv.geometry.n_layers - 1
+    while lo_ <= hi_:
+        order += [lo_] + ([hi_] if hi_ != lo_ else [])
+        lo_, hi_ = lo_ + 1, hi_ - 1
+    changed = True
+    while changed and not in_window(model, a, budget):  # passes over the layers until inside, or nothing fits
+        changed = False
+        for L in order:
+            if in_window(model, a, budget):
+                break
+            trial = dict(a)
+            for g in inv.genes:
+                if g.layer == L and a[g.gene_id] in m:
+                    up = [f for f in m[m.index(a[g.gene_id]) + 1:] if f in allowed(model)[g.gene_id]]
+                    if up:
+                        trial[g.gene_id] = up[0]
+            if trial != a and ram_gib(model, trial) <= budget * (1 + WINDOW[1]):
+                a, changed = trial, True
+    return a if in_window(model, a, budget) else None
+
+
 def solution_list(budget: int, pen_fn=None, models: list[str] | None = None) -> dict[str, dict]:
     from panther.solver import Problem
     from panther.solver import solve_top_k
@@ -739,18 +811,22 @@ def solution_list(budget: int, pen_fn=None, models: list[str] | None = None) -> 
         for i, sol in enumerate(sols):
             if not in_window(model, sol.assignment, budget):
                 raise SystemExit(f"{short} sol{i + 1} outside the window ({ram_gib(model, sol.assignment):.3f} GiB)")
-            items[f"{short}:sol{i + 1}"] = {"model": model, "assignment": sol.assignment,
+            items[f"{short}:{'a-' if ANCHOR else ''}sol{i + 1}"] = {"model": model, "assignment": sol.assignment,
                                             "predicted_penalty": sol.penalty}
         pu = padded_uniform(model, budget)
         if pu:
             items[f"{short}:uniform-{pu[0]}-padded"] = {"model": model, "assignment": pu[1]}
+        if ANCHOR:
+            pa = padded_from(model, anchor(model)[1], budget)
+            if pa:
+                items[f"{short}:preset-{anchor(model)[0]}-layout-padded"] = {"model": model, "assignment": pa}
     for it in items.values():
         it["ram_gib"] = ram_gib(it["model"], it["assignment"])
     return items
 
 
 def list_path(budget: int, model: str) -> Path:
-    return out(f"budget-{budget}", f"list-{model}.json")
+    return out(f"budget-{budget}", f"list-{model}{SUFFIX}.json")
 
 
 def load_list(budget: int) -> dict[str, dict]:
@@ -965,7 +1041,7 @@ def cmd_pick_model(budget: int, model: str) -> int:
         print(f"{budget} GiB {n:28s} RAM {r['ram_gib']:.3f} | KL {r['kl']:.4f} | acc {r['mean_accuracy_pct']:.2f} | "
               f"PPL {r['ppl']:.3f} | " + " ".join(f"{t[:4]} {v:.1f}" for t, v in r["per_task_pct"].items())
               + ("   <- winner" if n == win else "   (tied on accuracy)" if n in tied else ""), flush=True)
-    out(f"budget-{budget}", f"winner-{model}.json").write_text(
+    out(f"budget-{budget}", f"winner-{model}{SUFFIX}.json").write_text(
         json.dumps({"winner": win, "tied_on_accuracy": tied, "rows": rows}, indent=1))
     return 0
 
@@ -1012,7 +1088,7 @@ def cmd_bundle_model(budget: int, model: str) -> int:
     short = model.split("-")[1].lower()
     if model in contests()[budget]["reference"]:
         return bundle_reference(budget, model, short)
-    name = json.loads(out(f"budget-{budget}", f"winner-{model}.json").read_text())["winner"]
+    name = json.loads(out(f"budget-{budget}", f"winner-{model}{SUFFIX}.json").read_text())["winner"]
     a = json.loads(list_path(budget, model).read_text())[name]["assignment"]
     bundle = DATA / "pi_bundle" / f"budget-{budget}-{short}"
     bundle.mkdir(parents=True, exist_ok=True)
@@ -1088,7 +1164,7 @@ def cmd_preset(budget: int, model: str) -> int:
     tried = {n: {"ram_gib": info[n][1], **rows[n], "ppl": evs[n].perplexity()} for n in rows}
     result = {"preset": ftype, "ram_gib": ram, "kl": kl_p, "mean_accuracy_pct": 100 * ev_p.mean_accuracy(),
               "ppl": ev_p.perplexity(), "tried": tried}
-    wfile = out(f"budget-{budget}", f"winner-{model}.json")
+    wfile = out(f"budget-{budget}", f"winner-{model}{SUFFIX}.json")
     if wfile.exists():
         w = json.loads(wfile.read_text())
         it = json.loads(list_path(budget, model).read_text())[w["winner"]]
@@ -1097,7 +1173,7 @@ def cmd_preset(budget: int, model: str) -> int:
         result["vs_winner"] = {"winner": w["winner"], "acc_diff_pts": 100 * c.acc_diff,
                                "acc_ci_pts": [100 * c.acc_ci[0], 100 * c.acc_ci[1]], "ppl_ratio": c.ppl_ratio,
                                "kl_winner": w["rows"][w["winner"]]["kl"]}
-    out(f"budget-{budget}", f"preset-{model}.json").write_text(json.dumps(result, indent=1))
+    out(f"budget-{budget}", f"preset-{model}{SUFFIX}.json").write_text(json.dumps(result, indent=1))
     v = result.get("vs_winner")
     note(f"{model.split('-')[1]} preset {ftype}: acc {result['mean_accuracy_pct']:.2f}, KL {kl_p:.4f}, PPL "
          f"{result['ppl']:.3f}" + (f" | our winner {v['acc_diff_pts']:+.2f} pts [{v['acc_ci_pts'][0]:+.2f}, "
