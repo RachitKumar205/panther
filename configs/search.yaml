@@ -9,7 +9,7 @@ overhead_gib: 0.40            # placeholder until the Pi measures it
 contests:
   1: {searched: [Qwen2.5-1.5B-Instruct], reference: []}
   3: {searched: [Qwen2.5-7B-Instruct], reference: [Qwen2.5-3B-Instruct]}
-  5: {searched: [Qwen2.5-14B-Instruct, Qwen2.5-7B-Instruct], reference: []}  # + InternLM2.5-20B-Chat after its 7 GiB part costs (disk)
+  5: {searched: [Qwen2.5-14B-Instruct, Qwen2.5-7B-Instruct, InternLM2.5-20B-Chat], reference: []}
   7: {searched: [Qwen2.5-14B-Instruct, Qwen2.5-32B-Instruct, InternLM2.5-20B-Chat, Mistral-24B-Instruct], reference: [Qwen2.5-7B-Instruct]}
 active_budgets: [7, 1]        # only for commands run without a budget argument
 
