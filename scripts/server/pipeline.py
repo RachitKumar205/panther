@@ -969,6 +969,11 @@ def evaluation(model: str, label: str, ram: float, name: str):
                       tokenizer=model.split("-")[0])  # Qwen2.5 sizes share one tokenizer; other families don't
 
 
+def is_searched(name: str) -> bool:
+    """Only the solver's genotypes (sol1.., a-sol1..) can win; padded baselines and preset layouts are controls."""
+    return ":sol" in name or ":a-sol" in name
+
+
 def choose_winner(rows: dict, evs: dict) -> tuple[str, list[str]]:
     """Highest mean accuracy, unless the paired bootstrap cannot tell others apart from it (stats.compare's rule: the
     top one is better only if the 95% interval of its lead lies above 0.5 points). Among those tied, the lowest KL
@@ -1000,7 +1005,7 @@ def cmd_pick(budget: int) -> int:
                   "per_task_pct": {t: 100 * float(v.mean()) for t, v in evs[n].task_correct.items()}})
     winners = {}
     for model in contests()[budget]["searched"]:
-        cands = [n for n in items if items[n]["model"] == model]
+        cands = [n for n in items if items[n]["model"] == model and is_searched(n)]
         winners[model] = choose_winner({n: rows[n] for n in cands}, evs)[0]
     pairs = {}
     for model, w in winners.items():
@@ -1037,11 +1042,12 @@ def cmd_pick_model(budget: int, model: str) -> int:
         k = find(records(model), label, reference="selection")["metrics"]
         rows[name] = {"ram_gib": it["ram_gib"], "kl": k["kl_mean"], "mean_accuracy_pct": 100 * ev.mean_accuracy(),
                       "ppl": ev.perplexity(), "per_task_pct": {t: 100 * float(v.mean()) for t, v in ev.task_correct.items()}}
-    win, tied = choose_winner(rows, evs)
+    win, tied = choose_winner({n: r for n, r in rows.items() if is_searched(n)}, evs)
     for n, r in sorted(rows.items(), key=lambda kv: -kv[1]["mean_accuracy_pct"]):
         print(f"{budget} GiB {n:28s} RAM {r['ram_gib']:.3f} | KL {r['kl']:.4f} | acc {r['mean_accuracy_pct']:.2f} | "
               f"PPL {r['ppl']:.3f} | " + " ".join(f"{t[:4]} {v:.1f}" for t, v in r["per_task_pct"].items())
-              + ("   <- winner" if n == win else "   (tied on accuracy)" if n in tied else ""), flush=True)
+              + ("   <- winner" if n == win else "   (tied on accuracy)" if n in tied else
+                 "" if is_searched(n) else "   (control)"), flush=True)
     out(f"budget-{budget}", f"winner-{model}{SUFFIX}.json").write_text(
         json.dumps({"winner": win, "tied_on_accuracy": tied, "rows": rows}, indent=1))
     return 0

@@ -157,3 +157,8 @@ def test_no_perplexity_tiebreak_across_tokenizers():
     b = Evaluation("b", c, np.full(4, 200.0), np.full(4, 50), 0, 0.0, tokenizer="Mistral")
     assert compare(a, b).decided_by != "perplexity"
     assert compare(a, Evaluation("c", c, np.full(4, 200.0), np.full(4, 50), 0, 0.0, tokenizer="Qwen2.5")).decided_by == "perplexity"
+
+
+def test_only_searched_genotypes_can_win():
+    assert p.is_searched("24B:sol1") and p.is_searched("20B:a-sol3")
+    assert not p.is_searched("24B:uniform-IQ2_XXS-padded") and not p.is_searched("20B:preset-IQ2_S-layout-padded")
