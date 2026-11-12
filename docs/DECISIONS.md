@@ -52,6 +52,17 @@ what is true now.
   No ~20B model fits 3 GiB (InternLM 20B needs ≥ 4.6 GiB at the lowest types); InternLM2.5 7B stands in.
   Reka Flash 3.1 dropped: its feed-forward width is not a multiple of 256.
 
+## Search start (2026-11-12)
+- Below ~2.5 bits per weight the uniform-start search loses to llama.cpp's presets (3 GiB 7B, 7 GiB InternLM 20B)
+  or to its own uniform baseline (1 GiB, 7 GiB Mistral 24B); causes in RESULTS.md.
+- `PANTHER_ANCHOR=preset`: part costs are measured from the budget's best fitting preset (its per-matrix types
+  read from the preset file, mapped to the nearest menu type), one type up and one down per block, then the usual
+  two rounds; the preset's layout, padded into the RAM window, is listed as a candidate. Files get `-anchored`; the
+  uniform-start results stay. Run first on the ~2-bit contests (InternLM 20B and Mistral 24B at 7 GiB, then
+  InternLM 20B at 5 GiB and Qwen 7B at 3 GiB).
+- Perplexity is compared only between models of one family (one tokenizer); across families the pick goes by
+  accuracy, then RAM.
+
 ## Results so far
 - Full results: [RESULTS.md](RESULTS.md).
 - Proof of concept (7 GiB, f16 KV): 14B mixed (75.2% mean accuracy) beat 7B (70.4%) and uniform 14B (73.5%), and

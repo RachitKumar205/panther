@@ -1,9 +1,26 @@
-# Results (updated 2026-11-12, 03:45 IST)
+# Results (updated 2026-11-12, 19:50 IST)
 
 How the numbers are made: [STANDARD.md](STANDARD.md). Quality is measured on the server's GPU; the Pi measures only
 RAM and speed. Accuracy is the mean of five test sets (MMLU 1,000, HellaSwag 2,000, ARC-Challenge 1,172,
 WinoGrande 1,267, GSM8K 300). KL is the mean KL divergence from the model's own 16-bit original (0 = identical).
 "Tied" means the paired bootstrap (10,000 resamples of the same questions) cannot separate two accuracies.
+"Preset" means llama.cpp's own mixed quantization (llama-quantize ftype), built from the same 16-bit file with the
+same importance matrix: the best existing quantization that fits the budget.
+
+## Summary: our search against llama.cpp's presets
+
+| Budget | Model | Bits/weight | What won our contest | Our pick vs the best fitting preset | Verdict |
+|---|---|---|---|---|---|
+| 5 GiB | Qwen2.5 7B | ~5.2 | searched genotype | +1.26 [+0.21, +2.31] vs Q4_K_M (KL 0.0105 vs 0.0139); +0.64 vs Q4_K_S, not bootstrapped | **win** vs the preset the rule picks; likely tie with Q4_K_S |
+| 7 GiB | Qwen2.5 14B | ~3.6 | searched genotype | +0.23 [−0.79, +1.24] vs IQ3_S (KL 0.076 vs 0.070) | tie |
+| 5 GiB | Qwen2.5 14B | ~2.6 | searched genotype | +1.35 [−0.22, +2.95] vs IQ2_XXS (KL 0.359 vs 0.398) | tie, lower KL |
+| 1 GiB | Qwen2.5 1.5B | ~3 | uniform baseline (search lost) | +5.01 [+3.64, +6.44] vs IQ2_S | win, but not by the search |
+| 7 GiB | Mistral Small 24B | ~2.3 | uniform baseline (search lost by 12 pts) | +1.01 [−0.46, +2.52] vs IQ2_XXS (KL 0.745 vs 0.665) | tie, not by the search |
+| 3 GiB | Qwen2.5 7B | ~2.8 | uniform baseline (search lost) | −2.24 [−3.82, −0.63] vs IQ2_S | **loss** |
+| 7 GiB | InternLM2.5 20B | ~2.6 | searched genotype | −5.21 [−6.65, −3.76] vs IQ2_S (KL 0.281 vs 0.159) | **loss** |
+
+**The search matches or beats llama.cpp's hand-made mixes from about 3 bits per weight up, and loses at about 2–2.5
+bits.** Why, and the fix now running: [Below ~2.5 bits](#below-25-bits-per-weight-why-the-search-loses).
 
 ## 7 GiB (RAM between 6.93 and 7.035 GiB): 14B wins
 
@@ -17,6 +34,14 @@ WinoGrande 1,267, GSM8K 300). KL is the mean KL divergence from the model's own 
 | 32B, our winner (sol2) | searched | ~1.6 | 42.51 | 0.962 | 16.86 | 50.0 | 63.5 | 36.9 | 59.5 | 2.7 |
 | 32B, IQ1_S everywhere, padded | uniform baseline | ~1.6 | 41.07 | 1.270 | 22.45 | 52.3 | 62.4 | 34.4 | 55.6 | 0.7 |
 | 32B, any llama.cpp preset | — | — | **none fits**: the smallest (IQ1_S) needs 7.70 GiB | | | | | | | |
+| Mistral 24B, our pick (IQ2_XXS everywhere, padded) | uniform baseline | ~2.3 | 69.42 | 0.745 | 14.64 | | | | | 67.7 |
+| Mistral 24B, llama.cpp **IQ2_XXS** preset (6.820 GiB) | llama.cpp's own mix | ~2.2 | 68.41 | **0.665** | 13.60 | | | | | |
+| Mistral 24B, best searched (sol1) | searched | ~2.3 | 57.38 | 0.987 | 19.15 | 60.8 | 71.3 | 52.1 | 66.7 | 36.0 |
+| Mistral 24B, llama.cpp IQ1_M preset (6.080 GiB) | llama.cpp's own mix | ~1.9 | 53.63 | 1.743 | 40.75 | | | | | |
+| InternLM2.5 20B, llama.cpp **IQ2_S** preset (6.826 GiB) | llama.cpp's own mix (mostly IQ2_XS, sensitive matrices IQ3_S / Q4_K) | ~2.6 | **69.08** | **0.159** | **9.06** | | | | | |
+| InternLM2.5 20B, llama.cpp IQ2_XS preset (6.478 GiB) | llama.cpp's own mix | ~2.4 | 67.89 | 0.188 | 9.32 | | | | | |
+| InternLM2.5 20B, our winner (sol6) | searched | ~2.6 | 63.87 | 0.281 | 10.18 | | | | | 57.3 |
+| InternLM2.5 20B, IQ2_S everywhere, padded | uniform baseline | ~2.6 | 29.67 | 3.584 | 345.8 | 24.8 | 31.3 | 27.0 | 65.2 | 0.0 |
 
 Comparisons (paired bootstrap, 95% interval of the accuracy difference):
 
@@ -28,6 +53,15 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
 | 14B ours vs 14B uniform IQ3_S | −0.44 [−1.48, +0.61] | tied on accuracy; ours has 47% lower KL and 7% lower perplexity |
 | 32B ours vs 32B uniform IQ1_S | **+1.44** [+0.21, +2.64] | ours better; 25% lower perplexity |
 | 14B ours vs 32B ours | +32.4 [+30.8, +33.9] | 14B far better |
+| 14B ours vs Mistral 24B pick | **+5.46** [+3.96, +6.94] | 14B better |
+| 14B ours vs InternLM 20B ours | **+11.01** [+9.42, +12.63] | 14B better |
+| Mistral 24B pick vs 7B Q6_K | −0.82 [−2.46, +0.82] | tied on accuracy (perplexity not comparable: different tokenizers) |
+| InternLM 20B ours vs 7B Q6_K | −6.37 [−8.03, −4.68] | 7B better |
+| Mistral 24B pick vs llama.cpp IQ2_XXS | +1.01 [−0.46, +2.52] | tied; the preset's KL is 11% lower |
+| InternLM 20B ours vs llama.cpp IQ2_S | **−5.21** [−6.65, −3.76] | **preset better**, with 44% lower KL and 0.2 GiB less RAM |
+
+The cross-model pick across all five (Qwen 14B, 32B, InternLM 20B, Mistral 24B, and the 7B reference) keeps
+**Qwen 14B** as the 7 GiB winner.
 
 **What this shows**
 
@@ -78,8 +112,64 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
 - A squeezed 7B still beats the 3B download by far: our pick +9.25 points [+7.50, +10.92], the preset more.
 - Pi: our 7B pick peaks at 2.72 GiB (predicted 2.98), writes 1.86 tok/s, reads 2.44 tok/s; 3B Q6_K writes 4.1–4.5 and
   reads 21–24 (IQ types have no fast ARM path).
-- Proposed, not done: add the best preset's own layout to the solver's candidates, so the list can never do worse
-  than it.
+- Now running (below): the search started from the preset's own layout.
+
+## 5 GiB (RAM between 4.95 and 5.025 GiB): 7B wins
+
+| 5 GiB | RAM GiB | Accuracy | KL | Perplexity | MMLU | HellaSwag | ARC-C | WinoGrande | GSM8K |
+|---|---|---|---|---|---|---|---|---|---|
+| **7B, our winner (sol6)** (searched) | 5.025 | 70.51 | **0.0105** | **8.19** | 74.6 | 79.8 | 53.5 | 70.6 | 74.0 |
+| 7B, other searched genotypes (sol1–5) | 5.025 | 70.16–70.68 | 0.0105–0.0106 | 8.19 | | | | | |
+| 7B, Q4_K everywhere, padded | 4.968 | 70.87 | 0.0324 | 8.36 | 74.2 | 80.0 | 54.1 | 71.3 | 74.7 |
+| 7B, llama.cpp Q4_K_S preset | 4.662 | 69.87 | 0.0164 | 8.25 | | | | | |
+| 7B, llama.cpp **Q4_K_M** preset (the rule's best existing) | 4.872 | 69.25 | 0.0139 | 8.23 | | | | | |
+| 14B, our winner (sol3) (searched) | 5.025 | 65.52 | 0.359 | 9.62 | 63.7 | 75.2 | 50.8 | 69.5 | 68.3 |
+| 14B, best searched by accuracy (sol6) | 5.025 | 66.56 | 0.359 | 9.62 | 65.1 | 74.9 | 52.8 | 69.0 | 71.0 |
+| 14B, IQ2_XS everywhere, padded | 4.951 | 65.78 | 0.523 | 11.34 | 69.3 | 75.0 | 52.1 | 69.1 | 63.3 |
+| 14B, llama.cpp **IQ2_XXS** preset (best existing) | 4.810 | 64.17 | 0.398 | 9.89 | | | | | |
+| 14B, llama.cpp IQ1_M preset | 4.399 | 53.22 | 0.701 | 14.25 | | | | | |
+
+- **7B beats 14B at 5 GiB** by 4.99 points [+3.35, +6.58]: 14B at ~2.6 bits per weight has lost more than the extra
+  size gives. The crossover from "bigger model" to "more bits" lies between 5 and 7 GiB for these two.
+- 7B: ours vs Q4_K_M **+1.26 [+0.21, +2.31]**, with 24% lower KL. The two presets are tied on accuracy, and the rule
+  (lowest KL among the tied) picks Q4_K_M; the other, Q4_K_S, scores 69.87, so ours leads it by 0.64, which is likely
+  a tie. Against the uniform Q4_K baseline: tied on accuracy, KL a third.
+- 14B: ours vs IQ2_XXS +1.35 [−0.22, +2.95], tied, with 10% lower KL and 3% lower perplexity.
+- InternLM2.5 20B at 5 GiB (~1.9 bits per weight) is being tested; its result and the 5 GiB pick across all three
+  follow.
+
+## Below ~2.5 bits per weight: why the search loses
+
+Four causes, each visible in the numbers above.
+
+1. **The part costs are assumed to add up, and at ~2 bits they don't.** Each block's KL cost is measured by changing
+   that block alone; the solver sums the costs. Where errors compound, the sum is wrong. Mistral 24B at 7 GiB: the
+   solver predicted its six genotypes would beat uniform IQ2_XXS; built and measured, their KL was ~1.0 against the
+   uniform's 0.745, and they scored 12 points lower.
+2. **The part costs are measured from a start that is already broken.** The start is one uniform type near the
+   budget's lowest average: for InternLM 20B at 5 GiB that is IQ1_M, whose KL is 7.96 (close to garbage). Raising one
+   block of a broken model barely moves its KL, so the costs measured there are mostly noise.
+3. **KL is what the search minimises, and at ~2 bits KL stops tracking accuracy.** 7B at 3 GiB: the best searched
+   genotype has lower KL than the uniform pick (0.288 vs 0.401) and lower accuracy (60.19 vs 62.45). Same at 1 GiB.
+4. **llama.cpp's presets encode which few matrices must never be squeezed** (attention value, early feed-forward
+   down, output). InternLM 20B shows how much that matters: IQ2_S everywhere collapses (perplexity 346, GSM8K 0),
+   while the IQ2_S preset at nearly the same size scores 69.08. The search must find those matrices from its noisy
+   costs, and at ~2 bits it doesn't find them all.
+
+### The fix being tested: start from the preset (`PANTHER_ANCHOR=preset`)
+
+The part costs are measured from the best fitting preset's own layout instead of one uniform type, one type up and
+one type down per block (then two rounds around the solver's choices, as before), and the preset's layout, padded
+into the RAM window, is listed as a candidate itself. The search then works where the preset already is, with
+costs measured from a working model, and its list always holds the preset's layout. Results are kept separately
+(`-anchored` files); the uniform-start results above stay as they are.
+
+| Contest | Preset it starts from | Start KL (the preset's own: 0.159) | Status |
+|---|---|---|---|
+| InternLM 20B @ 7 GiB | IQ2_S (mostly IQ2_XS; IQ3_S and Q4_K on sensitive matrices) | 0.160 | part costs, 197 KL runs in round 0, started 19:33 |
+| Mistral 24B @ 7 GiB | IQ2_XXS | | queued after it (disk) |
+| InternLM 20B @ 5 GiB | its best preset, once tested | | after its uniform-start run |
+| Qwen 7B @ 3 GiB | IQ2_S | | needs its type copies rebuilt (deleted for disk) |
 
 ## On the Pi 5 (8 GB): RAM and speed
 
@@ -110,29 +200,49 @@ Comparisons (paired bootstrap, 95% interval of the accuracy difference):
   heat-limits at 83–85 °C under full load: a heatsink on the fan would help.
 - `pi/lean.sh` stops the desktop and other extras (frees ~0.4 GiB); `pi/power-log.sh` logs heat, voltage and free
   RAM every 5 s to disk, so a power cut leaves a record.
+- **The 06:40 "crash" was the network, not the Pi.** Tailscale lost it at 06:40, but its power log ran on to 06:50
+  with no under-voltage (flags 0xe0008: heat only, 84 °C). Its Wi-Fi had dropped, and after the restart it could
+  not rejoin: the saved university login was rejected (MSCHAPv2 error 691). The Student profile now has the new
+  login (tested: it joined Student at 19:20); the phone hotspot `jia` has priority 20, Student 10, so the Pi uses the
+  hotspot when it is on and Student otherwise, at boot as well. The HDMI ports report no monitor at all (no
+  hot-plug signal), so there is no screen to fall back on.
 
-## Other budgets (running)
+Pi checks still to run, biggest first (`pi/await.sh` on the Pi downloads each from Hugging Face as it appears):
+Mistral 24B @ 7 (running since 19:28), InternLM 20B @ 7, InternLM 20B @ 5 (when uploaded), Qwen 14B @ 5, Qwen 7B @ 5.
+
+## Status
 
 | Budget | Searched | Reference | Status |
 |---|---|---|---|
-| 1 GiB | 1.5B | — | **done** (above); Pi check running |
-| 3 GiB | 7B (~2.8 bits/weight) | 3B Q6_K | **done** (above) |
-| 5 GiB | 14B (~2.4), 7B (~5.1), InternLM2.5 20B (~1.8) | — | queued after the 3 GiB 7B |
-
-Each also gets the best-existing-preset baseline.
-
-## ~20B models (running / queued)
+| 1 GiB | 1.5B | — | done; Pi done |
+| 3 GiB | 7B (~2.8 bits/weight) | 3B Q6_K | done; Pi done; anchored rerun pending |
+| 5 GiB | 14B (~2.6), 7B (~5.2), InternLM2.5 20B (~1.9) | — | 14B and 7B done (7B wins, uploaded); InternLM 20B testing; pick to rerun with it |
+| 7 GiB | 14B, 32B, InternLM2.5 20B, Mistral 24B | 7B Q6_K | done (14B wins); all uploaded; anchored reruns for 20B and 24B running |
 
 | Model | 3 GiB | 5 GiB | 7 GiB |
 |---|---|---|---|
-| InternLM2.5 20B (19.9B weights) | does not fit (needs ≥ 4.6 GiB) | ~1.8 bits/weight, queued | ~2.7 bits/weight, **running** (store) |
-| Mistral Small 24B (23.6B) | does not fit (≥ 5.2 GiB) | does not fit | ~2.3 bits/weight, after InternLM (disk) |
+| InternLM2.5 20B (19.9B weights) | does not fit (needs ≥ 4.6 GiB) | ~1.9 bits/weight, testing | ~2.6 bits/weight, done; anchored running |
+| Mistral Small 24B (23.6B) | does not fit (≥ 5.2 GiB) | does not fit | ~2.3 bits/weight, done; anchored queued |
 | InternLM2.5 7B (smaller, same family) | planned | | |
 
 Reka Flash 3.1 (21B) was dropped: its feed-forward width (19,648) is not a multiple of 256, which every IQ and K type
 needs.
 
-## Faults found tonight
+## Faults found
+
+On 2026-11-12, daytime:
+
+- **Disk short (22 GB free) stalled the 24B bundle and killed the InternLM 5 GiB part costs** (at 25 of 98). Freed
+  78 GB (Pi bundles already on Hugging Face, the finished 7B type copies); the lane resumed from its saved
+  measurements.
+- **The 5 GiB contest config still left InternLM out** ("after its 7 GiB part costs"), so its restart failed at
+  once; added back.
+- **The 7 GiB pick needs the 7B reference file**, deleted with the 7B type copies; restored from its Hugging Face
+  repo (the same Q6_K file the Pi tested).
+- **The pick compared perplexity across tokenizers** (crash where chunk counts differed; a silent wrong tiebreak,
+  24B vs 7B, where they matched). Perplexity is now compared only within one model family.
+
+Night of 2026-11-11:
 
 - **GPU booking file emptied** by a job force-stopped mid-write (01:54): ~230 part-cost runs in the 1 and 3 GiB lanes
   failed with "Expecting value". Fixed: atomic writes, an unreadable file counts as empty; both lanes restarted
