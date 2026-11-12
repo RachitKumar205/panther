@@ -1264,7 +1264,8 @@ def cmd_upload(budget: int, model: str) -> int:
 # bred from the current population and started, so the GPU never waits for a generation to end.
 
 GA_POP, GA_ELITE, GA_INFLIGHT = 16, 4, 4
-GA_EVALS, GA_PATIENCE = 70, 40    # at most this many individuals; stop after this many without a new best
+GA_EVALS = 70                     # at most this many individuals
+GA_MIN_EVALS, GA_PATIENCE, GA_MIN_GAIN = 30, 15, 0.2  # plateau: after 30, stop when 15 in a row gain < 0.2 points
 GA_TOP = 3                        # the best by fitness, then confirmed on all selection questions
 # Fitness: accuracy on a fixed subset of the selection questions (never the test split), with KL on the benchmark
 # questions as a mild tie-break: F = accuracy points - GA_KL_WEIGHT x KL (0.01 KL weighs 0.1 points).
@@ -1512,14 +1513,16 @@ def cmd_ga(budget: int, model: str) -> int:
             pop.sort(key=lambda t: t[0])
             del pop[GA_POP:]
             if k < best - 1e-9:
-                best, last_gain = k, n
+                if k < best - GA_MIN_GAIN:  # smaller gains are within the noise of the subset: not progress
+                    last_gain = n
+                best = k
                 out(f"budget-{budget}", f"ga-{model}-live.json").write_text(json.dumps(  # for an early check
                     {"n": n, "fitness": -k, "accuracy": acc, "kl": kl_, "assignment": a, "ram_gib": G.ram(a) / GIB}))
                 note(f"{sm} GA: individual {n}: new best fitness {-k:.2f} (subset accuracy {acc:.2f}, bench KL "
                      f"{kl_:.4f}, RAM {G.ram(a) / GIB:.3f} GiB)")
             elif n % 10 == 0:
                 note(f"{sm} GA: {n} individuals, best fitness {-best:.2f}")
-            if n + len(running) < GA_EVALS and n - last_gain < GA_PATIENCE:
+            if n + len(running) < GA_EVALS and (n < GA_MIN_EVALS or n - last_gain < GA_PATIENCE):
                 if not queue and len(measured) >= 8:
                     try:  # a round: the solver's picks under the fit, then GA children around them
                         picks = [a for a in G.proposals(measured, GA_SOLVED) if assignment_digest(a) not in seen]
@@ -1607,6 +1610,23 @@ def cmd_gascore(budget: int, model: str) -> int:
     for name in items:
         score(name)
     win, tied = choose_winner(rows, evs)
+    # Guard: the winner against llama.cpp's real preset file on the same 4,500 questions (paired bootstrap).
+    from panther.stats import compare
+    ftype = json.loads(out(f"budget-{budget}", f"preset-{model}.json").read_text())["preset"]
+    plabel = f"rw:gacheck{budget}:preset:{ftype}"
+    ppath = DATA / "store" / model / f"preset-{ftype}.gguf"
+    for t in SUBSET:
+        if not find(records(model), plabel, task=t, split="selection"):
+            with gpu_booking(ppath.stat().st_size + 10 * 2**30, hold_s=3600):
+                evaluate.run("task", model, ppath, plabel, THREADS, task=t, split="selection")
+    pev = Evaluation("preset", {t: np.array(find(records(model), plabel, task=t, split="selection")["per_item"]["correct"],
+                                            dtype=np.int8) for t in SUBSET}, np.ones(1), np.ones(1), 0, 0.0, tokenizer=model)
+    g = compare(evs[win], pev)
+    note(f"{sm} guard: {win} vs preset {ftype} on all selection questions: {100 * evs[win].mean_accuracy():.2f} vs "
+         f"{100 * pev.mean_accuracy():.2f}, {100 * g.acc_diff:+.2f} pts [{100 * g.acc_ci[0]:+.2f}, {100 * g.acc_ci[1]:+.2f}]")
+    if g.acc_ci[1] < 0:
+        note(f"{sm} guard: WORSE than the preset; not taken as our result (the GA must search further)")
+        return 2
     it = items[win]
     label = test_label(budget, win, it["assignment"])
     if not tests_done(model, label, with_kl=True):
