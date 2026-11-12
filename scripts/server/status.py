@@ -107,6 +107,72 @@ def lane(chain: str) -> dict | None:
             "t1": t1, "stopped": bool(lines) and "stopped at" in lines[-1]}
 
 
+def bpw(t: str) -> float:
+    import gguf
+    block, size = gguf.GGML_QUANT_SIZES[gguf.GGMLQuantizationType[t]]
+    return 8 * size / block
+
+
+def preset_types(model: str, budget: int) -> dict[str, str]:
+    """The best preset's type per gene id (blk.L.role.weight -> role.L; output -> head; token_embd -> embd)."""
+    import gguf
+    pj = DATA / "rewrite" / f"budget-{budget}" / f"preset-{model}.json"
+    ftype = json.loads(pj.read_text()).get("preset") if pj.exists() else None
+    path = DATA / "store" / model / f"preset-{ftype}.gguf"
+    if not ftype or not path.exists():
+        return {}
+    out = {}
+    for t in gguf.GGUFReader(path).tensors:
+        p = t.name.split(".")
+        if p[0] == "blk" and p[-1] == "weight":
+            out[f"{p[2]}.{p[1]}"] = t.tensor_type.name
+        elif t.name == "output.weight":
+            out["head"] = t.tensor_type.name
+        elif t.name == "token_embd.weight":
+            out["embd"] = out.setdefault("embd_head", t.tensor_type.name)
+    return out
+
+
+def config_lines(model: str, budget: int, a: dict[str, str], title: str) -> list[str]:
+    """How many matrices at each type, and which roles were raised or lowered against the preset's layout."""
+    counts: dict[str, int] = {}
+    for t in a.values():
+        counts[t] = counts.get(t, 0) + 1
+    types = ", ".join(f"{t} ×{n}" for t, n in sorted(counts.items(), key=lambda kv: bpw(kv[0])))
+    lines = [f"- **{title}:** {len(a)} matrices: {types}"]
+    pt = preset_types(model, budget)
+    up: dict[str, int] = {}
+    down: dict[str, int] = {}
+    for g, t in a.items():
+        if g in pt and pt[g] in __import__("gguf").GGMLQuantizationType.__members__:
+            d = bpw(t) - bpw(pt[g])
+            role = g.split(".")[0]
+            if d > 1e-9:
+                up[role] = up.get(role, 0) + 1
+            elif d < -1e-9:
+                down[role] = down.get(role, 0) + 1
+    if pt:
+        fmt = lambda d: ", ".join(f"{r} ×{n}" for r, n in sorted(d.items(), key=lambda kv: -kv[1])) or "none"  # noqa: E731
+        lines.append(f"  - vs the preset's layout: **raised** {sum(up.values())} ({fmt(up)}); "
+                     f"**lowered** {sum(down.values())} ({fmt(down)})")
+    return lines
+
+
+def verdict(since: list[str]) -> tuple[str, str, str] | None:
+    """(WIN/TIE/LOSE, difference with interval, what it was measured on) from the latest run's lines."""
+    fin = next((ln for ln in reversed(since) if "| our winner" in ln), None)
+    if fin and (m := re.search(r"our winner ([+-][\d.]+) pts \[([+-][\d.]+), ([+-][\d.]+)\]", fin)):
+        d, lo, hi = (float(x) for x in m.groups())
+        word = "WIN" if lo > 0 else "LOSE" if hi < 0 else "TIE"
+        return word, f"{d:+.2f} pts [{lo:+.2f}, {hi:+.2f}]", "held-out test (final)"
+    g = next((ln for ln in reversed(since) if "guard:" in ln and "pts" in ln), None)
+    if g and (m := re.search(r"([+-][\d.]+) pts \[([+-][\d.]+), ([+-][\d.]+)\]", g)):
+        d, lo, hi = (float(x) for x in m.groups())
+        word = "WIN" if lo > 0 else "LOSE" if hi < 0 else "TIE"
+        return word, f"{d:+.2f} pts [{lo:+.2f}, {hi:+.2f}]", "4,500 selection questions (provisional)"
+    return None
+
+
 def clock_min(line: str) -> int:
     """Minutes since midnight of a progress line's HH:MM (IST)."""
     h, m = line[:5].split(":")
@@ -125,10 +191,11 @@ def hm(minutes: float) -> str:
 def render() -> str:
     now = time.time()
     t_start = started_at()
-    out = ["# Panther: live progress", "",
-           f"Updated **{dt.datetime.now(IST):%d %b %H:%M:%S} IST**, every 30 s. Times are IST. "
-           "\"est.\" = estimated from the step's typical length; otherwise measured.", ""]
+    out: list[str] = []
     lanes = [x for x in (lane(p.stem[len("chain-"):]) for p in sorted(LOGS.glob("chain-g*.log"))) if x]
+    summary = ["## Verdict per contest", "",
+               "| Contest | Verdict | Accuracy difference vs preset [95% interval] | Measured on |", "|---|---|---|---|"]
+    body: list[str] = []
     for L in lanes:
         size, B, short = SIZE.get(L["short"], 7), L["budget"], L["short"].upper()
         prog = LOGS / f"progress-b{B}.log"
@@ -137,8 +204,25 @@ def render() -> str:
         starts = [i for i, ln in enumerate(pl) if "starting genomes" in ln]
         since = pl[starts[-1]:] if starts else []  # the latest GA run's lines
         ga_done = next((ln for ln in since if "GA done" in ln), None)
-        cands = [ln for ln in since if re.search(r"GA \S+:ga\d+: selection accuracy", ln)]
+        cands_by: dict[str, str] = {}  # a step that was restarted logs its candidates again: keep the latest of each
+        for ln in since:
+            if mm := re.search(r"GA \S+:(ga\d+): selection accuracy", ln):
+                cands_by[mm.group(1)] = ln
+        cands = list(cands_by.values())
         rows, clock = [], now
+        v = verdict(since)
+        sub_ours = next((ln for ln in reversed(since) if "new best fitness" in ln), None)
+        sub_pre = last("on the GA subset")
+        if v:
+            summary.append(f"| {L['model']} @ {B} GiB | **{v[0]}** | {v[1]} | {v[2]} |")
+        elif sub_ours and sub_pre:
+            a_o = float(re.search(r"subset accuracy ([\d.]+)", sub_ours).group(1))
+            a_p = float(re.search(r"accuracy ([\d.]+)", sub_pre).group(1))
+            word = "ahead" if a_o > a_p else "behind" if a_o < a_p else "level"
+            summary.append(f"| {L['model']} @ {B} GiB | {word} (search running) | {a_o - a_p:+.2f} pts (no interval yet) | "
+                           f"900 search questions (provisional) |")
+        else:
+            summary.append(f"| {L['model']} @ {B} GiB | not yet | | |")
         for s in L["steps"]:
             k, st = kind(s), L["state"].get(s, "waiting")
             ts = ga_times(L["model"], B) if k == "ga" else []
@@ -196,7 +280,11 @@ def render() -> str:
                         f"{'-' if st == 'done' else hm(left) + (' (est.)' if how == 'est.' else '')} | {end} | "
                         f"{'' if how == 'est.' else how} |")
         finish = "stopped" if L["stopped"] else f"ETA {dt.datetime.fromtimestamp(clock, IST):%H:%M} IST"
+        out = body
         out += [f"## {L['model']} at {B} GiB: {finish}", ""]
+        if v:
+            out.append(f"**Verdict: {v[0]}**, {v[1]} on the {v[2]}")
+            out.append("")
         if b := last("on the GA subset"):
             if mm := re.search(r"accuracy ([\d.]+), bench KL ([\d.]+), fitness ([\d.]+)", b):
                 out.append(f"- **To beat**, the llama.cpp preset on the 900 search questions: accuracy **{mm.group(1)}**, "
@@ -208,13 +296,31 @@ def render() -> str:
             out.append("- **On all 4,500 selection questions:** " + "; ".join(
                 re.sub(r".*GA \S+:(ga\d+): selection accuracy ([\d.]+), bench KL ([\d.]+).*", r"our \1 **\2** (KL \3)", c)
                 for c in cands))
-        for key in ("on all selection questions", "guard:", "GA winner"):
-            if (x := last(key)) and (not since or pl.index(x) >= pl.index(since[0])):
-                out.append(f"- {x[6:]}")
+        for key in ("preset", "guard:", "GA winner"):
+            sel = [ln for ln in since if key in ln and ("on all selection questions" in ln or key != "preset")]
+            if sel and not (key == "preset" and "guard:" in sel[-1]):
+                out.append(f"- {sel[-1][6:]}")
+        try:
+            wf = DATA / "rewrite" / f"budget-{B}" / f"winner-{L['model']}-anchored.json"
+            lf = DATA / "rewrite" / f"budget-{B}" / f"list-{L['model']}-anchored.json"
+            live = DATA / "rewrite" / f"budget-{B}" / f"ga-{L['model']}-live.json"
+            if wf.exists() and lf.exists() and wf.stat().st_mtime >= (live.stat().st_mtime if live.exists() else 0):
+                w = json.loads(wf.read_text())["winner"]
+                out += config_lines(L["model"], B, json.loads(lf.read_text())[w]["assignment"], f"Winning config ({w})")
+            elif live.exists():
+                out += config_lines(L["model"], B, json.loads(live.read_text())["assignment"], "Best config so far")
+        except Exception as e:  # noqa: BLE001  (a file being written)
+            out.append(f"- (config not readable right now: {type(e).__name__})")
         out += ["", "| | step | progress | spent | left | ends | detail |", "|---|---|---|---|---|---|---|", *rows, ""]
     if not lanes:
-        out.append("No lanes running.")
-    return "\n".join(out) + "\n"
+        body.append("No lanes running.")
+    head = ["# Panther: live progress", "",
+            f"Updated **{dt.datetime.now(IST):%d %b %H:%M:%S} IST**, every 30 s. Times are IST. "
+            "\"est.\" = estimated from the step's typical length; otherwise measured. Each contest compares our best "
+            "quantization with llama.cpp's best preset that fits the same RAM budget (same original model and "
+            "importance matrix). WIN / LOSE = the 95% interval of the accuracy difference is entirely above / below 0; "
+            "otherwise TIE.", ""]
+    return "\n".join(head + summary + [""] + body) + "\n"
 
 
 def main() -> None:
