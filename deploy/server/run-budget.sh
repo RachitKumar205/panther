@@ -40,8 +40,8 @@ done
 for m in $(list reference); do
   s="$(short "$m")"; c="b$B-ref-$s"; lanes="$lanes $c"
   running "$c" && { echo "lane $c already running"; continue; }
-  printf "%s\n" "gpu rw-store$B-$s $R store $B $m" "gpu rw-test$B-ref-$s $R test $B $m" \
-    "gpu rw-bundle$B-$s $R bundle $B $m" "cpu rw-upload$B-$s $R upload $B $m" > "$P/$c.steps"
+  # tested on the server for quality only: existing quantizations never go to the Pi
+  printf "%s\n" "gpu rw-store$B-$s $R store $B $m" "gpu rw-test$B-ref-$s $R test $B $m" > "$P/$c.steps"
   start x "$c" "$HERE/chain.sh" "$c" "$P/$c.steps"
 done
 running "a$B" || printf "%s\n" "gpu ra-pick$B $R pick $B" > "$P/a$B.steps"  # comparison across models

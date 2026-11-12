@@ -1487,6 +1487,8 @@ def cmd_ga(budget: int, model: str) -> int:
             del pop[GA_POP:]
             if k < best * (1 - 1e-5):  # KL is deterministic: any real decrease is a gain
                 best, last_gain = k, n
+                out(f"budget-{budget}", f"ga-{model}-live.json").write_text(json.dumps(  # for an early check
+                    {"n": n, "kl": k, "assignment": a, "ram_gib": G.ram(a) / GIB}))
                 note(f"{sm} GA: individual {n}: new best KL {k:.4f} (RAM {G.ram(a) / GIB:.3f} GiB)")
             elif n % 10 == 0:
                 note(f"{sm} GA: {n} individuals, best KL {best:.4f}")
@@ -1510,6 +1512,39 @@ def cmd_ga(budget: int, model: str) -> int:
                                                                        "history": history}, indent=1))
     note(f"{sm} GA done: {n} individuals; best bench KL {best:.4f}; top {len(items)}: "
          + ", ".join(f"{v['bench_kl']:.4f}" for v in items.values()))
+    return 0
+
+
+def cmd_gacheck(budget: int, model: str) -> int:
+    """Early check while the GA runs: its current best and the budget's preset, both on the selection benchmarks
+    (multiple choice, never the test split), compared by the paired bootstrap."""
+    from panther.stats import Evaluation, compare
+    live = json.loads(out(f"budget-{budget}", f"ga-{model}-live.json").read_text())
+    ftype = json.loads(out(f"budget-{budget}", f"preset-{model}.json").read_text())["preset"]
+    evs = {}
+    for name, a, path in (("preset", None, DATA / "store" / model / f"preset-{ftype}.gguf"),
+                          (f"ga-n{live['n']}", live["assignment"], None)):
+        label = f"rw:gacheck{budget}:{name}" + (f":{assignment_digest(a)[:12]}" if a else f":{ftype}")
+        if not all(find(records(model), label, task=t, split="selection") for t in SUBSET):
+            built = path is None
+            path = path or build_file(model, a)
+            try:
+                with gpu_booking(path.stat().st_size + 10 * 2**30, hold_s=3600):
+                    for t in SUBSET:
+                        if not find(records(model), label, task=t, split="selection"):
+                            evaluate.run("task", model, path, label, THREADS, task=t, split="selection")
+            finally:
+                if built:
+                    path.unlink(missing_ok=True)
+        c = {t: np.array(find(records(model), label, task=t, split="selection")["per_item"]["correct"], dtype=np.int8)
+             for t in SUBSET}
+        evs[name] = Evaluation(name, c, np.ones(1), np.ones(1), 0, 0.0, tokenizer=model)
+    g, pr = evs[f"ga-n{live['n']}"], evs["preset"]
+    cmp = compare(g, pr)
+    note(f"{short_name(model)} early check, GA best so far (individual {live['n']}, bench KL {live['kl']:.4f}) vs "
+         f"preset {ftype}: selection accuracy {100 * g.mean_accuracy():.2f} vs {100 * pr.mean_accuracy():.2f}, "
+         f"{100 * cmp.acc_diff:+.2f} pts [{100 * cmp.acc_ci[0]:+.2f}, {100 * cmp.acc_ci[1]:+.2f}] | "
+         + " ".join(f"{t[:4]} {100 * g.task_correct[t].mean():.1f}/{100 * pr.task_correct[t].mean():.1f}" for t in SUBSET))
     return 0
 
 
@@ -1577,7 +1612,8 @@ def main() -> int:
     if cmd in steps:
         return steps[cmd](args[1])
     steps2 = {"list": cmd_list, "test": cmd_test, "pick": cmd_pick_model, "bundle": cmd_bundle_model,
-              "upload": cmd_upload, "preset": cmd_preset, "ga": cmd_ga, "gascore": cmd_gascore}
+              "upload": cmd_upload, "preset": cmd_preset, "ga": cmd_ga, "gascore": cmd_gascore,
+              "gacheck": cmd_gacheck}
     if cmd in steps2:
         return steps2[cmd](BUDGET, args[1])
     raise SystemExit(__doc__)
