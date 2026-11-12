@@ -147,3 +147,13 @@ def test_padded_preset_layout_is_inside_the_window_and_only_raises(budget, b, mo
     assert padded is not None and p.in_window(model, padded, b)
     bpw = p.bits_per_weight
     assert all(bpw(padded[g]) >= bpw(a[g]) for g in a)
+
+
+def test_no_perplexity_tiebreak_across_tokenizers():
+    import numpy as np
+    from panther.stats import Evaluation, compare
+    c = {"t": np.ones(50, dtype=np.int8)}
+    a = Evaluation("a", c, np.full(4, 100.0), np.full(4, 50), 0, 0.0, tokenizer="Qwen2.5")
+    b = Evaluation("b", c, np.full(4, 200.0), np.full(4, 50), 0, 0.0, tokenizer="Mistral")
+    assert compare(a, b).decided_by != "perplexity"
+    assert compare(a, Evaluation("c", c, np.full(4, 200.0), np.full(4, 50), 0, 0.0, tokenizer="Qwen2.5")).decided_by == "perplexity"

@@ -29,6 +29,7 @@ class Evaluation:
     chunk_tokens: np.ndarray
     peak_ram_bytes: int
     decode_tps: float
+    tokenizer: str = ""  # model family; perplexities of different tokenizers are not comparable
 
     def mean_accuracy(self) -> float:
         return float(np.mean([v.mean() for v in self.task_correct.values()]))
@@ -77,7 +78,7 @@ def compare(a: Evaluation, b: Evaluation, seed: int = 0, n_boot: int = N_BOOT,
     rng = np.random.default_rng(seed)
     acc = _boot_acc_diff(a, b, rng, n_boot)
     lo, hi = np.quantile(acc, [alpha / 2, 1 - alpha / 2])
-    if np.array_equal(a.chunk_tokens, b.chunk_tokens):
+    if a.tokenizer == b.tokenizer and np.array_equal(a.chunk_tokens, b.chunk_tokens):
         lppl = _boot_log_ppl_ratio(a, b, rng, n_boot)
         plo, phi = np.exp(np.quantile(lppl, [alpha / 2, 1 - alpha / 2]))
         ratio = a.perplexity() / b.perplexity()

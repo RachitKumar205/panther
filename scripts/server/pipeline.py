@@ -965,7 +965,8 @@ def evaluation(model: str, label: str, ram: float, name: str):
     correct["gsm8k"] = np.array(g["correct"], dtype=np.int8)
     p = find(recs, label, text="test_web")["per_chunk"]
     nll = np.array(p["mean_nll"]) * p["tokens"]
-    return Evaluation(name, correct, nll, np.full(len(nll), p["tokens"]), int(ram * GIB), 0.0)
+    return Evaluation(name, correct, nll, np.full(len(nll), p["tokens"]), int(ram * GIB), 0.0,
+                      tokenizer=model.split("-")[0])  # Qwen2.5 sizes share one tokenizer; other families don't
 
 
 def choose_winner(rows: dict, evs: dict) -> tuple[str, list[str]]:
