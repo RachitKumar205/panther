@@ -163,3 +163,21 @@ def test_no_perplexity_tiebreak_across_tokenizers():
 def test_only_searched_genotypes_can_win():
     assert p.is_searched("24B:sol1") and p.is_searched("20B:a-sol3")
     assert not p.is_searched("24B:uniform-IQ2_XXS-padded") and not p.is_searched("20B:preset-IQ2_S-layout-padded")
+
+
+def test_ga_operators_keep_every_genome_inside_the_window(budget):
+    budget(1)
+    inv = p.inv_of(M15)
+    err = {g.tensors[0].name: {f: g.n_weights * 2.0 ** -p.bits_per_weight(f) for f in p.allowed(M15)[g.gene_id]}
+           for g in inv.genes}
+    G = p.Genes(M15, 1, seed=3, err=err)
+    pop = G.initial()
+    assert len(pop) >= 8 and all(G.fits(a) for a in pop)
+    assert len({p.assignment_digest(a) for a in pop}) == len(pop)  # diverse: no duplicates
+    assert all(p.in_window(M15, a, 1) for a in pop)  # the GA's fast RAM sum agrees with the full estimate
+    for _ in range(30):
+        a = G.mutate(pop[0])
+        b = G.crossover(pop[1], pop[2])
+        assert G.fits(a) and G.fits(b)
+    kinds = {len({a[g] for g in a}) for a in pop}
+    assert max(kinds) >= 3  # genomes mix several types, not one

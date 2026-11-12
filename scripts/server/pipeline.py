@@ -37,6 +37,7 @@ DATA = Path(os.environ.get("PANTHER_DATA", REPO_ROOT / "data"))
 LLAMA = Path(os.environ.get("PANTHER_LLAMA", "/opt/llama.cpp"))
 THREADS = int(os.environ.get("PANTHER_THREADS", "16"))
 SENS_CHUNKS = 12
+BENCH_CHUNKS = 16  # KL text for the GA: selection-split benchmark questions with their answers (bench_text)
 SUBSET = {"mmlu": 1000, "hellaswag": 2000, "arc_challenge": None, "winogrande": None}  # test subset
 RW = DATA / "rewrite"
 CFG = yaml.safe_load((REPO_ROOT / "configs" / "search.yaml").read_text())
@@ -135,14 +136,51 @@ def type_counts(inv, a: dict[str, str]) -> dict[str, int]:
     return dict(sorted(c.items()))
 
 
+def bench_text() -> Path:
+    """Benchmark questions with their correct answers, from the selection split (never the test questions), the
+    five benchmarks interleaved: the GA's fitness is KL on this text, so closeness to the original is judged where
+    the benchmarks probe. Deterministic; written once."""
+    import random
+    path = DATA / "splits" / "text" / "bench.txt"
+    if path.exists():
+        return path
+    per: dict[str, list[str]] = {}
+    for t in ("mmlu", "arc_challenge", "hellaswag", "winogrande", "gsm8k"):
+        items = []
+        for it in jsonl(DATA / "splits" / "tasks" / "selection" / f"{t}.jsonl"):
+            if t in ("mmlu", "arc_challenge"):
+                labels = it.get("choice_labels") or list("ABCDE")
+                items.append(f"Question: {it['question']}\n" + "".join(f"{l}. {c}\n" for l, c in zip(labels, it["choices"]))
+                             + f"Answer: {labels[it['label']]}. {it['choices'][it['label']]}")
+            elif t == "hellaswag":
+                items.append(f"{it['ctx']} {it['endings'][it['label']]}")
+            elif t == "winogrande":
+                items.append(it["sentence"].replace("_", it["option1"] if it["label"] == 0 else it["option2"]))
+            else:
+                items.append(f"Question: {it['question']}\nAnswer: {it['answer']}")
+        random.Random(0).shuffle(items)
+        per[t] = items
+    out_, n, i = [], 0, 0
+    while n < BENCH_CHUNKS * 2048 * 4 * 1.5 and i < max(len(v) for v in per.values()):  # ~4 characters per token
+        for t, v in per.items():
+            if i < len(v):
+                out_.append(v[i])
+                n += len(v[i]) + 2
+        i += 1
+    path.write_text("\n\n".join(out_) + "\n")
+    return path
+
+
 def cmd_refs(model: str) -> int:
-    """The 16-bit model's next-token distributions on the sensitivity (12 chunks) and selection texts."""
+    """The 16-bit model's next-token distributions on the sensitivity (12 chunks), selection and benchmark-question
+    (16 chunks) texts."""
+    bench_text()
     ref_dir = DATA / "reference" / model
     ref_dir.mkdir(parents=True, exist_ok=True)
     bf16 = DATA / "store" / model / f"{model}-BF16.gguf"
     mpath = ref_dir / "manifest.json"
     manifest = json.loads(mpath.read_text()) if mpath.exists() else {"model": model, "references": {}}
-    for name, chunks in (("sensitivity", SENS_CHUNKS), ("selection", None)):
+    for name, chunks in (("sensitivity", SENS_CHUNKS), ("selection", None), ("bench", BENCH_CHUNKS)):
         kld = ref_dir / f"{name}.kld"
         if name in manifest["references"] and kld.exists():
             continue
@@ -982,7 +1020,7 @@ def evaluation(model: str, label: str, ram: float, name: str):
 
 def is_searched(name: str) -> bool:
     """Only the solver's genotypes (sol1.., a-sol1..) can win; padded baselines and preset layouts are controls."""
-    return ":sol" in name or ":a-sol" in name
+    return ":sol" in name or ":a-sol" in name or ":ga" in name
 
 
 def choose_winner(rows: dict, evs: dict) -> tuple[str, list[str]]:
@@ -1220,6 +1258,312 @@ def cmd_upload(budget: int, model: str) -> int:
     return 0
 
 
+# --- genetic search ------------------------------------------------------------------------------------------
+# Genome: one type per matrix. Fitness: measured KL from the original on benchmark questions (bench_text), one KL
+# run per individual. Steady state: GA_INFLIGHT individuals are scored at once; whenever one finishes, a child is
+# bred from the current population and started, so the GPU never waits for a generation to end.
+
+GA_POP, GA_ELITE, GA_INFLIGHT = 16, 4, 4
+GA_EVALS, GA_PATIENCE = 110, 60   # at most this many individuals; stop after this many without a new best
+GA_TOP = 5                        # the best by KL, then scored on the selection benchmarks
+GA_SOLVED = 4                     # children per round proposed by the solver on the fitted sensitivities
+
+
+class Genes:
+    """Per-matrix steps, bytes and offline error for one model at one budget, and the operators on genomes."""
+
+    def __init__(self, model: str, budget: int, seed: int = 0, err: dict | None = None) -> None:
+        import random
+        self.model, self.budget, self.rng = model, budget, random.Random(seed)
+        inv = inv_of(model)
+        self.genes = {g.gene_id: g for g in inv.genes}
+        al = allowed(model)
+        self.steps = {g: sorted(al[g], key=bits_per_weight) for g in self.genes}
+        self.bytes = {g: {f: gene_bytes(self.genes[g], f) for f in self.steps[g]} for g in self.genes}
+        err = err or json.loads(out(model, "error.json").read_text())
+        self.err = {g: {f: err[gene.tensors[0].name][f] for f in self.steps[g]} for g, gene in self.genes.items()}
+        a0 = start_assignment(model)
+        self.const = ram_gib(model, a0) * GIB - self.weights(a0)  # RAM that doesn't depend on the genome
+        self.lo, self.hi = budget * (1 + WINDOW[0]) * GIB, budget * (1 + WINDOW[1]) * GIB
+        n = inv.geometry.n_layers
+        self.group = {}
+        for g, gene in self.genes.items():
+            role = gene.tensors[0].name.split(".")[-2] if gene.layer is not None else gene.kind
+            self.group[g] = (role, -1 if gene.layer is None else 4 * gene.layer // n)
+
+    def weights(self, a: dict[str, str]) -> int:
+        return sum(self.bytes[g][a[g]] for g in self.genes)
+
+    def ram(self, a: dict[str, str]) -> float:
+        return self.weights(a) + self.const
+
+    def fits(self, a: dict[str, str]) -> bool:
+        return self.lo <= self.ram(a) <= self.hi
+
+    def move(self, a: dict[str, str], g: str, k: int) -> None:
+        fs = self.steps[g]
+        a[g] = fs[max(0, min(len(fs) - 1, fs.index(a[g]) + k))]
+
+    def repair(self, a: dict[str, str]) -> dict[str, str]:
+        """Into the RAM window: lower (raise) one step at a time a gene picked at random among the 8 that cost the
+        least offline error per byte saved (remove the most per byte added). Random among the best, so repairs
+        differ and the population stays diverse."""
+        r = self.ram(a)
+        for _ in range(20000):
+            if r > self.hi:
+                c = [((self.err[g][fs[i - 1]] - self.err[g][a[g]]) / max(1, self.bytes[g][a[g]] - self.bytes[g][fs[i - 1]]), g)
+                     for g, fs in self.steps.items() for i in [fs.index(a[g])] if i > 0]
+                g = self.rng.choice(sorted(c)[:8])[1]
+                b0 = self.bytes[g][a[g]]
+                self.move(a, g, -1)
+                r += self.bytes[g][a[g]] - b0
+            elif r < self.lo:
+                c = [(-(self.err[g][a[g]] - self.err[g][fs[i + 1]]) / max(1, self.bytes[g][fs[i + 1]] - self.bytes[g][a[g]]), g)
+                     for g, fs in self.steps.items() for i in [fs.index(a[g])]
+                     if i + 1 < len(fs) and r + self.bytes[g][fs[i + 1]] - self.bytes[g][a[g]] <= self.hi]
+                if not c:
+                    break
+                g = self.rng.choice(sorted(c)[:8])[1]
+                b0 = self.bytes[g][a[g]]
+                self.move(a, g, +1)
+                r += self.bytes[g][a[g]] - b0
+            else:
+                break
+        return a
+
+    def mutate(self, a: dict[str, str]) -> dict[str, str]:
+        """Small (1-3 genes one step), large (1-3 genes two or three steps) or group (every gene of one matrix role
+        in one quarter of the depth, one step), then repaired into the window, which pays for raises with lowers."""
+        a, gs, x = dict(a), list(self.genes), self.rng.random()
+        if x < 0.5:
+            for g in self.rng.sample(gs, self.rng.randint(1, 3)):
+                self.move(a, g, self.rng.choice((-1, 1)))
+        elif x < 0.8:
+            for g in self.rng.sample(gs, self.rng.randint(1, 3)):
+                self.move(a, g, self.rng.choice((-3, -2, 2, 3)))
+        else:
+            grp, k = self.rng.choice(sorted(set(self.group.values()))), self.rng.choice((-1, 1))
+            for g in gs:
+                if self.group[g] == grp:
+                    self.move(a, g, k)
+        return self.repair(a)
+
+    def features(self, a: dict[str, str]) -> np.ndarray:
+        """Offline error summed per group (matrix role x depth quarter): the surrogate's inputs."""
+        groups = sorted(set(self.group.values()))
+        gi = {x: i for i, x in enumerate(groups)}
+        x = np.zeros(len(groups))
+        for g in a:
+            x[gi[self.group[g]]] += self.err[g][a[g]]
+        return x
+
+    def proposals(self, measured: list[tuple[float, dict[str, str]]], k: int) -> list[dict[str, str]]:
+        """Fit KL ~ sum over groups of (sensitivity x the group's offline error) to every measured genome, then let
+        the solver find the k best distinct genomes inside the window under that fit."""
+        from panther.solver import Problem
+        from panther.solver import solve_top_k
+        groups = sorted(set(self.group.values()))
+        gi = {x: i for i, x in enumerate(groups)}
+        X = np.array([self.features(a) for _, a in measured])
+        y = np.array([kl for kl, _ in measured])
+        scale = X.mean(axis=0) + 1e-30
+        coef, *_ = np.linalg.lstsq(np.c_[X / scale, np.ones(len(y))], y, rcond=None)
+        sens = np.maximum(coef[:-1], 1e-9 * max(1e-12, float(np.abs(coef[:-1]).max()))) / scale
+        pen = {g: {f: float(sens[gi[self.group[g]]] * self.err[g][f]) for f in self.steps[g]} for g in self.genes}
+        prob = Problem(inv_of(self.model), allowed(self.model), pen, self.hi / GIB, CTX, OVERHEAD,
+                       kv_bytes_per_element=KV_BPE)
+        lo = prob.weight_budget_bytes - int((self.hi - self.lo))
+        sols = solve_top_k(prob, k=k, time_limit_s=20, min_bytes=lo, min_distance=3)
+        return [s.assignment for s in sols if self.fits(s.assignment)]
+
+    def crossover(self, p: dict[str, str], q: dict[str, str]) -> dict[str, str]:
+        """Whole layers from one parent or the other (layers keep their own balance of types)."""
+        take = {}
+        child = {}
+        for g, gene in self.genes.items():
+            L = gene.layer if gene.layer is not None else -1
+            if L not in take:
+                take[L] = self.rng.random() < 0.5
+            child[g] = p[g] if take[L] else q[g]
+        return self.repair(child)
+
+    def initial(self) -> list[dict[str, str]]:
+        """Diverse: the preset's layout, every uniform type padded into the window, random mixes, preset mutants."""
+        pop = [self.repair(start_assignment(self.model))]
+        for f in sorted(menu(self.model), key=bits_per_weight):
+            a = padded_from(self.model, fill(self.model, f), self.budget)
+            if a:
+                pop.append(a)
+        while len(pop) < GA_POP // 2 + 2:
+            a = fill(self.model, self.rng.choice(sorted(menu(self.model), key=bits_per_weight)))
+            for g in self.genes:
+                self.move(a, g, self.rng.choice((-2, -1, 0, 0, 1, 2)))
+            pop.append(self.repair(a))
+        uniq: dict[str, dict[str, str]] = {}
+        for a in pop:  # padded uniforms of neighbouring types can end up the same genome
+            if self.fits(a):
+                uniq.setdefault(assignment_digest(a), a)
+        for _ in range(500):
+            if len(uniq) >= GA_POP:
+                break
+            a = pop[0]
+            for _ in range(self.rng.randint(2, 6)):
+                a = self.mutate(a)
+            if self.fits(a):
+                uniq.setdefault(assignment_digest(a), a)
+        return list(uniq.values())
+
+
+def ga_label(budget: int, a: dict[str, str]) -> str:
+    return f"rw:ga{budget}:{assignment_digest(a)[:12]}"
+
+
+def _ga_eval(job: tuple[int, str, dict, bool]) -> float:
+    global BUDGET
+    budget, model, a, fast = job
+    BUDGET = budget
+    label = ga_label(budget, a)
+    r = find(records(model), label, reference="bench")
+    if r is None:
+        path = fast_probe(model, a) if fast else build_file(model, a)
+        try:
+            with gpu_booking(path.stat().st_size + 6 * 2**30, hold_s=1800):
+                kl(model, path, "bench", label)
+        finally:
+            path.unlink(missing_ok=True)
+        r = find(records(model), label, reference="bench")
+    return r["metrics"]["kl_mean"]
+
+
+def cmd_ga(budget: int, model: str) -> int:
+    """The genetic search: steady state, fitness = KL on benchmark questions. Writes the GA_TOP best as the
+    model's list (names <size>:ga1..) and the whole history to budget-B/ga-<model>.json."""
+    sm = short_name(model)
+    G = Genes(model, budget)
+    fast = reflink_ok(model)
+    pop: list[tuple[float, str, dict]] = []  # (KL, digest, genome), the best GA_POP kept
+    seen: dict[str, float] = {}
+    history = []
+    measured: list[tuple[float, dict[str, str]]] = []
+    queue = G.initial()
+    best, last_gain, n = float("inf"), 0, 0
+    note(f"{sm} GA: {len(queue)} starting genomes (preset layout, padded uniforms, random mixes, preset mutants)")
+
+    def child() -> dict[str, str]:
+        for _ in range(50):
+            if len(pop) < 2 or G.rng.random() < 0.3:
+                a = G.mutate(G.rng.choice(pop[:GA_ELITE] or pop)[2])
+            else:
+                p, q = (min(G.rng.sample(pop, 2), key=lambda t: t[0])[2] for _ in range(2))
+                a = G.mutate(G.crossover(p, q)) if G.rng.random() < 0.5 else G.crossover(p, q)
+            if assignment_digest(a) not in seen and G.fits(a):
+                return a
+        return G.mutate(pop[0][2])
+
+    with ProcessPoolExecutor(GA_INFLIGHT) as ex:
+        running = {}
+
+        def submit(a: dict[str, str]) -> None:
+            d = assignment_digest(a)
+            seen[d] = float("nan")
+            running[ex.submit(_ga_eval, (budget, model, a, fast))] = (d, a)
+        while queue and len(running) < GA_INFLIGHT:
+            submit(queue.pop(0))
+        while running:
+            fut = next(as_completed(running))
+            d, a = running.pop(fut)
+            try:
+                k = fut.result()
+            except BaseException as e:  # noqa: BLE001  (one failed individual never stops the search)
+                note(f"{sm} GA: an individual failed ({e})")
+                k = float("inf")
+            n += 1
+            seen[d] = k
+            history.append({"n": n, "digest": d, "kl": k, "ram_gib": G.ram(a) / GIB})
+            if k != float("inf"):
+                measured.append((k, a))
+            pop.append((k, d, a))
+            pop.sort(key=lambda t: t[0])
+            del pop[GA_POP:]
+            if k < best * (1 - 1e-5):  # KL is deterministic: any real decrease is a gain
+                best, last_gain = k, n
+                note(f"{sm} GA: individual {n}: new best KL {k:.4f} (RAM {G.ram(a) / GIB:.3f} GiB)")
+            elif n % 10 == 0:
+                note(f"{sm} GA: {n} individuals, best KL {best:.4f}")
+            if n + len(running) < GA_EVALS and n - last_gain < GA_PATIENCE:
+                if not queue and len(measured) >= 8:
+                    try:  # a round: the solver's picks under the fit, then GA children around them
+                        picks = [a for a in G.proposals(measured, GA_SOLVED) if assignment_digest(a) not in seen]
+                    except Exception as e:  # noqa: BLE001  (a failed fit only means GA children this round)
+                        note(f"{sm} GA: surrogate fit failed ({e})")
+                        picks = []
+                    queue.extend(picks)
+                    queue.extend(G.mutate(a) for a in picks[:2])
+                submit(queue.pop(0) if queue else child())
+    top = pop[:GA_TOP]
+    items = {}
+    for i, (k, d, a) in enumerate(top, 1):
+        items[f"{model.split('-')[1]}:ga{i}"] = {"model": model, "assignment": a, "bench_kl": k,
+                                                 "ram_gib": ram_gib(model, a)}
+    list_path(budget, model).write_text(json.dumps(items, indent=1))
+    out(f"budget-{budget}", f"ga-{model}.json").write_text(json.dumps({"evaluated": n, "best_kl": best,
+                                                                       "history": history}, indent=1))
+    note(f"{sm} GA done: {n} individuals; best bench KL {best:.4f}; top {len(items)}: "
+         + ", ".join(f"{v['bench_kl']:.4f}" for v in items.values()))
+    return 0
+
+
+def cmd_gascore(budget: int, model: str) -> int:
+    """The GA's top genomes scored on the selection benchmarks (multiple choice, all 4,500 questions; never the test
+    split). The winner: most accurate, ties by bootstrap to the lowest bench KL. Then the winner's full test (test
+    split, perplexity, GSM8K) and the winner file the later steps use."""
+    from panther.stats import Evaluation
+    items = json.loads(list_path(budget, model).read_text())
+    sm = short_name(model)
+    rows, evs = {}, {}
+
+    def score(name: str) -> None:
+        it = items[name]
+        label = test_label(budget, name, it["assignment"])
+        if not all(find(records(model), label, task=t, split="selection") for t in SUBSET):
+            path = build_file(model, it["assignment"])
+            try:
+                with gpu_booking(path.stat().st_size + 10 * 2**30, hold_s=3600):
+                    for t in SUBSET:
+                        if not find(records(model), label, task=t, split="selection"):
+                            if not evaluate.run("task", model, path, label, THREADS, task=t, split="selection"):
+                                raise SystemExit(f"{label} {t} failed")
+            finally:
+                path.unlink(missing_ok=True)
+        correct = {t: np.array(find(records(model), label, task=t, split="selection")["per_item"]["correct"], dtype=np.int8)
+                   for t in SUBSET}
+        evs[name] = Evaluation(name, correct, np.ones(1), np.ones(1), int(it["ram_gib"] * GIB), 0.0, tokenizer=model)
+        rows[name] = {"mean_accuracy_pct": 100 * evs[name].mean_accuracy(), "kl": it["bench_kl"]}
+        note(f"{sm} GA {name}: selection accuracy {rows[name]['mean_accuracy_pct']:.2f}, bench KL {it['bench_kl']:.4f}")
+    for name in items:
+        score(name)
+    win, tied = choose_winner(rows, evs)
+    it = items[win]
+    label = test_label(budget, win, it["assignment"])
+    if not tests_done(model, label, with_kl=True):
+        path = build_file(model, it["assignment"])
+        try:
+            with gpu_booking(path.stat().st_size + 10 * 2**30, hold_s=3 * 3600):
+                run_all_tests(model, path, label, with_kl=True)
+        finally:
+            path.unlink(missing_ok=True)
+    ev = evaluation(model, label, it["ram_gib"], win)
+    k = find(records(model), label, reference="selection")["metrics"]
+    final = {"ram_gib": it["ram_gib"], "kl": k["kl_mean"], "bench_kl": it["bench_kl"],
+             "selection_accuracy_pct": rows[win]["mean_accuracy_pct"], "mean_accuracy_pct": 100 * ev.mean_accuracy(),
+             "ppl": ev.perplexity(), "per_task_pct": {t: 100 * float(v.mean()) for t, v in ev.task_correct.items()}}
+    out(f"budget-{budget}", f"winner-{model}{method_suffix(model)}.json").write_text(json.dumps(
+        {"winner": win, "tied_on_accuracy": tied, "selection": rows, "rows": {win: final}}, indent=1))
+    note(f"{sm} GA winner {win}: test accuracy {final['mean_accuracy_pct']:.2f}, KL {final['kl']:.4f}, "
+         f"PPL {final['ppl']:.3f}, GSM8K {final['per_task_pct']['gsm8k']:.1f}")
+    return 0
+
+
 def main() -> int:
     cmd, args = sys.argv[1], sys.argv[2:]
     global BUDGET
@@ -1233,7 +1577,7 @@ def main() -> int:
     if cmd in steps:
         return steps[cmd](args[1])
     steps2 = {"list": cmd_list, "test": cmd_test, "pick": cmd_pick_model, "bundle": cmd_bundle_model,
-              "upload": cmd_upload, "preset": cmd_preset}
+              "upload": cmd_upload, "preset": cmd_preset, "ga": cmd_ga, "gascore": cmd_gascore}
     if cmd in steps2:
         return steps2[cmd](BUDGET, args[1])
     raise SystemExit(__doc__)
