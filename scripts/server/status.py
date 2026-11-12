@@ -1,5 +1,5 @@
-"""Live progress of every running lane as a markdown page (data/status.md), rewritten every 30 s; the Mac copies it
-to a secret gist (pi/../deploy/status-gist.sh). Runs on the server as a CPU job:
+"""Live progress of every running lane as a markdown page (data/status.md), rewritten every 30 s and published to the
+private Hugging Face repo <user>/panther-status every 60 s. Runs on the server as a CPU job:
 
   deploy/server/panther.sh job rs-status /opt/venv/bin/python scripts/server/status.py
 
@@ -102,6 +102,8 @@ def render() -> str:
         for s in L["steps"]:
             st, k = L["state"].get(s, "waiting"), kind(s)
             detail = ""
+            if k == "ga" and st == "waiting" and any(t > now - 900 for t in ga_individuals(L["model"], B)):
+                st = "running"  # a GA started before its lane (adopted when the lane gets there)
             if k == "ga" and st in ("running", "done"):
                 ts = ga_individuals(L["model"], B)
                 n = len(ts)
@@ -143,14 +145,24 @@ def render() -> str:
 
 
 def main() -> None:
+    """Rewrites data/status.md every 30 s and puts it in the private Hugging Face repo <user>/panther-status every
+    60 s (Hugging Face limits commits per hour)."""
+    from huggingface_hub import HfApi
     path = DATA / "status.md"
+    repo = os.environ["PANTHER_HF_REPO"].split("/")[0] + "/panther-status"
+    api = HfApi()
+    api.create_repo(repo, private=True, exist_ok=True)
+    i = 0
     while True:
         try:
             tmp = path.with_suffix(".part")
             tmp.write_text(render())
             tmp.replace(path)
+            if i % 2 == 0:
+                api.upload_file(path_or_fileobj=str(path), path_in_repo="README.md", repo_id=repo, commit_message="status")
         except Exception as e:  # noqa: BLE001  (a failed refresh is retried next time)
             print(f"{time.strftime('%H:%M')} refresh failed: {e}", flush=True)
+        i += 1
         time.sleep(30)
 
 
