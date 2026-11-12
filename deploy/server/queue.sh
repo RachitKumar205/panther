@@ -24,9 +24,9 @@ clean() {  # type copies of models with no running lane and nothing queued
     [ "$(basename "$f")" = "$m-$t.gguf" ] || continue  # only <model>-<TYPE>.gguf is a type copy
     for l in $(users); do [ "$(lane_model "$l")" = "$m" ] && continue 2; done  # in use by a contest or experiment
     grep -qw -- "$m" <<< "$*" && continue
-    for c in "$D"/logs/chain-[gx]*.log; do  # a lane that stopped on a failure may be restarted: keep its copies
+    for c in "$D"/logs/chain-[gx]*.log; do  # only when every lane of the model ended "done": a failed one may restart
       l="$(basename "$c" .log)"; l="${l#chain-}"
-      [ "$(lane_model "$l")" = "$m" ] && tail -n 1 "$c" | grep -q "stopped at" && continue 2
+      [ "$(lane_model "$l")" = "$m" ] && ! tail -n 1 "$c" | grep -qE "chain $l done$" && continue 2
     done
     rm -f "$f" && log "deleted type copy $(basename "$f") ($m has no running or queued lane)"
   done
