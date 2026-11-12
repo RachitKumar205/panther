@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The whole standard (docs/STANDARD.md) for one RAM budget, unattended, in one command. Run on the server:
 #
-#   deploy/server/run-budget.sh 7
+#   deploy/server/run-budget.sh 7                                         # every searched model of the budget
+#   deploy/server/run-budget.sh 7 Qwen2.5-14B-Instruct Mistral-24B-Instruct  # only these (must be searched at 7)
 #
 # One lane per model, all in parallel. A searched model goes straight through:
 #   download -> type copies -> offline error -> the original's reference outputs -> llama.cpp presets (the best one
@@ -16,7 +17,8 @@
 # (quantized copies, offline error, references, part costs) take a lock per model, so the second waits and skips.
 # Heavy steps wait while the data disk has less than 30 GB free.
 set -euo pipefail
-B="${1:?usage: run-budget.sh BUDGET_GIB}"
+B="${1:?usage: run-budget.sh BUDGET_GIB [MODEL...]}"; shift
+ONLY="$*"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 W="${PANTHER_WORK:-/s3/panther/work}"
@@ -29,7 +31,9 @@ running() { local ps_out; ps_out="$(ps -eo args)"; grep -qE "chain.sh $1 /|after
 start() { running "$2" && { echo "lane $2 already running"; return; }
           PANTHER_CPUS="${PANTHER_CPUS:-16}" setsid nohup "${@:3}" >/dev/null 2>&1 < /dev/null & echo "started $2"; }
 lanes=""
+for x in $ONLY; do grep -qw -- "$x" <<< "$(list searched)" || { echo "$x is not searched at $B GiB" >&2; exit 1; }; done
 for m in $(list searched); do
+  [ -n "$ONLY" ] && ! grep -qw -- "$m" <<< "$ONLY" && continue
   s="$(short "$m")"; c="g$B-$s"; lanes="$lanes $c"
   running "$c" && { echo "lane $c already running"; continue; }  # never rewrite a running lane's steps
   # steps are named by method (rg-: genetic search), so a finished step of another method is never taken as done
