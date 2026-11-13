@@ -7,6 +7,7 @@
 #   ./panther status                what is running, GPU, disk; the live page has the rest
 #   ./panther build | test          build the server image | run the tests (on your machine)
 #   ./panther exec CMD...           one command in a GPU container (log: data/logs/exec-<pid>.log)
+#   ./panther save 14b              save a model's type copies to its private Hugging Face repo (also automatic)
 #
 # Live page: https://huggingface.co/<user>/panther-status. Settings: deploy/server/local.env (git-ignored).
 set -uo pipefail
@@ -15,7 +16,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 W="${PANTHER_WORK:-/s3/panther/work}"
 
 if [ ! -d "$W" ]; then  # your machine: sync the code, then the same command on the server
-  case "${1:-}" in test) cd "$ROOT" && exec uv run pytest -q ;; ""|help) sed -n 2,10p "$0"; exit 0 ;; esac
+  case "${1:-}" in test) cd "$ROOT" && exec uv run pytest -q ;; ""|help) sed -n 2,11p "$0"; exit 0 ;; esac
   SSH="ssh -o ControlPath=$PANTHER_SSH_CONTROL -o ProxyCommand=false -o BatchMode=yes"
   $SSH "$PANTHER_HOST" true 2>/dev/null || { echo "No connection to the server; open it first (deploy/server/README.md)."; exit 1; }
   rsync -a --delete -e "$SSH" --exclude .git/ --exclude .venv/ --exclude /data/ --exclude __pycache__/ \
@@ -48,7 +49,7 @@ job() {  # job cpu|gpu NAME CMD...: one container, waited for; 0 if it exited 0.
 
 contest() {  # contest SIZE B MODEL. Downloading and building type copies (the disk-heavy part) take turns, one
   # model at a time; everything after runs in parallel with the other contests, sharing the GPU through its ledger.
-  local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) fd ok=1
+  local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) fd ok=1 sp="" 
   mkdir -p "$DATA/locks"; log "$id: queued (waiting its turn to download and build the type copies)"
   local types; types="$(grep '^formats:' "$W/repo/configs/search.yaml" | tr ',' '\n' | wc -l)"
   if [ "$(grep -o '"[A-Z0-9_]*"' "$DATA/store/$3/rounded.json" 2>/dev/null | wc -l)" -ge "$types" ]; then
@@ -58,11 +59,13 @@ contest() {  # contest SIZE B MODEL. Downloading and building type copies (the d
     log "$id: started"
     job cpu "$id-fetch" "${R[@]}" fetch "$2" "$3" && job gpu "$id-store" "${R[@]}" store "$2" "$3" || ok=0
     exec {fd}>&-
+    [ "$ok" = 1 ] && { job cpu "$id-save" "${R[@]}" save "$2" "$3" & sp=$!; }  # to Hugging Face, alongside
   fi
   if [ "$ok" = 1 ] && job gpu "$id-run" "${R[@]}" run "$2" "$3" && job cpu "$id-upload" "${R[@]}" upload "$2" "$3"
   then log "$id: done"; else log "$id: FAILED or stopped"; fi
-  pgrep -f "panther _contest [^ ]+ [0-9]+ $3\$" | grep -qv "^$$\$" ||
-    find "$DATA/store/$3" -name "$3-*.gguf" ! -name "*-BF16.gguf" -delete 2>/dev/null
+  [ -n "$sp" ] && wait "$sp"
+  pgrep -f "panther _contest [^ ]+ [0-9]+ $3\$" | grep -qv "^$$\$" || pgrep -f "pipeline.py save [0-9]+ $3" >/dev/null ||
+    find "$DATA/store/$3" "$DATA/reference/$3" \( \( -name "$3-*.gguf" ! -name "*-BF16.gguf" \) -o -name "*.kld" \) -delete 2>/dev/null
 }
 
 guard() {  # pauses everything while GitLab is unhealthy (3 bad checks), resumes after 5 good ones
@@ -113,7 +116,8 @@ case "${1:-}" in
     "${P[@]}" tag "$IMAGE:$tag" "$IMAGE:current" ;;
   _contest) contest "$2" "$3" "$4" ;;
   exec) shift; job gpu "exec-$$" "$@" ;;
+  save) job cpu "save-$2" /opt/venv/bin/python scripts/server/pipeline.py save 0 "$(model "$2@0")" ;;
   _guard) guard ;;
   _status) job cpu status /opt/venv/bin/python scripts/server/status.py ;;
-  *) sed -n 2,10p "$0" ;;
+  *) sed -n 2,11p "$0" ;;
 esac

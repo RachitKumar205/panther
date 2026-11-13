@@ -42,7 +42,6 @@ PRESETS = {"IQ1_S": 1.56, "IQ1_M": 1.75, "IQ2_XXS": 2.06, "IQ2_XS": 2.31, "IQ2_S
            "IQ4_XS": 4.25, "Q3_K_L": 4.27, "Q4_K_S": 4.58, "Q4_K_M": 4.89, "Q5_K_S": 5.54, "Q5_K_M": 5.69,
            "Q6_K": 6.56, "Q8_0": 8.5}
 BUDGET = 0
-MARGIN = 100 * GIB  # downloads and type copies leave this much free for the searches running beside them
 
 
 def note(msg: str) -> None:
@@ -115,30 +114,78 @@ def gpu(nbytes: int, hold_s: int = 3600):
 
 # --- fetch, store, error, references ----------------------------------------------------------------------------
 
-def fetch(model: str) -> None:
-    """The weights, unless the store already has everything this budget needs (rounding reads them)."""
-    hf, done = DATA / "hf" / model, STORE / model / "rounded.json"
-    if (hf / "config.json").exists() or (done.exists() and set(CFG["formats"]) <= set(
-            json.loads(done.read_text()))):
-        return
-    need = 2 * sum(x.rows * x.cols for x in Model(model).matrices) + MARGIN  # 16-bit weights + room for searches
-    while shutil.disk_usage(DATA).free < need:
-        note(f"{short(model)} fetch: waiting for {need / GIB:.0f} GB of free disk")
+def margin() -> int:
+    """Disk that downloads and type copies leave free: 100 GB while other jobs use the GPU (their genome files
+    need room), 20 GB otherwise."""
+    try:
+        busy = bool(json.loads((DATA / "locks/gpu.json").read_text()))
+    except (OSError, ValueError):
+        busy = False
+    return (100 if busy else 20) * GIB
+
+
+def wait_disk(need: int, what: str) -> None:
+    while shutil.disk_usage(DATA).free < need + margin():
+        note(f"{what}: waiting for {(need + margin()) / GIB:.0f} GB of free disk")
         time.sleep(600)
+
+
+def store_repo(model: str) -> str:
+    return os.environ["PANTHER_HF_REPO"].split("/")[0] + f"/panther-store-{model}"
+
+
+def stored(model: str) -> bool:
+    done = STORE / model / "rounded.json"
+    return (all(copy_of(model, t).exists() for t in ["BF16", *CFG["formats"]]) and done.exists()
+            and set(CFG["formats"]) <= set(json.loads(done.read_text())))
+
+
+def fetch(model: str) -> None:
+    """The type copies saved by an earlier run (private Hugging Face repo), else the weights if they are needed:
+    to convert, or to round InternLM (transformers cannot load it from GGUF)."""
+    if stored(model):
+        return
+    n = sum(x.rows * x.cols for x in Model(model).matrices)
+    wait_disk(int(n * 7.5), f"{short(model)} fetch")  # the 16-bit original + 14 type copies
+    if subprocess.run([os.environ["PANTHER_HF"], "download", store_repo(model), "--local-dir", str(STORE / model)]
+                      ).returncode == 0 and stored(model):
+        note(f"{short(model)} fetch: type copies downloaded from {store_repo(model)}")
+        return
+    hf = DATA / "hf" / model
+    if (hf / "config.json").exists() or (copy_of(model, "BF16").exists() and "internlm" not in model.lower()):
+        return
     m = MODELS[model]
     subprocess.run([os.environ["PANTHER_HF"], "download", m["repo"], "--revision", m["revision"], "--local-dir",
                     str(hf)], check=True)
 
 
+def save(model: str) -> None:
+    """The finished store (16-bit original, importance matrix, presets, type copies) to a private Hugging Face repo,
+    so later runs download it instead of rebuilding."""
+    from huggingface_hub import HfApi
+    if not stored(model):
+        return
+    api, repo = HfApi(), store_repo(model)
+    api.create_repo(repo, private=True, exist_ok=True)
+    have = set(api.list_repo_files(repo))
+    if all(f.name in have for f in (STORE / model).iterdir()):
+        return
+    api.upload_folder(repo_id=repo, folder_path=STORE / model, allow_patterns=["*.gguf", "rounded.json"])
+    note(f"{short(model)} type copies saved to {repo}")
+
+
 def store(model: str) -> None:
-    """The 16-bit original, its importance matrix, and the whole model once in every type of the budget's menu."""
+    """The 16-bit original, its importance matrix, and the whole model once in every type."""
     d, bf16, imat = STORE / model, copy_of(model, "BF16"), STORE / model / f"{model}.imatrix.gguf"
+    hf = DATA / "hf" / model
     d.mkdir(parents=True, exist_ok=True)
     if not bf16.exists():  # InternLM's converter needs a newer protobuf, kept in data/pydeps-convert
         env = dict(os.environ, PYTHONPATH=f"{DATA}/pydeps-convert:{os.environ.get('PYTHONPATH', '')}")
         subprocess.run([os.environ.get("PANTHER_CONVERT_PY", sys.executable), "/opt/llama.cpp/convert_hf_to_gguf.py",
-                        str(DATA / "hf" / model), "--outtype", "bf16", "--outfile", f"{bf16}.part"], env=env, check=True)
+                        str(hf), "--outtype", "bf16", "--outfile", f"{bf16}.part"], env=env, check=True)
         os.rename(f"{bf16}.part", bf16)
+    if hf.exists() and "internlm" not in model.lower():
+        shutil.rmtree(hf)  # rounding reads the 16-bit GGUF; only InternLM needs the original files
     if not imat.exists():
         po = ["--process-output"] if MODELS[model].get("imatrix_process_output") else []
         subprocess.run([str(BIN / "llama-imatrix"), "-m", str(bf16), "-f", str(DATA / "splits/calibration.txt"),
@@ -147,9 +194,8 @@ def store(model: str) -> None:
     M = Model(model)
     al, n = M.allowed(), sum(m.rows * m.cols for m in M.matrices)
     for t in CFG["formats"]:
-        while not copy_of(model, t).exists() and shutil.disk_usage(DATA).free < n * bpw(t) / 8 + MARGIN:
-            note(f"{short(model)} store: waiting for {(n * bpw(t) / 8 + MARGIN) / GIB:.0f} GB of free disk for the {t} copy")
-            time.sleep(600)
+        if not copy_of(model, t).exists():
+            wait_disk(int(n * bpw(t) / 8), f"{short(model)} store, {t} copy")
         if not copy_of(model, t).exists():  # embedding / head take Q8_0 where the type needs imatrix data they lack
             emb, head = ((t if t in al.get(n, al["token_embd.weight"]) else "Q8_0").lower()
                          for n in ("token_embd.weight", "output.weight"))
@@ -165,7 +211,7 @@ def store(model: str) -> None:
         h, i = M.matrices[2].cols, max(x.cols for x in M.matrices)
         per_layer = 4 * (3 * h * h + i * i)  # bytes of the four input Hessians of one layer
         with gpu(bf16.stat().st_size + 24 * GIB + 2 * per_layer, 6 * 3600):
-            round_copies(DATA / "hf" / model, bf16, {t: copy_of(model, t) for t in todo},
+            round_copies(hf if hf.exists() else None, bf16, {t: copy_of(model, t) for t in todo},
                          DATA / "splits/calibration.txt", max(1, int(20 * GIB // per_layer)))
         done.write_text(json.dumps(have + todo))
     if (DATA / "hf" / model).exists():
@@ -610,8 +656,8 @@ def main() -> int:
     global BUDGET
     cmd, b, model = sys.argv[1:4]
     BUDGET = int(b)
-    if cmd in ("fetch", "upload"):
-        (fetch if cmd == "fetch" else upload)(model)
+    if cmd in ("fetch", "upload", "save"):
+        {"fetch": fetch, "upload": upload, "save": save}[cmd](model)
         return 0
     for s in STEPS if cmd == "run" else [cmd]:
         t0 = time.time()

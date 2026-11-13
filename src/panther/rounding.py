@@ -62,15 +62,17 @@ def gptq(w, h, qtype) -> np.ndarray:
     return np.concatenate(codes, axis=1)
 
 
-def round_copies(hf_dir: Path, bf16: Path, copies: dict[str, Path], calib: Path, layers_per_pass: int) -> None:
+def round_copies(hf_dir: Path | None, bf16: Path, copies: dict[str, Path], calib: Path, layers_per_pass: int) -> None:
     """Rewrites every matrix of every copy {type: path} with error-compensated codes. Inputs come from the HF
     model on calibration text; weights from the 16-bit GGUF (llama.cpp may reorder rows, never input columns)."""
     import gguf
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(hf_dir, trust_remote_code=True)
+    src_args = ({"pretrained_model_name_or_path": str(hf_dir), "trust_remote_code": True} if hf_dir else
+                {"pretrained_model_name_or_path": str(bf16.parent), "gguf_file": bf16.name})  # no HF files: the GGUF
+    tok = AutoTokenizer.from_pretrained(**src_args)
     ids = tok(calib.read_text(), return_tensors="pt").input_ids[0][: SEQS * SEQ_LEN].view(SEQS, SEQ_LEN)
-    m = AutoModelForCausalLM.from_pretrained(hf_dir, dtype=torch.bfloat16, trust_remote_code=True).cuda().eval()
+    m = AutoModelForCausalLM.from_pretrained(**src_args, dtype=torch.bfloat16).cuda().eval()
     src = {t.name: t for t in gguf.GGUFReader(bf16).tensors}
     out = {t: gguf.GGUFReader(p, "r+") for t, p in copies.items()}
     dst = {t: {x.name: x for x in r.tensors} for t, r in out.items()}

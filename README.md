@@ -238,6 +238,8 @@ the process's maximum resident memory (VmHWM), and the Pi's throttle state befor
 - From your machine it syncs the code to the server (anton) and runs the same command there; every step runs in a
   locked-down container ([deploy/server](deploy/server/README.md) has the one-time setup). Every step skips work
   already done, so nothing is lost by stopping.
+- **Built once**: each model's type copies (with its 16-bit original, importance matrix and presets) are saved to
+  a private Hugging Face repo, `panther-store-<model>`; a later contest downloads them instead of rebuilding.
 - **Packed**: all contests start at once. Only downloading and building type copies take turns (one model at a time:
   they fill the disk); everything else runs in parallel, sharing the GPU through a booking ledger (92 of its 96 GB).
   When a contest ends, its type copies are deleted.
