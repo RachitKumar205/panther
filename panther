@@ -24,7 +24,7 @@ if [ ! -d "$W" ]; then  # your machine: sync the code, then the same command on 
   exec $SSH "$PANTHER_HOST" "$W/repo/panther $(printf '%q ' "$@")"
 fi
 
-DATA="$W/data"; LOG="$DATA/logs/panther.log"; IMAGE=localhost/panther; CPUS="${PANTHER_CPUS:-20}"; MEM="${PANTHER_MEM:-64g}"
+DATA="$W/data"; LOG="$DATA/logs/panther.log"; IMAGE=localhost/panther; CPUS="${PANTHER_CPUS:-40}"; MEM="${PANTHER_MEM:-64g}"
 P=(podman --root "$W/containers/storage" --runroot "/run/user/$(id -u)/panther" --events-backend file --tmpdir "$W/tmp/libpod")
 mkdir -p "$DATA/logs" "$W/tmp/libpod"; export TMPDIR="$W/tmp"
 log() { echo "$(TZ=Asia/Kolkata date +%H:%M) $*" >> "$LOG"; echo "$*"; }

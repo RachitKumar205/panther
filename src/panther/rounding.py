@@ -7,12 +7,14 @@ IQ2_XS, -8% Q4_K, IQ3_S unchanged."""
 from __future__ import annotations
 
 import ctypes
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 
 CHUNK, SEQS, SEQ_LEN = 256, 128, 512
+THREADS = int(os.environ.get("PANTHER_THREADS", "16"))
 INPUTS = {"attn_in": ("self_attn.q_proj", "attention.wqkv"), "o_in": ("self_attn.o_proj", "attention.wo"),
           "mlp_in": ("mlp.gate_proj", "feed_forward.w1"), "down_in": ("mlp.down_proj", "feed_forward.w2")}
 ROLE_INPUT = {"attn_q": "attn_in", "attn_k": "attn_in", "attn_v": "attn_in", "attn_output": "o_in",
@@ -21,7 +23,7 @@ _LIB = None
 
 
 def quant(w: np.ndarray, imp: np.ndarray, qtype) -> tuple[np.ndarray, np.ndarray]:
-    """(codes, dequantized values) of the rows of w in qtype, by llama.cpp's quantizer on 16 threads."""
+    """(codes, dequantized values) of the rows of w in qtype, by llama.cpp's quantizer on every thread."""
     global _LIB
     from gguf.quants import dequantize
     if _LIB is None:
@@ -38,8 +40,8 @@ def quant(w: np.ndarray, imp: np.ndarray, qtype) -> tuple[np.ndarray, np.ndarray
     def part(idx):
         a, b = int(idx[0]), int(idx[-1]) + 1
         _LIB.ggml_quantize_chunk(t, w[a:b].ctypes.data, dst[a:b].ctypes.data, 0, b - a, n, imp.ctypes.data)
-    with ThreadPoolExecutor(16) as ex:
-        list(ex.map(part, [i for i in np.array_split(np.arange(rows), 16) if len(i)]))
+    with ThreadPoolExecutor(THREADS) as ex:
+        list(ex.map(part, [i for i in np.array_split(np.arange(rows), THREADS) if len(i)]))
     return dst, dequantize(dst, qtype).reshape(rows, n)
 
 
