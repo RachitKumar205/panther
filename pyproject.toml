@@ -16,6 +16,7 @@ dependencies = [
 server = [
     "torch>=2.4",
     "transformers>=4.45",
+    "accelerate>=1.0",  # transformers needs it to load GGUF files (distillation)
     "datasets>=3.0",
     "lm-eval>=0.4.5",
     "pyarrow>=16",
