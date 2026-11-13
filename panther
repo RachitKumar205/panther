@@ -77,13 +77,14 @@ case "${1:-}" in
   start)
     shift
     "${P[@]}" image exists "$IMAGE:current" || "$0" build
-    pgrep -f "panther _guard" >/dev/null || setsid nohup "$0" _guard >/dev/null 2>&1 < /dev/null &
-    pgrep -f "panther _status" >/dev/null || setsid nohup "$0" _status >/dev/null 2>&1 < /dev/null &
+    for d in _guard _status; do  # detached, so this command returns at once
+      pgrep -f "panther $d" >/dev/null || (setsid nohup "$0" "$d" >/dev/null 2>&1 < /dev/null &)
+    done
     for c in "$@"; do
       m="$(model "$c")"; b="${c#*@}"
       [ -n "$m" ] && [[ "$b" =~ ^[0-9]+$ ]] || { echo "unknown contest '$c' (write it like 7b@3)"; continue; }
       if pgrep -f "panther _contest ${c%@*} $b $m\$" >/dev/null; then echo "$c is already running"; continue; fi
-      setsid nohup "$0" _contest "${c%@*}" "$b" "$m" >/dev/null 2>&1 < /dev/null &
+      (setsid nohup "$0" _contest "${c%@*}" "$b" "$m" >/dev/null 2>&1 < /dev/null &)
       echo "started $c ($m at $b GiB)"
     done ;;
   pause) touch "$DATA/PAUSED"; ours running | xargs -r "${P[@]}" pause >/dev/null; log "paused by the user" ;;
