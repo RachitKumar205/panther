@@ -221,7 +221,9 @@ smallest competes, with more RAM than we are allowed.
 
 ### The Pi
 
-llama-server with the full 4,096-token context and 8-bit KV cache, 4 threads; one 256-token prompt and 64 generated
+llama-server with the full 4,096-token context and 8-bit KV cache, 4 threads, **weight repacking off** (on the Pi's
+ARM processor llama.cpp otherwise keeps a second, repacked copy of K-type weights: the 7B @ 5 GiB winner peaked at
+6.86 GiB with it, 4.69 GiB without; writing speed is unchanged, reading the prompt ~35 % slower); one 256-token prompt and 64 generated
 tokens. **Reading speed** = prompt tokens per second, **writing speed** = generated tokens per second, **peak RAM** =
 the process's maximum resident memory (VmHWM), and the Pi's throttle state before and after.
 

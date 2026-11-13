@@ -1,6 +1,8 @@
 """The Pi's one command: wait for our winners on Hugging Face, download each, check it, post the result to the
 live page, delete the model file (the SD card holds one at a time). The check: checksum, llama-server at the full
-context with an 8-bit KV cache, a 256-token prompt and 64 generated tokens, real peak RAM against the prediction.
+context with an 8-bit KV cache and weight repacking off (on ARM, repacking keeps a second copy of K-type weights:
+the 7B @ 5 GiB winner peaked at 6.86 GiB with it, 4.69 without), a 256-token prompt and 64 generated tokens, real
+peak RAM against the prediction.
 
   nohup python3 pi/panther_pi.py <hf user> 7b@3 14b@5 > ~/panther-pi/pi.log 2>&1 &
 """
@@ -49,7 +51,7 @@ def check(d: Path) -> str:
     kv = m["kv_cache_type"].lower()
     t0 = throttled()
     srv = subprocess.Popen([str(LLAMA), "-m", str(gguf), "--port", str(PORT), "-c", str(m["context"]), "-np", "1",
-                            "-t", str(THREADS), "-ctk", kv, "-ctv", kv, "-fa", "on"],
+                            "-t", str(THREADS), "-ctk", kv, "-ctv", kv, "-fa", "on", "--no-repack"],
                            stdout=open(d / "server.log", "w"), stderr=subprocess.STDOUT)
     try:
         for _ in range(900):
