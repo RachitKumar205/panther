@@ -32,7 +32,7 @@ healthy() { [ "$(curl -sL -o /dev/null -w '%{http_code}' --max-time 20 "$PANTHER
 ours() { "${P[@]}" ps --format '{{.Names}}' --filter "status=$1" | grep '^panther-' | grep -v '^panther-status$'; }
 model() { grep -ioE "name: [^ ]*-${1%@*}-[^ ]*" "$W/repo/configs/models.yaml" | head -1 | cut -d' ' -f2; }
 
-job() {  # job cpu|gpu NAME CMD...: one container, waited for; 0 if it exited 0. Log: data/logs/NAME.log
+job() {  # job cpu|gpu NAME CMD...: one container, waited for; returns its exit code. Log: data/logs/NAME.log
   local kind="$1" name="panther-$2"; shift 2
   healthy || { log "GitLab is not healthy; not starting $name"; return 1; }
   local a=(--userns keep-id --cap-drop all --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,size=16g
@@ -44,20 +44,25 @@ job() {  # job cpu|gpu NAME CMD...: one container, waited for; 0 if it exited 0.
   "${P[@]}" rm -f "$name" >/dev/null 2>&1
   "${P[@]}" run -d --name "$name" "${a[@]}" "$IMAGE:current" bash -o pipefail -c \
     '"$@" 2>&1 | tee -a "/work/data/logs/$0.log"' "${name#panther-}" "$@" >/dev/null || return 1
-  local rc; rc="$("${P[@]}" wait "$name" | head -1)"; "${P[@]}" rm "$name" >/dev/null 2>&1; [ "$rc" = 0 ]
+  local rc; rc="$("${P[@]}" wait "$name" | head -1)"; "${P[@]}" rm "$name" >/dev/null 2>&1; return "${rc:-1}"
 }
 
 contest() {  # contest SIZE B MODEL. Downloading and building type copies (the disk-heavy part) take turns, one
   # model at a time; everything after runs in parallel with the other contests, sharing the GPU through its ledger.
-  local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) fd ok=1 sp="" 
+  local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) fd ok=1 sp="" rc
   mkdir -p "$DATA/locks"; log "$id: queued (waiting its turn to download and build the type copies)"
   local types; types="$(grep '^formats:' "$W/repo/configs/search.yaml" | tr ',' '\n' | wc -l)"
   if [ "$(grep -o '"[A-Z0-9_]*"' "$DATA/store/$3/rounded.json" 2>/dev/null | wc -l)" -ge "$types" ]; then
     log "$id: started (type copies already built)"
   else
-    exec {fd}> "$DATA/locks/store-turn"; flock "$fd"
-    log "$id: started"
-    job cpu "$id-fetch" "${R[@]}" fetch "$2" "$3" && job gpu "$id-store" "${R[@]}" store "$2" "$3" || ok=0
+    while :; do  # a model without enough disk yet gives the turn back and retries in 10 minutes
+      exec {fd}> "$DATA/locks/store-turn"; flock "$fd"
+      log "$id: started"
+      job cpu "$id-fetch" "${R[@]}" fetch "$2" "$3"; rc=$?
+      [ "$rc" = 3 ] || break
+      exec {fd}>&-; log "$id: waiting for disk; other models go first"; sleep 600
+    done
+    [ "$rc" = 0 ] && job gpu "$id-store" "${R[@]}" store "$2" "$3" || ok=0
     exec {fd}>&-
     [ "$ok" = 1 ] && { job cpu "$id-save" "${R[@]}" save "$2" "$3" & sp=$!; }  # to Hugging Face, alongside
   fi
