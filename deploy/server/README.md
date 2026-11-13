@@ -6,7 +6,7 @@ How Panther runs on the shared server (RHEL 10, SELinux enforcing, RTX PRO 6000 
 ## Running contests
 
 Everything goes through `./panther` at the repo root (see the project README): from your machine it syncs the code
-here and runs the same command. Contests wait for one of 3 slots (`PANTHER_SLOTS`) and run in the order given;
+here and runs the same command. Contests wait for one of 4 slots (`PANTHER_SLOTS`) and run in the order given;
 each is a CPU job (download), one GPU job (every pipeline step), a CPU job (upload for the Pi). GPU memory is shared
 through a booking ledger (`data/locks/gpu.json`). When a contest ends, its model's type copies are deleted unless
 another contest is using them. `./panther start` also starts the status page and the GitLab guard (3 bad checks →

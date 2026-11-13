@@ -164,7 +164,7 @@ The search (**genetic algorithm**, GA):
      bits pay.
    - **Score** (lower is better): **flips** against the original on 900 selection questions + 10 × **drift** on the
      original's own answers. Accuracy is recorded as a check.
-   - **Steady state**: 4 genomes scored at a time on the GPU; a new child starts whenever one finishes.
+   - **Steady state**: 4–12 genomes scored at a time on the GPU (by model size); a new child starts whenever one finishes.
    - **Stop**: after at least 30 genomes, once 15 in a row bring no gain of 0.2; at most 70.
 
 The end:
@@ -194,7 +194,7 @@ One command, from your machine (it syncs the code to the server and runs there; 
 [deploy/server](deploy/server/README.md) for the one-time setup):
 
 ```bash
-./panther start 1.5b@1 7b@3 7b@5 14b@5   # queue contests: model size @ RAM budget (GiB); 3 run at once, in order
+./panther start 1.5b@1 7b@3 7b@5 14b@5   # queue contests: model size @ RAM budget (GiB); 4 run at once, in order
 ./panther pause                          # pause everything; ./panther resume continues
 ./panther stop 7b@5                      # stop one contest (or all: ./panther stop); start it again to continue
 ./panther status                         # what runs, GPU, disk; the live page has everything else

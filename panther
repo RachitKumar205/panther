@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Panther's one command. On your machine it syncs the code to the server and runs the same command there.
 #
-#   ./panther start 7b@3 14b@5     queue contests (model size @ RAM budget in GiB); 3 run at once, in this order
+#   ./panther start 7b@3 14b@5     queue contests (model size @ RAM budget in GiB); 4 run at once, in this order
 #   ./panther pause | resume        pause / resume everything (the live page keeps updating)
 #   ./panther stop [7b@3]           stop one contest or all; started again, a contest continues where it stopped
 #   ./panther status                what is running, GPU, disk; the live page has the rest
@@ -50,7 +50,7 @@ contest() {  # contest SIZE B MODEL: wait for one of the slots, fetch, every pip
   local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) k fd
   mkdir -p "$DATA/locks"; log "$id: queued"
   while :; do
-    for k in $(seq "${PANTHER_SLOTS:-3}"); do exec {fd}> "$DATA/locks/slot-$k"; flock -n "$fd" && break 2; exec {fd}>&-; done
+    for k in $(seq "${PANTHER_SLOTS:-4}"); do exec {fd}> "$DATA/locks/slot-$k"; flock -n "$fd" && break 2; exec {fd}>&-; done
     sleep 60
   done
   log "$id: started"

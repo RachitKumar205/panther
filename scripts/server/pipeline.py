@@ -399,7 +399,7 @@ def preset_layout(model: str, budget: int) -> dict[str, str] | None:
 
 
 def ga(model: str) -> None:
-    """Steady state: INFLIGHT genomes scored at once, a new child whenever one finishes; each round the solver
+    """Steady state: as many genomes scored at once as the GPU holds (4-12, by model size), a new child whenever one finishes; each round the solver
     adds SOLVED proposals from a fit of every score so far. Stops on a plateau. Writes the TOP best."""
     if (lst := out(f"budget-{BUDGET}", f"list-{model}{SUFFIX}.json")).exists():
         return
@@ -421,13 +421,14 @@ def ga(model: str) -> None:
             if digest(a) not in seen and G.fits(a):
                 return a
         return G.mutate(pop[0][2])
-    with ProcessPoolExecutor(INFLIGHT) as ex:
+    inflight = max(INFLIGHT, min(12, int(60 * GIB // copy_of(model, "Q4_K").stat().st_size)))
+    with ProcessPoolExecutor(inflight) as ex:
         running = {}
 
         def submit(a: dict[str, str]) -> None:
             seen.add(digest(a))
             running[ex.submit(_score_job, (BUDGET, model, a))] = a
-        while queue and len(running) < INFLIGHT:
+        while queue and len(running) < inflight:
             submit(queue.pop(0))
         while running:
             fut = next(as_completed(running))
