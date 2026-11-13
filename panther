@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Panther's one command. On your machine it syncs the code to the server and runs the same command there.
+#
+#   ./panther start 7b@3 14b@5     queue contests (model size @ RAM budget in GiB); 3 run at once, in this order
+#   ./panther pause | resume        pause / resume everything (the live page keeps updating)
+#   ./panther stop [7b@3]           stop one contest or all; started again, a contest continues where it stopped
+#   ./panther status                what is running, GPU, disk; the live page has the rest
+#   ./panther build | test          build the server image | run the tests (on your machine)
+#   ./panther exec CMD...           one command in a GPU container (log: data/logs/exec-<pid>.log)
+#
+# Live page: https://huggingface.co/<user>/panther-status. Settings: deploy/server/local.env (git-ignored).
+set -uo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+. "$ROOT/deploy/server/local.env"
+W="${PANTHER_WORK:-/s3/panther/work}"
+
+if [ ! -d "$W" ]; then  # your machine: sync the code, then the same command on the server
+  case "${1:-}" in test) cd "$ROOT" && exec uv run pytest -q ;; ""|help) sed -n 2,10p "$0"; exit 0 ;; esac
+  SSH="ssh -o ControlPath=$PANTHER_SSH_CONTROL -o ProxyCommand=false -o BatchMode=yes"
+  $SSH "$PANTHER_HOST" true 2>/dev/null || { echo "No connection to the server; open it first (deploy/server/README.md)."; exit 1; }
+  rsync -a --delete -e "$SSH" --exclude .git/ --exclude .venv/ --exclude /data/ --exclude __pycache__/ \
+    --exclude .pytest_cache/ "$ROOT/" "$PANTHER_HOST:$W/repo/"
+  exec $SSH "$PANTHER_HOST" "$W/repo/panther $(printf '%q ' "$@")"
+fi
+
+DATA="$W/data"; LOG="$DATA/logs/panther.log"; IMAGE=localhost/panther; CPUS="${PANTHER_CPUS:-20}"; MEM="${PANTHER_MEM:-64g}"
+P=(podman --root "$W/containers/storage" --runroot "/run/user/$(id -u)/panther" --events-backend file --tmpdir "$W/tmp/libpod")
+mkdir -p "$DATA/logs" "$W/tmp/libpod"; export TMPDIR="$W/tmp"
+log() { echo "$(TZ=Asia/Kolkata date +%H:%M) $*" >> "$LOG"; echo "$*"; }
+healthy() { [ "$(curl -sL -o /dev/null -w '%{http_code}' --max-time 20 "$PANTHER_HEALTH_URL")" = 200 ]; }
+ours() { "${P[@]}" ps --format '{{.Names}}' --filter "status=$1" | grep '^panther-' | grep -v '^panther-status$'; }
+model() { grep -ioE "name: [^ ]*-${1%@*}-[^ ]*" "$W/repo/configs/models.yaml" | head -1 | cut -d' ' -f2; }
+
+job() {  # job cpu|gpu NAME CMD...: one container, waited for; 0 if it exited 0. Log: data/logs/NAME.log
+  local kind="$1" name="panther-$2"; shift 2
+  healthy || { log "GitLab is not healthy; not starting $name"; return 1; }
+  local a=(--userns keep-id --cap-drop all --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,size=16g
+           --shm-size 2g --pids-limit 4096 --cpus "$CPUS" --memory "$MEM" --memory-swap "$MEM"
+           -v "$W/repo:/work/repo:ro,z" -v "$DATA:/work/data:rw,z" -e "PANTHER_THREADS=$CPUS"
+           -e "PANTHER_HF_REPO=$PANTHER_HF_REPO" --log-driver k8s-file --log-opt max-size=20mb)
+  [ "$kind" = cpu ] && a+=(--network pasta) || a+=(--device nvidia.com/gpu=all --security-opt label=disable
+                                                    --network none -e HF_HUB_OFFLINE=1)
+  "${P[@]}" rm -f "$name" >/dev/null 2>&1
+  "${P[@]}" run -d --name "$name" "${a[@]}" "$IMAGE:current" bash -o pipefail -c \
+    '"$@" 2>&1 | tee -a "/work/data/logs/$0.log"' "${name#panther-}" "$@" >/dev/null || return 1
+  local rc; rc="$("${P[@]}" wait "$name" | head -1)"; "${P[@]}" rm "$name" >/dev/null 2>&1; [ "$rc" = 0 ]
+}
+
+contest() {  # contest SIZE B MODEL: wait for one of the slots, fetch, every pipeline step, upload; free the copies
+  local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) k fd
+  mkdir -p "$DATA/locks"; log "$id: queued"
+  while :; do
+    for k in $(seq "${PANTHER_SLOTS:-3}"); do exec {fd}> "$DATA/locks/slot-$k"; flock -n "$fd" && break 2; exec {fd}>&-; done
+    sleep 60
+  done
+  log "$id: started"
+  if job cpu "$id-fetch" "${R[@]}" fetch "$2" "$3" && job gpu "$id-run" "${R[@]}" run "$2" "$3" \
+     && job cpu "$id-upload" "${R[@]}" upload "$2" "$3"; then log "$id: done"; else log "$id: FAILED or stopped"; fi
+  pgrep -f "panther _contest [^ ]+ [0-9]+ $3\$" | grep -qv "^$$\$" ||
+    find "$DATA/store/$3" -name "$3-*.gguf" ! -name "*-BF16.gguf" -delete 2>/dev/null
+}
+
+guard() {  # pauses everything while GitLab is unhealthy (3 bad checks), resumes after 5 good ones
+  local bad=0 good=0
+  while sleep 60; do
+    if healthy; then good=$((good + 1)); bad=0; else bad=$((bad + 1)); good=0; fi
+    if [ "$bad" -ge 3 ] && [ ! -e "$DATA/PAUSED.guard" ]; then
+      touch "$DATA/PAUSED.guard"; ours running | xargs -r "${P[@]}" pause >/dev/null; log "GitLab unhealthy: paused"
+    elif [ "$good" -ge 5 ] && [ -e "$DATA/PAUSED.guard" ]; then
+      rm -f "$DATA/PAUSED.guard"; [ -e "$DATA/PAUSED" ] || ours paused | xargs -r "${P[@]}" unpause >/dev/null
+      log "GitLab healthy again: resumed"
+    fi
+  done
+}
+
+case "${1:-}" in
+  start)
+    shift
+    "${P[@]}" image exists "$IMAGE:current" || "$0" build
+    pgrep -f "panther _guard" >/dev/null || setsid nohup "$0" _guard >/dev/null 2>&1 < /dev/null &
+    pgrep -f "panther _status" >/dev/null || setsid nohup "$0" _status >/dev/null 2>&1 < /dev/null &
+    for c in "$@"; do
+      m="$(model "$c")"; b="${c#*@}"
+      [ -n "$m" ] && [[ "$b" =~ ^[0-9]+$ ]] || { echo "unknown contest '$c' (write it like 7b@3)"; continue; }
+      if pgrep -f "panther _contest ${c%@*} $b $m\$" >/dev/null; then echo "$c is already running"; continue; fi
+      setsid nohup "$0" _contest "${c%@*}" "$b" "$m" >/dev/null 2>&1 < /dev/null &
+      echo "started $c ($m at $b GiB)"
+    done ;;
+  pause) touch "$DATA/PAUSED"; ours running | xargs -r "${P[@]}" pause >/dev/null; log "paused by the user" ;;
+  resume) rm -f "$DATA/PAUSED"; ours paused | xargs -r "${P[@]}" unpause >/dev/null; log "resumed by the user" ;;
+  stop)
+    pat="panther _contest ${2:+${2%@*} ${2#*@} }"
+    pkill -f "$pat" ; sleep 1
+    ours running | grep "${2:+panther-${2%@*}-b${2#*@}-}" | xargs -r "${P[@]}" stop -t 30 >/dev/null
+    log "stopped ${2:-every contest}" ;;
+  status)
+    "${P[@]}" ps --format '{{.Names}}\t{{.Status}}' | grep '^panther-'
+    nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader
+    df -h "$DATA" | tail -1; tail -5 "$LOG" 2>/dev/null
+    echo "live page: https://huggingface.co/${PANTHER_HF_REPO%%/*}/panther-status" ;;
+  build)
+    tag="$({ cat "$W/repo/deploy/server/Containerfile" "$W/repo/pyproject.toml" "$W/repo/uv.lock"
+             grep -A3 '^llama_cpp:' "$W/repo/configs/models.yaml"; } | sha256sum | cut -c1-12)"
+    "${P[@]}" image exists "$IMAGE:$tag" || "${P[@]}" build --memory "$MEM" -t "$IMAGE:$tag" \
+      --build-arg "LLAMA_COMMIT=$(awk '/^llama_cpp:/{f=1} f&&/commit:/{print $2; exit}' "$W/repo/configs/models.yaml")" \
+      --build-arg "JOBS=$CPUS" -f "$W/repo/deploy/server/Containerfile" "$W/repo"
+    "${P[@]}" tag "$IMAGE:$tag" "$IMAGE:current" ;;
+  _contest) contest "$2" "$3" "$4" ;;
+  exec) shift; job gpu "exec-$$" "$@" ;;
+  _guard) guard ;;
+  _status) job cpu status /opt/venv/bin/python scripts/server/status.py ;;
+  *) sed -n 2,10p "$0" ;;
+esac

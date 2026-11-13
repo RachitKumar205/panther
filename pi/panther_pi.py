@@ -1,7 +1,8 @@
-"""Raspberry Pi 5 check of a winner's bundle: checksum, then llama-server at the full context with an 8-bit KV
-cache; one 256-token prompt and 64 generated tokens; real peak RAM against the prediction. Standard library only.
+"""The Pi's one command: wait for our winners on Hugging Face, download each, check it, post the result to the
+live page, delete the model file (the SD card holds one at a time). The check: checksum, llama-server at the full
+context with an 8-bit KV cache, a 256-token prompt and 64 generated tokens, real peak RAM against the prediction.
 
-  python3 pi/panther_pi.py run --bundle ~/panther-pi/budget-5-14b-v2
+  nohup python3 pi/panther_pi.py <hf user> 7b@3 14b@5 > ~/panther-pi/pi.log 2>&1 &
 """
 
 from __future__ import annotations
@@ -32,8 +33,7 @@ def throttled() -> str:
         return "unknown"
 
 
-def main() -> int:
-    d = Path(sys.argv[sys.argv.index("--bundle") + 1]).expanduser()
+def check(d: Path) -> str:
     m = json.loads((d / "manifest.json").read_text())
     if "files" in m:  # bundles of the first methods
         f = m["recommended_file"]
@@ -73,7 +73,28 @@ def main() -> int:
     (d / "results").mkdir(exist_ok=True)
     with open(d / "results/queue.log", "a") as f:
         f.write(line + "\n")
-    print(line)
+    return line
+
+
+def main() -> int:
+    user, todo = sys.argv[1], sys.argv[2:]
+    hf = str(Path.home() / "hf-venv/bin/hf")
+    while todo:
+        for c in list(todo):
+            size, b = c.split("@")
+            d = Path.home() / f"panther-pi/budget-{b}-{size}-v2"
+            if subprocess.run([hf, "download", f"{user}/panther-{size}-{b}g-v2", "--local-dir", str(d), "--quiet"],
+                              capture_output=True).returncode or not list(d.glob("*.gguf")):
+                continue
+            (d / "pi-result.txt").write_text(check(d) + "\n")
+            print(c, (d / "pi-result.txt").read_text(), flush=True)
+            subprocess.run([hf, "upload", f"{user}/panther-status", str(d / "pi-result.txt"), f"pi/{c}.txt"],
+                           capture_output=True)
+            for f in d.glob("*.gguf"):
+                f.unlink()
+            todo.remove(c)
+        if todo:
+            time.sleep(300)
     return 0
 
 

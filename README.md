@@ -112,9 +112,10 @@ KL from the original on the selection text (lower is better):
 | IQ2_XXS / IQ1_M | 2.06 / 1.75 | 0.562 / 0.980 | | |
 | MXFP4 / TQ2_0 | 4.25 / 2.06 | 0.235 / 13.2 | | do not work for normal models |
 
-Decision: the search may use both K and IQ types (K types are faster on the Pi and gain most from the rounding; IQ
-types are still better per bit around 2 bits), all built with error-compensated rounding; MXFP4, TQ and the legacy
-Q4_0/Q5_0 are out. At about 2 bits the gain is small because errors are compensated between blocks of 256 weights,
+Decision: every matrix may take any of the 14 K and IQ types from IQ1_S (1.56 bits) to Q8_0 (8.5 bits), all built
+with error-compensated rounding; nothing else is restricted, so the search is as heterogeneous as the budget allows
+(the only exception is llama.cpp's own: types that need importance-matrix data cannot be used for the word table,
+which has none). MXFP4, TQ and the legacy Q4_0/Q5_0 are out: they lost to K types at the same size or do not work. At about 2 bits the gain is small because errors are compensated between blocks of 256 weights,
 not inside them; learned rounding (GSQ) is the known fix if needed.
 
 ### 4. Measuring quality
@@ -142,8 +143,9 @@ Once per model:
 
 1. **fetch**: download the original at a pinned revision.
 2. **store**: convert it to a 16-bit **GGUF** (llama.cpp's file format), compute the importance matrix, and quantize
-   the *whole* model once into every type the budget can use (**type copies**), each matrix with error-compensated
-   rounding. Building any candidate later is picking each matrix from the right copy, which takes seconds.
+   the *whole* model once into every one of the 14 types (**type copies**), each matrix with error-compensated
+   rounding. Building any candidate later is picking each matrix from the right copy, which takes seconds. The copies
+   of a large model take a lot of disk (32B: about 200 GB); the step waits for free disk and the page says so.
 3. **error**: the **offline error** of every matrix in every type (importance-weighted squared error), a cheap guess
    the search uses to repair and to fit its model.
 4. **refs**: the original's reference outputs: next-word probabilities on the selection text and on its own answers,
@@ -167,10 +169,12 @@ The search (**genetic algorithm**, GA):
 
 The end:
 
-7. **final**: the top 3 scored on all 4,500 selection questions; the lowest score wins. (Next: **distillation** of
-   the 3 finalists first: the original is the teacher, each finalist learns to match its next-word probabilities on
-   the original's own answers, adjusting only the per-block scales and the norm weights; the whole numbers stay
-   frozen, so file size and speed stay the same; a few GPU hours each.) **Guard**: the winner must not be less
+7. **final**: **distillation** of the top 3 (`src/panther/distill.py`): the original is the teacher, each finalist
+   the student. Every K and IQ type stores one scale per block of 256 weights, and a block's values are proportional
+   to it; distillation learns one multiplier per block (and the norm weights) so that the student's next-word
+   probabilities match the teacher's top 64 on the original's own answers and the calibration text (300 steps). The
+   whole numbers stay frozen: same file size, same speed. The new scales are written back into the GGUF. Then the 3
+   are scored on all 4,500 selection questions; the lowest score wins. **Guard**: the winner must not be less
    accurate than the real preset file on those questions. Then winner and preset on the held-out test; a **paired
    bootstrap** (resampling the same questions for both) gives the difference with a **95 % interval**: **WIN** if the
    whole interval is above 0, **LOSE** if below, **TIE** otherwise.
@@ -181,20 +185,27 @@ The end:
 |---|---|---|
 | Type copies | llama.cpp's plain rounding | error-compensated rounding |
 | Search score | accuracy − 10 × KL on benchmark text | flips + 10 × drift on the original's own answers |
-| After the search | nothing | distillation of the top 3 (next) |
+| After the search | nothing | distillation of the top 3 |
 | Search itself | GA + solver | unchanged |
 
 ## Run it
 
-On the server ([deploy/server](deploy/server/README.md)):
+One command, from your machine (it syncs the code to the server and runs there; see
+[deploy/server](deploy/server/README.md) for the one-time setup):
 
 ```bash
-setsid nohup deploy/server/run.sh -j 2 "3 Qwen2.5-7B-Instruct" "5 Qwen2.5-14B-Instruct" >/dev/null 2>&1 &
+./panther start 1.5b@1 7b@3 7b@5 14b@5   # queue contests: model size @ RAM budget (GiB); 3 run at once, in order
+./panther pause                          # pause everything; ./panther resume continues
+./panther stop 7b@5                      # stop one contest (or all: ./panther stop); start it again to continue
+./panther status                         # what runs, GPU, disk; the live page has everything else
+./panther test                           # the tests, on your machine
 ```
 
-On the Pi ([pi](pi/README.md)): `nohup bash pi/await.sh <hf-user> 5:14b 7:24b > ~/panther-pi/await.log 2>&1 &`
+Every event (queued, started, each step, the search's progress, every result, pauses, failures) goes to the live
+page. Every step skips work already done, so nothing is lost by stopping. GitLab, which shares the server, is
+checked every minute; if it becomes unhealthy everything pauses until it recovers.
 
-Tests: `uv sync && uv run pytest`
+On the Pi ([pi](pi/README.md)): `nohup python3 pi/panther_pi.py <hf-user> 7b@3 14b@5 > ~/panther-pi/pi.log 2>&1 &`
 
 ## Layout
 

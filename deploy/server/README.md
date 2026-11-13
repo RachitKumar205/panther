@@ -5,20 +5,18 @@ How Panther runs on the shared server (RHEL 10, SELinux enforcing, RTX PRO 6000 
 
 ## Running contests
 
-```bash
-setsid nohup deploy/server/run.sh -j 2 "3 Qwen2.5-7B-Instruct" "5 Qwen2.5-14B-Instruct" >/dev/null 2>&1 &
-```
-
-`run.sh` is the one entrypoint: it runs its contests, up to `-j` at once: fetch (CPU job), every pipeline
-step (one GPU job), upload (CPU job). Steps skip finished work, so a stopped contest is simply started again. When
-a model has no later or running contest, its type copies are deleted (the original, importance matrix and presets
-stay). Log: `data/logs/run.log`; progress: `data/logs/progress-b<B>.log` and the status page.
+Everything goes through `./panther` at the repo root (see the project README): from your machine it syncs the code
+here and runs the same command. Contests wait for one of 3 slots (`PANTHER_SLOTS`) and run in the order given;
+each is a CPU job (download), one GPU job (every pipeline step), a CPU job (upload for the Pi). GPU memory is shared
+through a booking ledger (`data/locks/gpu.json`). When a contest ends, its model's type copies are deleted unless
+another contest is using them. `./panther start` also starts the status page and the GitLab guard (3 bad checks →
+everything paused; 5 good → resumed). Log: `data/logs/panther.log` (also on the page).
 
 ## Site settings
 
 Host, account and health-check URL are not in the repository. Copy `local.env.example` to `local.env`
-(git-ignored) next to it and fill it in; `push.sh` reads it on your machine, and
-`push.sh` copies it to the server, where `panther.sh`, `host-setup.sh` and `uninstall.sh` read it.
+(git-ignored) next to it and fill it in; `./panther` reads it on your machine, and
+it is synced to the server, where `./panther`, `host-setup.sh` and `uninstall.sh` read it.
 Below, `svcuser` stands for that account and "the server" for that host.
 
 ## Principles
@@ -26,7 +24,7 @@ Below, `svcuser` stands for that account and "the server" for that host.
 - **Nothing installed on the host.** All tools run in one rootless Podman image.
 - **Three host changes in total**, made once by an admin as root, each logged with its undo.
 - **Removable.** `uninstall.sh` restores the host exactly, from the ledger.
-- **GitLab first.** Jobs are capped, deprioritised, refuse to start if GitLab isn't healthy, and `guard.sh` pauses
+- **GitLab first.** Jobs are capped, deprioritised, refuse to start if GitLab isn't healthy, and the guard in `./panther` pauses
   them if it degrades.
 
 ## Layout on the host
@@ -35,7 +33,7 @@ Below, `svcuser` stands for that account and "the server" for that host.
 /s3/panther/                       root, 755
 ├── HOST_CHANGES.tsv               ledger: timestamp <TAB> undo command, one line per host change
 └── work/                          svcuser, 750
-    ├── repo/                      code, synced from the Mac by push.sh (mounted read-only in containers)
+    ├── repo/                      code, synced from your machine by ./panther (mounted read-only in containers)
     ├── data/                      everything produced (mounted read-write): hf/, splits/, store/, logs/, cache/
     ├── containers/storage/        Panther's own Podman image/container storage (SELinux: container_var_lib_t)
     └── tmp/                       build temp (keeps image layers off /var)
@@ -85,23 +83,12 @@ Both: rootless with `--userns keep-id` (files owned by svcuser), all capabilitie
 
 No container ever has both the GPU and a network. Anything needing the network runs first as a CPU job.
 
-## Commands (as svcuser on the server)
+## Commands
 
-```bash
-cd /s3/panther/work/repo
-deploy/server/panther.sh build        # build the image (no-op if this exact image exists)
-deploy/server/panther.sh job NAME CMD...      # CPU job, detached; log in work/data/logs/NAME.log
-deploy/server/panther.sh gpujob NAME CMD...   # GPU job, detached
-deploy/server/panther.sh status       # jobs, GPU, memory, GitLab
-deploy/server/panther.sh logs NAME | stop NAME | wait NAME | clean
-```
-
-From the Mac: `deploy/server/push.sh` syncs code (not data) to `work/repo` over the open SSH control master. Never
-poll the server in an unguarded loop or let SSH fall back to a password login: its sshd blocks an address after
-repeated failed logins, which also locks out the hardware key login.
-
-Resource caps: `PANTHER_CPUS`, `PANTHER_MEM`. Don't run large jobs while the LLM stack (`llm-llama`,
-88 GB) is running; together they exceed RAM.
+`./panther start | pause | resume | stop | status | build | exec` (`./panther` alone prints the help). The SSH
+connection from your machine must be open (a control master, opened once with your hardware key). Never poll the
+server in an unguarded loop or let SSH fall back to a password login: its sshd blocks an address after repeated
+failed logins. Resource caps: `PANTHER_CPUS`, `PANTHER_MEM`.
 
 ## Removing everything
 

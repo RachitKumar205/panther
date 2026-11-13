@@ -69,11 +69,9 @@ class Model:
     def avg_bpw(self, budget: float) -> float:
         return 8 * (budget * GIB - self.runtime() - self.fixed) / sum(m.rows * m.cols for m in self.matrices)
 
-    def menu(self, budget: float) -> list[str]:
-        """Types from 1.5 bits/weight below the budget's average to 2.5 above, low to high."""
-        avg = self.avg_bpw(budget)
-        return sorted((t for t in CFG["formats"] if avg - 1.5 <= bpw(t) <= avg + 2.5), key=bpw)
-
-    def allowed(self, budget: float) -> dict[str, list[str]]:
-        menu, need = self.menu(budget), set(CFG["requires_imatrix"])
-        return {m.name: [t for t in menu if not (m.name in self.no_imatrix and t in need)] for m in self.matrices}
+    def allowed(self) -> dict[str, list[str]]:
+        """Every type for every matrix, low to high, except types llama.cpp refuses without importance-matrix data
+        (the word table has none; the output layer only if collected with --process-output)."""
+        need = set(CFG["requires_imatrix"])
+        return {m.name: sorted((t for t in CFG["formats"] if not (m.name in self.no_imatrix and t in need)), key=bpw)
+                for m in self.matrices}

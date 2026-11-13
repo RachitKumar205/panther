@@ -31,15 +31,15 @@ def test_ram_model():
     assert len(m.matrices) == 2 + 7 * m.layers  # untied: embedding and head
     a = {x.name: "Q4_K" for x in m.matrices}
     assert 4 * GIB < m.ram(a) < 6 * GIB
-    assert bpw("Q4_K") == 4.5 and m.menu(5)[0] in m.allowed(5)["blk.0.attn_q.weight"]
-    assert all(t not in m.allowed(5)["token_embd.weight"] for t in ("IQ1_S", "IQ2_XS"))
+    assert bpw("Q4_K") == 4.5 and len(m.allowed()["blk.0.attn_q.weight"]) == 14
+    assert all(t not in m.allowed()["token_embd.weight"] for t in ("IQ1_S", "IQ2_XS"))
 
 
 @pytest.fixture
 def genes(tmp_path, monkeypatch):
     monkeypatch.setattr(p, "RW", tmp_path)
     m = Model(MODEL)
-    err = {x.name: {t: (x.rows * x.cols) / bpw(t) ** 2 for t in m.allowed(5)[x.name]} for x in m.matrices}
+    err = {x.name: {t: (x.rows * x.cols) / bpw(t) ** 2 for t in m.allowed()[x.name]} for x in m.matrices}
     (tmp_path / MODEL).mkdir()
     (tmp_path / MODEL / "error.json").write_text(json.dumps(err))
     return p.Genes(MODEL, 5)

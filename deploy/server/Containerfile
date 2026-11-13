@@ -1,6 +1,6 @@
 # Panther toolchain image: llama.cpp (CPU and CUDA builds at the pinned commit) plus the Python
 # environments. Everything Panther runs on the server runs inside this image; nothing is installed on the host.
-# Built by deploy/server/panther.sh build (rootless Podman). Base images are pinned by digest.
+# Built by ./panther build (rootless Podman). Base images are pinned by digest.
 
 ARG CUDA_IMAGE=docker.io/nvidia/cuda:12.9.1-devel-ubi9@sha256:2fc858685440ab84976792a1a2e0bd3065c3ed3b2b8208240be5b70e161935a3
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.9.5@sha256:f459f6f73a8c4ef5d69f4e6fbbdb8af751d6fa40ec34b39a1ab469acd6e289b7

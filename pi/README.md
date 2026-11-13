@@ -6,8 +6,6 @@ prediction, and speed.
 | File | What |
 |---|---|
 | `setup.sh` | Builds llama.cpp at the pinned commit (after `sudo apt-get install -y git cmake build-essential python3`) |
-| `await.sh` | Waits for each winner's Hugging Face repo, downloads it, checks it, uploads the result line to the status page, deletes the model file |
-| `panther_pi.py` | The check: checksum, llama-server at 4,096 tokens with an 8-bit KV cache, 256-token prompt + 64 generated, peak RAM |
-| `lean.sh` | Stops services the check does not need, for RAM (a reboot restores them) |
+| `panther_pi.py` | The Pi's one command: waits for each winner's Hugging Face repo, downloads it, checks it (checksum; llama-server at 4,096 tokens with an 8-bit KV cache; a 256-token prompt and 64 generated tokens; peak RAM), posts the result line to the live page, deletes the model file |
 
-`nohup bash pi/await.sh <hf-user> 5:14b 7:24b > ~/panther-pi/await.log 2>&1 &`
+`nohup python3 pi/panther_pi.py <hf-user> 7b@3 14b@5 > ~/panther-pi/pi.log 2>&1 &`

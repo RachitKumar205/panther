@@ -109,7 +109,7 @@ def gpu(nbytes: int, hold_s: int = 3600):
 def fetch(model: str) -> None:
     """The weights, unless the store already has everything this budget needs (rounding reads them)."""
     hf, done = DATA / "hf" / model, STORE / model / "rounded.json"
-    if (hf / "config.json").exists() or (done.exists() and set(Model(model).menu(BUDGET)) <= set(
+    if (hf / "config.json").exists() or (done.exists() and set(CFG["formats"]) <= set(
             json.loads(done.read_text()))):
         return
     m = MODELS[model]
@@ -132,9 +132,12 @@ def store(model: str) -> None:
                         "-o", f"{imat}.part.gguf", "-c", "512", "-ngl", "99", "-t", str(THREADS)] + po, check=True)
         os.rename(f"{imat}.part.gguf", imat)
     M = Model(model)
-    for t in M.menu(BUDGET):
+    al, n = M.allowed(), sum(m.rows * m.cols for m in M.matrices)
+    for t in CFG["formats"]:
+        while not copy_of(model, t).exists() and shutil.disk_usage(DATA).free < n * bpw(t) / 8 + 30 * GIB:
+            note(f"{short(model)} store: waiting for {n * bpw(t) / 8 / GIB + 30:.0f} GB of free disk for the {t} copy")
+            time.sleep(600)
         if not copy_of(model, t).exists():  # embedding / head take Q8_0 where the type needs imatrix data they lack
-            al = M.allowed(BUDGET)
             emb, head = ((t if t in al.get(n, al["token_embd.weight"]) else "Q8_0").lower()
                          for n in ("token_embd.weight", "output.weight"))
             part = f"{copy_of(model, t)}.part"
@@ -144,7 +147,7 @@ def store(model: str) -> None:
             os.rename(part, copy_of(model, t))
     done = d / "rounded.json"  # types whose copy has error-compensated codes (panther.rounding)
     have = json.loads(done.read_text()) if done.exists() else []
-    if todo := [t for t in M.menu(BUDGET) if t not in have]:
+    if todo := [t for t in CFG["formats"] if t not in have]:
         from panther.rounding import round_copies
         h, i = M.matrices[2].cols, max(x.cols for x in M.matrices)
         per_layer = 4 * (3 * h * h + i * i)  # bytes of the four input Hessians of one layer
@@ -181,7 +184,7 @@ def error(model: str) -> None:
     imat = {k: np.asarray(v.data, dtype=np.float64).reshape(-1) for k, v in
             tensors(STORE / model / f"{model}.imatrix.gguf").items()}
     jobs = []
-    for name, types in Model(model).allowed(BUDGET).items():
+    for name, types in Model(model).allowed().items():
         if todo := [t for t in types if t not in done.get(name, {})]:
             cnt = max(float(imat.get(f"{name}.counts", np.ones(1))[0]), 1.0)
             jobs.append((model, name, todo, imat.get(f"{name}.in_sum2", np.ones(1 << 16)) / cnt))
@@ -299,7 +302,7 @@ class Genes:
 
     def __init__(self, model: str, budget: int, seed: int = 0) -> None:
         M, self.rng, self.model = Model(model), random.Random(seed), model
-        self.steps = {k: sorted(v, key=bpw) for k, v in M.allowed(budget).items()}
+        self.steps = M.allowed()
         self.mats = {m.name: m for m in M.matrices}
         self.bytes = {g: {t: self.mats[g].nbytes(t) for t in ts} for g, ts in self.steps.items()}
         err = json.loads(out(model, "error.json").read_text())
@@ -500,42 +503,51 @@ def preset(model: str) -> None:
 
 
 def final(model: str) -> int:
-    """The GA's top 3 on all selection questions; the winner has the lowest score. Guard: not less accurate than
-    the preset there. Then both on the held-out test, compared question by question."""
-    sm, wf = short(model), out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json")
+    """The GA's top 3, each distilled (the original as teacher), scored on all selection questions: the lowest
+    score wins. Guard: not less accurate than the preset there. Then both on the held-out test, question by question."""
+    from panther.distill import distill
+    sm, bf16 = short(model), copy_of(model, "BF16")
     items = json.loads(out(f"budget-{BUDGET}", f"list-{model}{SUFFIX}.json").read_text())
-    rows = {k: score(model, it["assignment"], f"v2:{digest(it['assignment'])}", full=True) for k, it in items.items()}
-    for k, r in rows.items():
-        note(f"{sm} final {k}: score {r['score']:.2f} (flips {r['flips']:.2f}%, KL {r['kl']:.4f}, accuracy "
-             f"{r['accuracy']:.2f}) on all selection questions")
+    files, rows = {}, {}
+    for k, it in items.items():
+        files[k] = out(model, "tuned", f"{BUDGET}-{digest(it['assignment'])}.gguf")
+        if not files[k].exists():
+            src = build(model, it["assignment"])
+            try:
+                with gpu(2 * bf16.stat().st_size + 30 * GIB, 6 * 3600):
+                    distill(src, bf16, [DATA / "splits/text" / f"answers-{model}.txt", DATA / "splits/calibration.txt"],
+                            files[k], lambda m, k=k: note(f"{sm} {k} {m}"))
+            except Exception as e:  # noqa: BLE001  (e.g. an architecture transformers cannot load from GGUF)
+                note(f"{sm} {k}: distillation not possible ({type(e).__name__}: {e}); scored as built")
+                shutil.copy(src, files[k])
+            finally:
+                src.unlink(missing_ok=True)
+        rows[k] = score(model, None, f"v2t:{digest(it['assignment'])}", path=files[k], full=True)
+        note(f"{sm} final {k}: score {rows[k]['score']:.2f} (flips {rows[k]['flips']:.2f}%, KL {rows[k]['kl']:.4f}, "
+             f"accuracy {rows[k]['accuracy']:.2f}) on all selection questions, after distillation")
     win = min(rows, key=lambda k: rows[k]["score"])
-    p = json.loads(out(f"budget-{BUDGET}", f"preset-{model}.json").read_text())["preset"]
+    label, p = f"v2t:{digest(items[win]['assignment'])}", json.loads(out(f"budget-{BUDGET}", f"preset-{model}.json")
+                                                                      .read_text())["preset"]
     score(model, None, f"preset:{p}", path=STORE / model / f"preset-{p}.gguf", full=True)
-    d, lo, hi = stats.compare(correct(model, f"v2:{digest(items[win]['assignment'])}"), correct(model, f"preset:{p}"))
+    d, lo, hi = stats.compare(correct(model, label), correct(model, f"preset:{p}"))
     note(f"{sm} guard: {win} vs preset {p} on all selection questions: {d:+.2f} pts [{lo:+.2f}, {hi:+.2f}]")
     if hi < 0:
         note(f"{sm} guard: WORSE than the preset; not taken as our result")
         return 2
-    a = items[win]["assignment"]
-    path = build(model, a)
-    try:
-        with gpu(path.stat().st_size + 12 * GIB, 4 * 3600):
-            ours = test(model, path, f"v2:{digest(a)}")
-    finally:
-        path.unlink(missing_ok=True)
-    theirs = test(model, STORE / model / f"preset-{p}.gguf", f"preset:{p}")
-    orig = test(model, copy_of(model, "BF16"), "original")
+    with gpu(files[win].stat().st_size + 12 * GIB, 4 * 3600):
+        ours = test(model, files[win], label)
+        theirs, orig = test(model, STORE / model / f"preset-{p}.gguf", f"preset:{p}"), test(model, bf16, "original")
     d, lo, hi = stats.compare(ours["correct"], theirs["correct"])
-    res = {"winner": win, "assignment": a, "ram_gib": items[win]["ram_gib"], "preset": p, "diff": d, "ci": [lo, hi],
-           "verdict": stats.verdict(lo, hi), "selection": rows[win]}
+    res = {"winner": win, "file": str(files[win]), "assignment": items[win]["assignment"], "ram_gib":
+           items[win]["ram_gib"], "preset": p, "diff": d, "ci": [lo, hi], "verdict": stats.verdict(lo, hi)}
     for k, r in (("ours", ours), ("preset_test", theirs), ("original", orig)):
         res[k] = {"accuracy": stats.acc(r["correct"]), "kl": r["kl"], "ppl": r["ppl"],
                   "flips": stats.flips(r["correct"], orig["correct"]),
                   "per_task": {t: 100 * float(np.mean(v)) for t, v in r["correct"].items()}}
-    wf.write_text(json.dumps(res, indent=1))
-    note(f"{sm} held-out test vs preset {p}: {res['ours']['accuracy']:.2f} vs {res['preset_test']['accuracy']:.2f} | "
-         f"our winner {d:+.2f} pts [{lo:+.2f}, {hi:+.2f}] {res['verdict']}, flips {res['ours']['flips']:.2f} vs "
-         f"{res['preset_test']['flips']:.2f}%")
+    out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").write_text(json.dumps(res, indent=1))
+    note(f"{sm} held-out test vs preset {p}: {res['ours']['accuracy']:.2f} vs {res['preset_test']['accuracy']:.2f} "
+         f"(original {res['original']['accuracy']:.2f}) | our winner {d:+.2f} pts [{lo:+.2f}, {hi:+.2f}] "
+         f"{res['verdict']}, flips {res['ours']['flips']:.2f} vs {res['preset_test']['flips']:.2f}%")
     return 0
 
 
@@ -546,7 +558,7 @@ def bundle(model: str) -> None:
     d = DATA / "pi_bundle" / f"budget-{BUDGET}-{short(model).lower()}{SUFFIX}"
     d.mkdir(parents=True, exist_ok=True)
     f = d / f"{model.lower()}-b{BUDGET}{SUFFIX}.gguf"
-    build(model, w["assignment"], f)
+    shutil.copy(w["file"], f)
     h = sha256()
     with open(f, "rb") as fh:
         while c := fh.read(1 << 24):

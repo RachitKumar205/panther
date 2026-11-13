@@ -1,12 +1,11 @@
 """The live status page: data/status.md every 30 s, published as README.md of <user>/panther-status on Hugging Face
 every 60 s. Read from the progress logs and result files only. Runs as a CPU job:
 
-  deploy/server/panther.sh job status /opt/venv/bin/python scripts/server/status.py
+  started by ./panther start
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
@@ -17,8 +16,9 @@ STEPS = ["store", "error", "refs", "preset", "ga", "final", "bundle"]
 WHAT = {"store": "16-bit original, importance matrix, the model in every type", "error": "offline error per matrix",
         "refs": "the original's answers and reference outputs", "preset": "llama.cpp's preset (competitor), tested",
         "ga": "genetic search (score: flips + KL on the original's answers)",
-        "final": "top 3 on all selection questions, guard, held-out test vs preset", "bundle": "file for the Pi"}
-MINUTES = {"store": 1.5, "error": 0.1, "refs": 3, "preset": 4, "ga": 10, "final": 8, "bundle": 0.3}  # x size in B
+        "final": "top 3 distilled and scored on all selection questions, guard, held-out test vs preset",
+        "bundle": "file for the Pi"}
+MINUTES = {"store": 5, "error": 0.2, "refs": 3, "preset": 4, "ga": 10, "final": 14, "bundle": 0.3}  # x size in B
 PI: dict[str, str] = {}
 
 
@@ -81,6 +81,15 @@ def render() -> str:
             "held-out questions. WIN / LOSE: the 95% interval of the accuracy difference is all above / below 0.", "",
             "## Verdicts", "", "| contest | verdict | ours - preset, points [95% interval] | flips ours / preset |",
             "|---|---|---|---|"]
+    log = (DATA / "logs/panther.log").read_text().splitlines() if (DATA / "logs/panther.log").exists() else []
+    state = {}
+    for x in log:
+        if m := re.match(r"\d\d:\d\d (\S+): (.*)", x):
+            state[m.group(1)] = m.group(2)
+    paused = [f"**PAUSED** ({w})" for f, w in (("PAUSED", "by the user"), ("PAUSED.guard", "GitLab unhealthy"))
+              if (DATA / f).exists()]
+    head[4:4] = paused + ([""] if paused else []) + ["## Contests", ""] + [f"- {k}: {v}" for k, v in state.items()] + \
+        ["", "Recent events:", "", *[f"    {x}" for x in log[-10:]], ""]
     body = []
     for b, sm, ls in lanes():
         v = next((x for x in reversed(ls) if "our winner" in x), None)
