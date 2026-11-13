@@ -51,6 +51,27 @@ def started_at() -> dict[str, float]:
     return t
 
 
+STALE_H = 2  # a "running" job with no log line for this long was stopped (its container is gone)
+
+
+def quiet(step: str, ga_ts: list[float], now: float) -> bool:
+    log = LOGS / f"{step}.log"
+    newest = max([log.stat().st_mtime if log.exists() else 0.0, *ga_ts])
+    return now - newest > STALE_H * 3600
+
+
+def no_preset() -> set[tuple[int, str]]:
+    """Contests dropped because no llama.cpp preset fits the budget (preset step wrote {"preset": null})."""
+    out = set()
+    for f in (DATA / "rewrite").glob("budget-*/preset-*.json"):
+        try:
+            if json.loads(f.read_text()).get("preset") is None:
+                out.add((int(f.parent.name.split("-")[1]), f.stem[len("preset-"):]))
+        except Exception:  # noqa: BLE001  (being written)
+            pass
+    return out
+
+
 def kind(step: str) -> str:
     name = step.split("-")[1] if step.count("-") >= 2 else step
     return "gascore" if name.startswith("gascore") else "vspreset" if name.startswith("vspreset") else re.sub(r"\d.*$", "", name)
@@ -233,8 +254,13 @@ def render() -> str:
     summary = ["## Verdict per contest", "",
                "| Contest | Verdict | Accuracy difference vs preset [95% interval] | Measured on |", "|---|---|---|---|"]
     body: list[str] = []
+    dropped = no_preset()
+    for B, model in sorted(dropped):
+        summary.append(f"| {model} @ {B} GiB | dropped | | no llama.cpp preset fits this budget: nothing to compete with |")
     for L in lanes:
         size, B, short = SIZE.get(L["short"], 7), L["budget"], L["short"].upper()
+        if (B, L["model"]) in dropped:
+            continue
         prog = LOGS / f"progress-b{B}.log"
         pl = [ln for ln in prog.read_text().splitlines() if f"{short} " in ln] if prog.exists() else []
         last = lambda key: next((ln for ln in reversed(pl) if key in ln), None)  # noqa: E731
@@ -270,6 +296,7 @@ def render() -> str:
                            f"900 search questions (provisional) |")
         else:
             summary.append(f"| {L['model']} @ {B} GiB | not yet | | |")
+        summary_at = len(summary) - 1
         for s in L["steps"]:
             k, st = kind(s), L["state"].get(s, "waiting")
             ts = ga_times(L["model"], B) if k == "ga" else []
@@ -277,6 +304,8 @@ def render() -> str:
                 st = "done"  # a GA started before its lane got there finished on its own
             elif k == "ga" and st == "waiting" and ts and ts[-1] > now - 900:
                 st = "running"  # a GA started before its lane got there (adopted later)
+            if st == "running" and quiet(s, ts, now):
+                st, L["stopped"] = "stopped", True  # its job was stopped: no log line for STALE_H hours
             typ = typical_min(k, size)
             frac, spent, left, how = 0.0, 0.0, typ, "est."
             if st == "done":
@@ -313,7 +342,7 @@ def render() -> str:
                     left = typ - spent
                     if left < 1:
                         left, how = 5.0, f"taking longer than the usual ~{typ:.0f} min"
-            elif st == "failed":
+            elif st in ("failed", "stopped"):
                 left = 0.0
             if st == "running":  # steps can overlap (a GA adopted while its lane finishes an earlier step)
                 end_t = now + left * 60
@@ -321,12 +350,19 @@ def render() -> str:
             elif st != "done":
                 clock += left * 60
                 end_t = clock
-            end = "done" if st == "done" else f"{dt.datetime.fromtimestamp(end_t, IST):%H:%M}"
-            icon = {"done": "✅", "running": "▶️", "failed": "❌", "waiting": "⏳"}[st]
+            if st == "stopped" or (L["stopped"] and st == "waiting"):
+                st, left = "stopped" if st == "stopped" else "not run", 0.0
+                end = "stopped" if st == "stopped" else "-"
+            else:
+                end = "done" if st == "done" else f"{dt.datetime.fromtimestamp(end_t, IST):%H:%M}"
+            icon = {"done": "✅", "running": "▶️", "failed": "❌", "waiting": "⏳", "stopped": "⏹️", "not run": "–"}[st]
             rows.append(f"| {icon} | **{WHAT.get(k, k)}** | {bar(frac)} | {hm(spent) if spent >= 1 else '<1 min' if s in L['t1'] else '-'} | "
                         f"{'-' if st == 'done' else hm(left) + (' (est.)' if how == 'est.' else '')} | {end} | "
                         f"{'' if how == 'est.' else how} |")
-        finish = "stopped" if L["stopped"] else f"ETA {dt.datetime.fromtimestamp(clock, IST):%H:%M} IST"
+        if L["stopped"] and not v:
+            summary[summary_at] = f"| {L['model']} @ {B} GiB | stopped | | the run was stopped before a result |"
+        all_done = all(r.startswith("| ✅") for r in rows)
+        finish = "stopped" if L["stopped"] else "done" if all_done else f"ETA {dt.datetime.fromtimestamp(clock, IST):%H:%M} IST"
         out = body
         out += [f"## {L['model']} at {B} GiB: {finish}", ""]
         if v:
