@@ -83,7 +83,7 @@ def lock(name: str):
 @contextmanager
 def gpu(nbytes: int, hold_s: int = 3600):
     """Books GPU memory in a shared ledger and waits until it fits in 92 of the GPU's 96 GiB."""
-    ledger, key = DATA / "locks/gpu.json", f"{os.getpid()}-{time.time()}"
+    ledger, key = DATA / "locks/gpu.json", f"{os.uname().nodename}-{os.getpid()}-{time.time()}"
 
     def edit(fn):
         with lock("gpu-ledger"):
@@ -95,12 +95,20 @@ def gpu(nbytes: int, hold_s: int = 3600):
             ledger.write_text(json.dumps(book))
             return ok
     take = lambda b: (sum(v[0] for v in b.values()) + nbytes <= 92 * GIB or not b) and not b.update(  # noqa: E731
-        {key: (nbytes, time.time() + hold_s)})
+        {key: (nbytes, time.time() + 600)})
     while not edit(take):
         time.sleep(random.uniform(3, 8))
+    import threading
+    done = threading.Event()
+
+    def renew():  # a killed job's booking lapses within 10 minutes
+        while not done.wait(120):
+            edit(lambda b: key in b and not b.update({key: (nbytes, time.time() + 600)}) or True)
+    threading.Thread(target=renew, daemon=True).start()
     try:
         yield
     finally:
+        done.set()
         edit(lambda b: b.pop(key, None) or True)
 
 
