@@ -6,6 +6,7 @@ every 60 s. Read from the progress logs and result files only. Runs as a CPU job
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -87,6 +88,46 @@ def lane(b: int, sm: str, ls: list[str]) -> list[str]:
     return lines + ["", "| state | step | spent | left |", "|---|---|---|---|", *rows, ""]
 
 
+def results(b: int, sm: str) -> list[str]:
+    """The finished contest's full table: original, ours, the preset (and the first method's winner)."""
+    f = next(iter((DATA / "rewrite" / f"budget-{b}").glob(f"winner-*-{sm}-*-v2.json")), None)
+    if f is None:
+        return []
+    w, model = json.loads(f.read_text()), f.name[len("winner-"):-len("-v2.json")]
+    old, st = f.with_name(f"winner-{model}-anchored.json"), DATA / "store" / model
+    gb = lambda p: Path(p).stat().st_size / 1e9 if Path(p).exists() else float("nan")  # noqa: E731
+    o, og = w["original"]["accuracy"], gb(st / f"{model}-BF16.gguf")
+    rows = [("Original (16-bit)", w["original"], og), ("**Ours**", w["ours"], gb(w["file"])),
+            (f"llama.cpp preset {w['preset']}", w["preset_test"], gb(st / f"preset-{w['preset']}.gguf"))]
+    if old.exists():
+        r = json.loads(old.read_text())
+        r = r["rows"][r["winner"]]
+        rows.append(("Ours, first method", {"accuracy": r["mean_accuracy_pct"], "kl": r["kl"], "ppl": r["ppl"],
+                                             "flips": None, "per_task": r["per_task_pct"]}, float("nan")))
+    n = lambda x, f=".2f": "–" if x is None or x != x else format(x, f)  # noqa: E731
+    out = [f"### Result: {w['verdict']}, ours − preset {w['diff']:+.2f} points [{w['ci'][0]:+.2f}, {w['ci'][1]:+.2f}]",
+           "", "| held-out test | accuracy | MMLU | HellaSwag | ARC | WinoGrande | GSM8K | points lost vs original | "
+           "% of original kept | KL | perplexity | flips | file GB | % of original size |", "|---" * 14 + "|"]
+    for name, r, size in rows:
+        t = r["per_task"]
+        out.append(f"| {name} | {n(r['accuracy'])} | " + " | ".join(n(t.get(k), ".1f") for k in (
+            "mmlu", "hellaswag", "arc_challenge", "winogrande", "gsm8k")) + f" | {n(o - r['accuracy'])} | "
+            f"{n(100 * r['accuracy'] / o, '.1f')} | {n(r['kl'], '.4f')} | {n(r['ppl'])} | {n(r['flips'], '.1f')} | "
+            f"{n(size)} | {n(100 * size / og, '.1f')} |")
+    p, us = w["preset_test"], w["ours"]
+    types: dict[str, int] = {}
+    for t in w["assignment"].values():
+        types[t] = types.get(t, 0) + 1
+    out += ["", f"- Ours vs the preset: {us['accuracy'] - p['accuracy']:+.2f} points "
+            f"({100 * (us['accuracy'] / p['accuracy'] - 1):+.1f} %); we lose {o - us['accuracy']:.2f} points of the "
+            f"original's accuracy, the preset {o - p['accuracy']:.2f} ({100 * (1 - (o - us['accuracy']) / (o - p['accuracy'])):.0f} % less); "
+            f"KL {100 * (us['kl'] / p['kl'] - 1):+.0f} %; flips {us['flips']:.1f} vs {p['flips']:.1f} %",
+            f"- RAM on the Pi (predicted): ours {w['ram_gib']:.3f} GiB, budget {b} GiB",
+            f"- **Our configuration** ({len(w['assignment'])} matrices): " + ", ".join(
+                f"{t} ×{c}" for t, c in sorted(types.items(), key=lambda x: -x[1])), ""]
+    return out
+
+
 def render() -> str:
     head = [f"# Panther: live progress", "", f"Updated {time.strftime('%d %b %H:%M', time.gmtime(time.time() + 19800))}"
             " IST, every 30 s. Each contest: one model at one RAM budget on the Raspberry Pi 5; our quantization (every"
@@ -121,7 +162,7 @@ def render() -> str:
                         f"{fl.group(1) + ' / ' + fl.group(2) if fl else ''} |")
         else:
             head.append(f"| {sm} @ {b} GiB | running | | |")
-        body += lane(b, sm, ls)
+        body += lane(b, sm, ls)[:2] + results(b, sm) + lane(b, sm, ls)[2:]
     pi = ["## On the Pi (our winners: real peak RAM and speed)", ""] + [f"- {k}: {v}" for k, v in sorted(PI.items())
                                                                         if "@" in k] + ["", "(none yet)" if not any(
         "@" in k for k in PI) else "", ""]
