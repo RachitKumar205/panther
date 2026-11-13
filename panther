@@ -54,6 +54,10 @@ contest() {  # contest SIZE B MODEL. Downloading and building type copies (the d
   local types; types="$(grep '^formats:' "$W/repo/configs/search.yaml" | tr ',' '\n' | wc -l)"
   if [ "$(grep -o '"[A-Z0-9_]*"' "$DATA/store/$3/rounded.json" 2>/dev/null | wc -l)" -ge "$types" ]; then
     log "$id: started (type copies already built)"
+  elif [ "$(ls "$DATA/store/$3/$3"-*.gguf 2>/dev/null | grep -vc BF16)" -ge "$types" ] && [ -f "$DATA/store/$3/$3-BF16.gguf" ] \
+       && { [ -d "$DATA/hf/$3" ] || [[ "$3" != *InternLM* ]]; }; then  # copies on disk: rounding adds no disk, no turn
+    log "$id: started (type copies on disk; rounding them)"
+    job gpu "$id-store" "${R[@]}" store "$2" "$3" || ok=0
   else
     while :; do  # a model without enough disk yet gives the turn back and retries in 10 minutes
       exec {fd}> "$DATA/locks/store-turn"; flock "$fd"
