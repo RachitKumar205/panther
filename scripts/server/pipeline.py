@@ -399,7 +399,7 @@ def preset_layout(model: str, budget: int) -> dict[str, str] | None:
 
 
 def ga(model: str) -> None:
-    """Steady state: as many genomes scored at once as the GPU holds (up to 16, as the GPU ledger allows), a new child whenever one finishes; each round the solver
+    """Steady state: as many genomes scored at once as the GPU holds (up to 16, as GPU memory and the container's RAM allow), a new child whenever one finishes; each round the solver
     adds SOLVED proposals from a fit of every score so far. Stops on a plateau. Writes the TOP best."""
     if (lst := out(f"budget-{BUDGET}", f"list-{model}{SUFFIX}.json")).exists():
         return
@@ -421,7 +421,10 @@ def ga(model: str) -> None:
             if digest(a) not in seen and G.fits(a):
                 return a
         return G.mutate(pop[0][2])
-    inflight = max(INFLIGHT, min(16, int(80 * GIB // (copy_of(model, "Q4_K").stat().st_size + 4 * GIB))))
+    size, mx = copy_of(model, "Q4_K").stat().st_size, Path("/sys/fs/cgroup/memory.max")
+    ram = int(mx.read_text()) if mx.exists() and mx.read_text().strip().isdigit() else 64 * GIB
+    # each llama.cpp run holds ~2.7 x the file in RAM besides the GPU copy: bounded by GPU memory and container RAM
+    inflight = max(1, min(16, int(80 * GIB // (size + 4 * GIB)), int(0.8 * ram // (3 * size + 2 * GIB))))
     with ProcessPoolExecutor(inflight) as ex:
         running = {}
 

@@ -174,7 +174,8 @@ importance_c the mean squared input of column c. Used only to repair genomes and
   quarter), which learns what each group's damage really costs in score. CP-SAT then finds the 4 genomes inside the
   window that minimize **Σ w_g × error(m, t)**, each differing from the others in at least 3 matrices; those 4 and 2
   mutants of them are scored next.
-- **Steady state**: up to min(16, 80 GiB ÷ (Q4_K copy + 4 GiB)) genomes scored at once (1.5B: 16, 7B: 9, 14B: 6),
+- **Steady state**: as many genomes at once as both GPU memory and the container's RAM allow (each llama.cpp run
+  also holds about 2.7 × its file in RAM; 1.5B: ~11, 7B: 3, 14B: 2),
   as the GPU allows next to the other contests. Each is built from the type copies in seconds, books GPU memory
   (file × 1.1 + 4 GiB), is scored, then deleted. The best 16 are kept.
 - **Stop**: after at least 30 genomes, once 15 in a row improve the best by less than 0.2; at most 70. The 3 lowest
