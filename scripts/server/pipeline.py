@@ -398,10 +398,13 @@ def base_file(model: str) -> Path:
     """The sensitivity base, assembled once per model and kept for the whole sweep."""
     a = start_assignment(model)
     path = out(model, f"base-{start_tag(model)}.gguf")
-    if not path.exists():
-        part = path.with_suffix(".part")
+    if not path.exists():  # several workers may build it at once: each writes its own part, the first rename wins
+        part = path.with_suffix(f".{os.getpid()}.part")
         assemble(inv_of(model), a, store(model), part, base_format=base_format(model))
-        part.rename(path)
+        if path.exists():
+            part.unlink()
+        else:
+            part.rename(path)
     return path
 
 
