@@ -3,16 +3,16 @@
 How Panther runs on the shared server (RHEL 10, SELinux enforcing, RTX PRO 6000 Blackwell 96 GB, EPYC 9224 24C/48T,
 124 GB RAM), which also hosts production GitLab.
 
-## Running a budget
+## Running contests
 
 ```bash
-deploy/server/run-budget.sh 7                                            # every searched model of the 7 GiB budget
-deploy/server/run-budget.sh 7 Qwen2.5-14B-Instruct Mistral-24B-Instruct    # only these
+setsid nohup deploy/server/run.sh "5 Qwen2.5-14B-Instruct" "7 Mistral-24B-Instruct" >/dev/null 2>&1 &
 ```
 
-One lane per model (`chain.sh`: one step after another, each a container job; a step whose job already exited 0 is
-skipped and a running one adopted, so a lane can be restarted at any time). The steps are in
-[scripts/server](../../scripts/server/README.md). Progress: `data/logs/progress-b<B>.log` and the status page.
+`run.sh` runs its contests one after another (start several for parallel lanes): fetch (CPU job), every pipeline
+step (one GPU job), upload (CPU job). Steps skip finished work, so a stopped contest is simply started again. When
+a model has no later or running contest, its type copies are deleted (the original, importance matrix and presets
+stay). Log: `data/logs/run.log`; progress: `data/logs/progress-b<B>.log` and the status page.
 
 ## Site settings
 
@@ -90,11 +90,10 @@ No container ever has both the GPU and a network. Anything needing the network r
 ```bash
 cd /s3/panther/work/repo
 deploy/server/panther.sh build        # build the image (no-op if this exact image exists)
-deploy/server/panther.sh smoke        # checks both container kinds
 deploy/server/panther.sh job NAME CMD...      # CPU job, detached; log in work/data/logs/NAME.log
 deploy/server/panther.sh gpujob NAME CMD...   # GPU job, detached
 deploy/server/panther.sh status       # jobs, GPU, memory, GitLab
-deploy/server/panther.sh logs NAME | stop NAME | clean
+deploy/server/panther.sh logs NAME | stop NAME | wait NAME | clean
 ```
 
 From the Mac: `deploy/server/push.sh` syncs code (not data) to `work/repo` over the open SSH control master. Never

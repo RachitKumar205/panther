@@ -5,22 +5,15 @@ context_tokens: 4096
 kv_cache_type: Q8_0
 overhead_gib: 0.40            # placeholder until the Pi measures it
 
-# Budgets: which models are searched, and which are compared as uniform Q6_K references (accuracy only).
+# Budgets and the models searched at each (`reference` models are not used by the current pipeline).
 contests:
   1: {searched: [Qwen2.5-1.5B-Instruct], reference: []}
   3: {searched: [Qwen2.5-7B-Instruct], reference: [Qwen2.5-3B-Instruct]}
   5: {searched: [Qwen2.5-14B-Instruct, Qwen2.5-7B-Instruct, InternLM2.5-20B-Chat], reference: []}
   7: {searched: [Qwen2.5-14B-Instruct, Qwen2.5-32B-Instruct, InternLM2.5-20B-Chat, Mistral-24B-Instruct], reference: [Qwen2.5-7B-Instruct]}
-active_budgets: [7, 1]        # only for commands run without a budget argument
 
 # Quantization types. A model's list for a budget is those from 1.5 bits/weight below to 2.5 above the average the
 # budget allows. Types that need importance-matrix data are never used where there is none (token embedding; the
 # output layer unless configs/models.yaml sets imatrix_process_output).
 formats: [IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, Q4_K, Q5_K, Q6_K, Q8_0]
 requires_imatrix: [IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS]
-
-# Part costs: starting type = the type closest to the budget's average; probe = the highest type at most this many
-# bits/weight above it; then this many rounds measuring the types the solver uses and their neighbours.
-sensitivity_probe_up_bpw: 3.0
-remeasure_rounds: 2
-remeasure_neighbours: 1

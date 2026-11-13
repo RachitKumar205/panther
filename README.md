@@ -2,39 +2,177 @@
 
 For each RAM budget on an 8 GB Raspberry Pi 5 (1, 3, 5 and 7 GiB), find a quantization of an open model that answers
 **better than the best existing quantization that fits**, by giving every weight matrix its own type
-(heterogeneous quantization). Quality is measured on a server GPU; the Pi measures only RAM and speed of our winner.
+(heterogeneous quantization). Quality is measured on a server GPU; the Pi measures only RAM and speed of our winners.
 
 Live progress: <https://huggingface.co/therachitkumar/panther-status>
 
-## The method
+- [Results so far](#results-so-far)
+- [How it works](#how-it-works): every term, from what a weight is to the full pipeline
+- [Run it](#run-it) · [Layout](#layout) · [Related work](#related-work)
 
-A **genome** is one quantization type per weight matrix (e.g. Mistral Small 24B: 282 matrices, each one of 9 types from
-IQ1_S to Q4_K). The **competitor** is llama.cpp's best preset that fits the budget, built from the same original model
-and importance matrix.
+## Results so far
 
-1. **Start population:** the preset's own layout, every uniform type padded to fill the budget, random mixes, mutants.
-2. **Fitness of a genome** (one model file, built once): accuracy on 900 fixed *selection* questions (MMLU 300, ARC 200,
-   HellaSwag 200, WinoGrande 200) minus 10 × its KL from the original model on benchmark-question text. The selection
-   questions are never the ones the results are reported on.
-3. **Search:** steady state, 4 genomes scored at a time. Children are mutations (one step, two or three steps, or a
-   whole matrix group), crossovers that keep whole layers, and genomes the solver proposes from a model of every
-   score so far (sensitivity per matrix role and depth). Every genome stays within the RAM budget (−1 % / +0.5 %).
-   The best are always kept. It stops after 15 genomes in a row without a 0.2-point gain (at least 30, at most 70).
-4. **Pick:** the top 3 on all 4,500 selection questions; the most accurate wins (ties by paired bootstrap go to the
-   lower KL). **Guard:** if it is worse than the real preset file on those 4,500 questions, it is not our result.
-5. **Report:** the winner's full test (test-split MMLU, HellaSwag, ARC, WinoGrande, GSM8K, perplexity, KL) against the
-   preset's, by paired bootstrap. Then the winner, and only the winner, goes to the Pi for peak RAM and speed.
+First method (genetic search over llama.cpp's own types, fitness = accuracy − 10 × KL), held-out test, 2026-11-13.
+"Points lost" is how far below the unquantized original.
 
-## Run
+| Contest | Verdict (ours − preset, 95% interval) | Original | Preset | Ours | Preset loses | We lose |
+|---|---|---|---|---|---|---|
+| Qwen2.5 1.5B @ 1 GiB | **WIN** +3.59 [+2.23, +4.97] | 55.77 | 39.98 | 43.56 | 15.79 | 12.21 |
+| Qwen2.5 14B @ 5 GiB | **WIN** +1.51 [+0.24, +2.80] | 76.46 | 64.17 | 65.67 | 12.29 | 10.79 |
+| Qwen2.5 7B @ 5 GiB, GSM8K in the fitness | **WIN** +1.39 [+0.35, +2.45] | 70.42 | 69.25 | | | |
+| Qwen2.5 14B @ 7 GiB | TIE +0.55 [−0.15, +1.23] | 76.46 | 74.65 | 75.20 | 1.81 | 1.26 |
+| Qwen2.5 7B @ 3 GiB | TIE +0.03 [−1.24, +1.28] | 70.42 | 64.69 | 64.72 | 5.73 | 5.70 |
+| InternLM2.5 20B @ 7 GiB | TIE +0.76 [−0.22, +1.74] | 74.22 | 69.08 | 69.83 | 5.14 | 4.39 |
+| Mistral Small 24B @ 7 GiB | TIE −0.11 [−1.10, +0.89] | 78.79 | 68.41 | 68.30 | 10.38 | 10.49 |
+| Qwen2.5 7B @ 5 GiB | LOSE −1.13 [−2.08, −0.24] | 70.42 | 69.25 | 68.12 | 1.17 | 2.30 |
 
-On the server (see [deploy/server](deploy/server/README.md)):
+What this showed: choosing types per matrix wins a few points at most, because llama.cpp's presets are already
+heterogeneous, and the big losses (10–16 points at 2–3 bits per weight) come from how each weight is rounded. Hence
+the second method below. On the Pi: 1.5B @ 1: 0.71 GiB peak, 9.0 / 14.3 tokens/s (writing / reading); 7B @ 3: 2.73 GiB,
+2.2 / 2.9; 7B @ 5: 4.69 GiB, 2.4 / 10.3; 14B @ 5: 4.74 GiB, 1.2 / 1.5; 14B @ 7: 6.72 GiB, 0.9 / 1.1.
+
+## How it works
+
+### 1. The basics
+
+**A model** is a long chain of **layers**. Each layer holds a few large tables of numbers, **matrices**: four for
+*attention* (which earlier words to look at: `attn_q`, `attn_k`, `attn_v`, `attn_output`) and three for the
+*feed-forward* part (the processing: `ffn_gate`, `ffn_up`, `ffn_down`). The numbers in them are **weights**. Qwen2.5
+14B has about 14 billion weights in 338 matrices (48 layers × 7, plus the word table and the output layer).
+
+**What it computes.** Given text, the model gives a **probability for every possible next word** ("The capital of
+France is" → Paris 92 %, Lyon 3 %, …). Answering a question is choosing likely next words, one after another.
+
+**Quantizing** stores each weight in fewer bits. The original uses 16 bits per weight: 28 GB for the 14B, far beyond
+the Pi. A **RAM budget** (1, 3, 5 or 7 GiB) must hold the weights plus the **KV cache** (the model's memory of the
+text so far, 4,096 tokens at 8 bits) plus llama.cpp's own overhead. What is left, divided by the number of weights,
+is the average **bits per weight** we can afford: about 2.6 for the 14B at 5 GiB. Fewer bits lose information, so the
+model gets worse; the whole job is to lose as little as possible.
+
+### 2. Types: how weights are stored
+
+A **type** is one storage recipe. All of them cut a matrix into **blocks** (e.g. 32 or 256 weights of one row) and
+store, per block, one **scale** (an ordinary decimal number) and each weight as a **small whole number**. A weight's
+value is scale × whole number.
+
+Example, 2 bits (whole numbers −2, −1, 0, 1), scale 0.3:
+
+| Original | ÷ 0.3 | Rounded | Stored value |
+|---|---|---|---|
+| 0.31 | 1.03 | 1 | 0.30 |
+| −0.58 | −1.93 | −2 | −0.60 |
+| 0.02 | 0.07 | 0 | 0.00 |
+
+Every weight ends up a little off: the **rounding error**.
+
+- **K types** (Q2_K … Q6_K): exactly that, with 2 to 6 bits per whole number (4 to 64 levels); the scales are stored
+  compactly too ("K"), so Q4_K costs about 4.5 bits per weight. Fast on the Pi's processor.
+- **IQ types** (IQ1_S, IQ2_XS, IQ3_S, IQ4_XS…): below about 3 bits, rounding each weight on its own is poor, so these
+  store **groups of 8 weights as one pattern** from a fixed list of a few hundred allowed patterns (plus signs). Real
+  weights cluster in typical shapes, so the list fits them better than independent rounding. Better quality at very
+  few bits, slower on the Pi (a lookup per group).
+- **Legacy types** (Q4_0, Q5_0, Q8_0): the simplest block-and-scale recipes. **TQ** types: only for models trained
+  to have three values per weight. **MXFP4**: a 4-bit floating-point type for mixture-of-experts models.
+
+**Heterogeneous** means each matrix gets its own type: important matrices more bits, unimportant ones fewer, same
+total. llama.cpp cannot mix types *inside* a matrix, so the choice is per matrix. **Presets** are llama.cpp's
+ready-made heterogeneous recipes (e.g. "IQ2_XXS for most matrices, more for a few known-important ones"). The largest
+preset that fits the budget is our **competitor**; if none fits, the smallest one competes (with more RAM than we
+have). The **importance matrix** records, on ordinary text (the **calibration text**), which inputs to each matrix are
+usually large: the weights that multiply them matter more and are rounded more carefully.
+
+### 3. Rounding: the lever for big gains
+
+- **Plain rounding** (llama.cpp): each block is rounded on its own, guided by the importance matrix. It never corrects
+  for errors already made.
+- **Error-compensated rounding** (GPTQ): a matrix's job is its *outputs*, each a sum of weight × input. When one weight
+  is rounded up, the next ones are nudged down to cancel it, so the sums stay right. Columns are rounded in order and
+  each one's error is spread over the columns not yet rounded, weighted by how the inputs move together (measured on
+  calibration text). Individual weights may move further from their originals; the matrix's outputs move less. Same
+  type, same file size, same speed. On the 7B's first layer this cut each matrix's output error about 3× in every type
+  tried (Q4_K, Q3_K, IQ3_S, Q2_K, IQ2_XS); the whole-model effect is being measured (`experiments/types`).
+- **Learned rounding** (GSQ): starts from GPTQ and *learns* for each weight whether to go up or down a level.
+- **Saliency** (GuidedQuant): one backward pass through the original measures how much each layer's output error moves
+  the final answer, so rounding spends its effort where it matters.
+- **Rotation** (SpinQuant): a fixed reversible mixing of each layer's directions spreads out extreme values, so every
+  type rounds more cleanly; baked into the weights, the architecture is unchanged. To be tested.
+
+### 4. Measuring quality
+
+| Measure | Meaning | Better |
+|---|---|---|
+| **Accuracy** | % of questions answered right: MMLU (knowledge), ARC (science), HellaSwag (common sense), WinoGrande (pronouns), GSM8K (math word problems, the model writes its answer) | higher |
+| **KL** | how differently the quantized model predicts the next word than the original, averaged over text; 0 = identical | lower |
+| **Drift** | KL in plain words: how far the model moved from the original | lower |
+| **Flips** | % of questions whose right/wrong differs from the original's | lower |
+| **Perplexity** | how surprised the model is by real text | lower |
+
+Accuracy on a few hundred questions is noisy: a genome can be lucky on exactly those (the 24B's lead fell from +3.4 on
+the search questions to −0.1 on the held-out test). Flips and drift measure the damage directly and are far steadier
+("Accuracy is Not All You Need", NeurIPS 2024, recommends exactly these). **Drift on the original's own answers**: the
+original writes its answers once (GSM8K solutions included); every candidate's KL is measured on that text, which tests
+whether it still reasons like the original, math included, without the slow step of making each candidate write.
+
+The questions are split once and never mixed: **calibration** (importance matrix, rounding), **selection** (the search
+scores candidates on it), **held-out test** (used once, at the end, for the reported result).
+
+### 5. The pipeline, step by step (`scripts/server/pipeline.py`)
+
+Once per model:
+
+1. **fetch**: download the original at a pinned revision.
+2. **store**: convert it to a 16-bit **GGUF** (llama.cpp's file format), compute the importance matrix, and quantize
+   the *whole* model once into every type the budget can use (**type copies**). Building any candidate later is
+   picking each matrix from the right copy, which takes seconds. (Next: smarter rounding builds these copies.)
+3. **error**: the **offline error** of every matrix in every type (importance-weighted squared error), a cheap guess
+   the search uses to repair and to fit its model.
+4. **refs**: the original's reference outputs: next-word probabilities on the selection text and on its own answers,
+   and which selection and test questions it gets right.
+5. **preset**: build llama.cpp's presets near the budget; of the two largest that fit, the one more accurate on the
+   held-out test is the competitor.
+
+The search (**genetic algorithm**, GA):
+
+6. **ga**: a **genome** is one type for every matrix, always inside the RAM window (−1 % / +0.5 % of the budget; a
+   genome that is too big is **repaired** by lowering the matrices that lose least per byte saved).
+   - **Start population**: the preset's own layout, every uniform type, random mixes, mutants of the preset.
+   - **Children**: **mutation** (change 1–3 matrices by one step, or by two or three, or one whole group = one matrix
+     role in one quarter of the depth) and **crossover** (whole layers from two parents). Each round a **solver**
+     (CP-SAT) also proposes 4 genomes from a simple model fitted to every score so far, which predicts where extra
+     bits pay.
+   - **Score** (lower is better): **flips** against the original on 900 selection questions + 10 × **drift** on the
+     original's own answers. Accuracy is recorded as a check.
+   - **Steady state**: 4 genomes scored at a time on the GPU; a new child starts whenever one finishes.
+   - **Stop**: after at least 30 genomes, once 15 in a row bring no gain of 0.2; at most 70.
+
+The end:
+
+7. **final**: the top 3 scored on all 4,500 selection questions; the lowest score wins. (Next: **distillation** of
+   the 3 finalists first: the original is the teacher, each finalist learns to match its next-word probabilities on
+   the original's own answers, adjusting only the per-block scales and the norm weights; the whole numbers stay
+   frozen, so file size and speed stay the same; a few GPU hours each.) **Guard**: the winner must not be less
+   accurate than the real preset file on those questions. Then winner and preset on the held-out test; a **paired
+   bootstrap** (resampling the same questions for both) gives the difference with a **95 % interval**: **WIN** if the
+   whole interval is above 0, **LOSE** if below, **TIE** otherwise.
+8. **bundle, upload**: the winner's file and a manifest to a private Hugging Face repo; the **Pi** downloads it and
+   measures real peak RAM and speed (tokens per second, reading the prompt and writing the answer).
+
+| | First method | Second method |
+|---|---|---|
+| Type copies | llama.cpp's plain rounding | error-compensated rounding (being measured) |
+| Search score | accuracy − 10 × KL on benchmark text | flips + 10 × drift on the original's own answers |
+| After the search | nothing | distillation of the top 3 (next) |
+| Search itself | GA + solver | unchanged |
+
+## Run it
+
+On the server ([deploy/server](deploy/server/README.md)):
 
 ```bash
-deploy/server/run-budget.sh 7                                          # every searched model of the 7 GiB budget
-deploy/server/run-budget.sh 7 Qwen2.5-14B-Instruct Mistral-24B-Instruct  # only these
+setsid nohup deploy/server/run.sh "5 Qwen2.5-14B-Instruct" "7 Mistral-24B-Instruct" >/dev/null 2>&1 &
 ```
 
-On the Pi (see [pi](pi/README.md)): `nohup bash pi/await.sh <hf-user> 7:24b 7:14b > ~/panther-pi/await.log &`
+On the Pi ([pi](pi/README.md)): `nohup bash pi/await.sh <hf-user> 5:14b 7:24b > ~/panther-pi/await.log 2>&1 &`
 
 Tests: `uv sync && uv run pytest`
 
@@ -43,13 +181,20 @@ Tests: `uv sync && uv run pytest`
 | Module | What |
 |---|---|
 | [configs](configs/README.md) | Models (pinned revisions), budgets and quantization types |
-| [src/panther](src/panther/README.md) | Model inventory and RAM model, GGUF assembly, llama.cpp evaluation, statistics, solver |
-| [scripts/server](scripts/server/README.md) | The pipeline: type copies, presets, the genetic search, scoring, bundles, the status page |
-| [deploy/server](deploy/server/README.md) | Container image, job runner, one command per budget, server setup and removal |
+| [src/panther](src/panther/README.md) | Model shape and RAM model, llama.cpp runs and their records, statistics, solver |
+| [scripts/server](scripts/server/README.md) | The pipeline and the status page |
+| [deploy/server](deploy/server/README.md) | Container image and jobs, the contest runner, server setup and removal |
 | [pi](pi/README.md) | Pi setup and the RAM/speed check of a winner |
+| [experiments/types](experiments/types/run.py) | Which types work, and plain vs error-compensated rounding (temporary) |
 
-## Results
+## Related work
 
-In progress (2026-11-13); the live page has the numbers. On the 900 search questions, the genetic search's best is
-ahead of llama.cpp's preset for Mistral Small 24B at 7 GiB (accuracy 75.5 vs 72.1) and Qwen2.5 14B at 7 GiB
-(77.7 vs 77.1); the guard and the held-out test decide what is reported.
+- Choosing a type per layer by search: **EvoPress** (ICML 2025, evolutionary search with KL fitness), many
+  sensitivity- and RL-based allocators; in GGUF, llama.cpp's `--target-bpw`, Unsloth Dynamic quants, Bartowski's
+  per-tensor layouts. Their gains are modest too, as ours were.
+- Better rounding: **GPTQ**; **GSQ** (2026, learned rounding written back into GGUF Q2_K: Qwen3-8B 50.0 → 56.3);
+  **YAQA** (2025, rounding against the whole model's KL, ~30 % lower KL); **GuidedQuant** (ICML 2025, end-loss
+  saliency). Strongest 2-bit methods (QTIP, PV-Tuning, AQLM) need their own formats and kernels.
+- Measuring: **Accuracy is Not All You Need** (NeurIPS 2024): flips and KL over accuracy.
+- What we add: allocation search over better-rounded type copies, K and IQ types, stock GGUF, RAM budgets that
+  include the KV cache, verified on a real Pi, and a search score that does not reward luck.
