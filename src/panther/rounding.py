@@ -22,7 +22,7 @@ ROLE_INPUT = {"attn_q": "attn_in", "attn_k": "attn_in", "attn_v": "attn_in", "at
 _LIB = None
 
 
-def quant(w: np.ndarray, imp: np.ndarray, qtype) -> tuple[np.ndarray, np.ndarray]:
+def quant(w: np.ndarray, imp: np.ndarray, qtype, threads: int = THREADS) -> tuple[np.ndarray, np.ndarray]:
     """(codes, dequantized values) of the rows of w in qtype, by llama.cpp's quantizer on every thread."""
     global _LIB
     from gguf.quants import dequantize
@@ -40,12 +40,12 @@ def quant(w: np.ndarray, imp: np.ndarray, qtype) -> tuple[np.ndarray, np.ndarray
     def part(idx):
         a, b = int(idx[0]), int(idx[-1]) + 1
         _LIB.ggml_quantize_chunk(t, w[a:b].ctypes.data, dst[a:b].ctypes.data, 0, b - a, n, imp.ctypes.data)
-    with ThreadPoolExecutor(THREADS) as ex:
-        list(ex.map(part, [i for i in np.array_split(np.arange(rows), THREADS) if len(i)]))
+    with ThreadPoolExecutor(threads) as ex:
+        list(ex.map(part, [i for i in np.array_split(np.arange(rows), threads) if len(i)]))
     return dst, dequantize(dst, qtype).reshape(rows, n)
 
 
-def gptq(w, h, qtype) -> np.ndarray:
+def gptq(w, h, qtype, threads: int = THREADS) -> np.ndarray:
     """Codes of w (rows x input columns, on the GPU) in qtype, each 256-column chunk's error compensated."""
     import torch
     w, h, imp = w.clone(), h.clone(), torch.diag(h).clone()
@@ -56,7 +56,7 @@ def gptq(w, h, qtype) -> np.ndarray:
     codes = []
     for a in range(0, w.shape[1], CHUNK):
         b = a + CHUNK
-        c, q = quant(w[:, a:b].cpu().numpy(), imp[a:b].cpu().numpy(), qtype)
+        c, q = quant(w[:, a:b].cpu().numpy(), imp[a:b].cpu().numpy(), qtype, threads)
         codes.append(c)
         err = torch.linalg.solve_triangular(u[a:b, a:b], w[:, a:b] - torch.from_numpy(q).to(w.device), upper=True,
                                             left=False)
@@ -79,6 +79,8 @@ def round_copies(hf_dir: Path | None, bf16: Path, copies: dict[str, Path], calib
     out = {t: gguf.GGUFReader(p, "r+") for t, p in copies.items()}
     dst = {t: {x.name: x for x in r.tensors} for t, r in out.items()}
     n_layers = len(m.model.layers)
+    widest = max(t.shape[0] for t in src.values() if len(t.shape) == 2)  # input width of the widest matrix
+    par = int(max(1, min(6, (90 * 2**30 - bf16.stat().st_size - 20 * 2**30) // (12 * widest**2 + 1))))
     for start in range(0, n_layers, layers_per_pass):
         H, hooks = {}, []
         for i in range(start, min(start + layers_per_pass, n_layers)):
@@ -100,8 +102,12 @@ def round_copies(hf_dir: Path | None, bf16: Path, copies: dict[str, Path], calib
                     continue
                 w = torch.from_numpy((np.asarray(src[name].data).view(np.uint16).astype(np.uint32) << 16)
                                      .view(np.float32).reshape(src[name].shape[::-1].tolist())).cuda()
-                for t, ts in dst.items():
-                    ts[name].data.reshape(-1)[:] = gptq(w, h / (SEQS // 8), ts[name].tensor_type).reshape(-1)
+                hm = h / (SEQS // 8)
+
+                def one(ts, w=w, hm=hm, name=name):  # several types at once: most of each call runs on one thread
+                    ts[name].data.reshape(-1)[:] = gptq(w, hm, ts[name].tensor_type, max(2, THREADS // par)).reshape(-1)
+                with ThreadPoolExecutor(par) as ex:
+                    list(ex.map(one, dst.values()))
         del H
         torch.cuda.empty_cache()
     for r in out.values():
