@@ -97,4 +97,6 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
     rw.data.flush()
     del rw, out
     shutil.move(f"{dst}.part", dst)
+    del m, opt, scales, norms
+    torch.cuda.empty_cache()  # hand the GPU back: llama.cpp runs next, in another process
     return dst
