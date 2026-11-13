@@ -71,7 +71,7 @@ contest() {  # contest SIZE B MODEL. Downloading and building type copies (the d
     [ "$ok" = 1 ] && { job cpu "$id-save" "${R[@]}" save "$2" "$3" & sp=$!; }  # to Hugging Face, alongside
   fi
   if [ "$ok" = 1 ] && job gpu "$id-run" "${R[@]}" run "$2" "$3" && job cpu "$id-upload" "${R[@]}" upload "$2" "$3"
-  then log "$id: done"; else log "$id: FAILED or stopped"; fi
+  then log "$id: done"; else log "$id: FAILED or stopped (its files are kept, to resume)"; return; fi
   [ -n "$sp" ] && wait "$sp"
   pgrep -f "panther _contest [^ ]+ [0-9]+ $3\$" | grep -qv "^$$\$" || pgrep -f "pipeline.py save [0-9]+ $3" >/dev/null ||
     find "$DATA/store/$3" "$DATA/reference/$3" \( \( -name "$3-*.gguf" ! -name "*-BF16.gguf" \) -o -name "*.kld" \) -delete 2>/dev/null
