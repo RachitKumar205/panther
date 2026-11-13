@@ -147,7 +147,7 @@ def fetch(model: str) -> None:
         return
     n = sum(x.rows * x.cols for x in Model(model).matrices)
     have = sum(f.stat().st_size for f in (STORE / model).glob("*.gguf")) if (STORE / model).exists() else 0
-    hf_too = 2 * n if "internlm" in model.lower() else 0  # InternLM is rounded from its original files
+    hf_too = 2 * n if "internlm" in model.lower() and not (DATA / "hf" / model / "config.json").exists() else 0
     need = max(0, int(n * 8.5) + hf_too - have) + margin()  # 16-bit original + 14 type copies
     if shutil.disk_usage(DATA).free < need:  # not enough yet: give the turn to another model, try again later
         note(f"{short(model)} fetch: needs {need / GIB:.0f} GB of free disk; letting others go first")
