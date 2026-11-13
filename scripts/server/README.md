@@ -10,7 +10,7 @@ The pipeline, run inside the server's containers (see [deploy/server](../../depl
 | `store` | Converts to a 16-bit GGUF, computes the importance matrix, quantizes the whole model once to every type the budget can use (`build_tensor_store.sh`), checks every copy (`store_manifest.py`) | `data/store/<model>/` |
 | `error` | Offline error of every matrix at every type, weighted by the importance matrix | `rewrite/<model>/error.json` |
 | `refs` | The original's next-token distributions on three texts: sensitivity, selection, and benchmark questions with their answers (selection split) | `data/reference/<model>/` |
-| `preset` | llama.cpp's mixed presets built from the same original and importance matrix; the two largest that fit are tested; the better one is the competitor. Run again after the search: our winner vs that preset | `rewrite/budget-B/preset-<model>.json` |
+| `preset` | llama.cpp's mixed presets built from the same original and importance matrix; the two largest that fit are tested; the better one is the competitor. If none fits, the smallest preset competes (with more RAM than we have). Run again after the search: our winner vs that preset | `rewrite/budget-B/preset-<model>.json` |
 | `ga` | The genetic search (below) | `rewrite/budget-B/list-<model>-anchored.json` (top 3), `ga-<model>.json` (every genome), `ga-<model>-live.json` (best so far) |
 | `gascore` | The top 3 on all 4,500 selection questions; the winner (most accurate, ties to the lower KL); the guard against the real preset file; the winner's full test | `rewrite/budget-B/winner-<model>-anchored.json` |
 | `bundle`, `upload` | The winner as a GGUF + manifest for the Pi, to a private Hugging Face repo | `data/pi_bundle/`, `<user>/panther-<size>-<B>g-anchored` |

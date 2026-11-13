@@ -1183,16 +1183,17 @@ PRESET_BPW = [1.56, 1.75, 2.06, 2.31, 2.5, 2.7, 2.9, 3.06, 3.2, 3.3, 3.44, 3.5, 
 def cmd_preset(budget: int, model: str) -> int:
     """The best existing quantization that fits the budget: of llama.cpp's mixed presets (same BF16 file and
     importance matrix) whose RAM is at most the budget's top, the two largest are tested like the genotypes and the
-    better one (choose_winner) is compared with the model's winner (paired bootstrap)."""
+    better one (choose_winner) is compared with the model's winner (paired bootstrap). If none fits, the smallest
+    preset is the competitor (it gets more RAM than we do; noted as over the budget)."""
     from panther.stats import compare
     store = DATA / "store" / model
     bf16, imat = store / f"{model}-BF16.gguf", store / f"{model}.imatrix.gguf"
     inv = inv_of(model)
     top = budget * (1 + WINDOW[1])
     room = (top * GIB - inv.geometry.kv_cache_bytes(CTX, KV_BPE) - OVERHEAD * GIB) * 8 / sum(g.n_weights for g in inv.genes)
-    fitting = []  # the two largest presets that fit; the better of them is "the best existing quantization"
+    fitting, too_big = [], []  # the two largest presets that fit; the better of them is "the best existing quantization"
     for ftype, bpw in sorted(zip(PRESETS, PRESET_BPW), key=lambda x: -x[1]):
-        if bpw > room + 0.3 or len(fitting) == 2:
+        if (bpw > room + 0.3 and ftype != PRESETS[0]) or len(fitting) == 2:
             continue
         path = store / f"preset-{ftype}.gguf"
         if not path.exists():
@@ -1201,15 +1202,14 @@ def cmd_preset(budget: int, model: str) -> int:
             os.rename(str(path) + ".part", path)
         ram = file_ram_gib(model, path)
         note(f"{model.split('-')[1]} preset {ftype}: {ram:.3f} GiB ({'fits' if ram <= top else 'too big'})")
-        if ram <= top:
-            fitting.append((ftype, path, ram))
-        else:
-            path.unlink()  # a preset that doesn't fit is never used; it only takes disk
-    if not fitting:
-        note(f"{model.split('-')[1]} preset: none of llama.cpp's presets fits {budget} GiB")
-        pfile = out(f"budget-{budget}", f"preset-{model}.json")
-        pfile.write_text(json.dumps({**(json.loads(pfile.read_text()) if pfile.exists() else {}), "preset": None}))
-        return 0
+        (fitting if ram <= top else too_big).append((ftype, path, ram))
+    if not fitting:  # none fits: the smallest preset competes, with more RAM than we have
+        fitting = [min(too_big, key=lambda x: x[2])]
+        note(f"{model.split('-')[1]} preset: none of llama.cpp's presets fits {budget} GiB; the smallest, "
+             f"{fitting[0][0]} at {fitting[0][2]:.3f} GiB ({fitting[0][2] - top:+.3f} GiB over), is the competitor")
+    for ftype, path, ram in too_big:
+        if (ftype, path, ram) not in fitting:
+            path.unlink()  # a preset that isn't used only takes disk
     rows, evs, info = {}, {}, {}
     for ftype, path, ram in fitting:
         name = f"preset-{ftype}"
@@ -1223,7 +1223,7 @@ def cmd_preset(budget: int, model: str) -> int:
     ftype, ram = info[name]
     ev_p, kl_p = evs[name], rows[name]["kl"]
     tried = {n: {"ram_gib": info[n][1], **rows[n], "ppl": evs[n].perplexity()} for n in rows}
-    result = {"preset": ftype, "ram_gib": ram, "kl": kl_p, "mean_accuracy_pct": 100 * ev_p.mean_accuracy(),
+    result = {"preset": ftype, "ram_gib": ram, "over_budget": ram > top, "kl": kl_p, "mean_accuracy_pct": 100 * ev_p.mean_accuracy(),
               "ppl": ev_p.perplexity(), "tried": tried}
     pfile = out(f"budget-{budget}", f"preset-{model}.json")  # the presets themselves don't depend on the method
     result = {**(json.loads(pfile.read_text()) if pfile.exists() else {}), **result}
