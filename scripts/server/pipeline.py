@@ -518,7 +518,7 @@ def final(model: str) -> int:
         if not files[k].exists():
             src = build(model, it["assignment"])
             try:
-                with gpu(2 * bf16.stat().st_size + 30 * GIB, 6 * 3600):
+                with gpu(bf16.stat().st_size + 20 * GIB, 3 * 3600):  # teacher, then student: never both
                     distill(src, bf16, [DATA / "splits/text" / f"answers-{model}.txt", DATA / "splits/calibration.txt"],
                             files[k], lambda m, k=k: note(f"{sm} {k} {m}"))
             except Exception as e:  # noqa: BLE001  (e.g. an architecture transformers cannot load from GGUF)
