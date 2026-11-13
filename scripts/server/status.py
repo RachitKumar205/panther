@@ -19,6 +19,19 @@ WHAT = {"store": "16-bit original, importance matrix, the model in every type", 
         "final": "top 3 distilled and scored on all selection questions, guard, held-out test vs preset",
         "bundle": "file for the Pi"}
 MINUTES = {"store": 5, "error": 0.2, "refs": 3, "preset": 4, "ga": 10, "final": 14, "bundle": 0.3}  # x size in B
+DESCRIBE = {
+    "store": "the original as a 16-bit file; its importance matrix (which inputs are large, on calibration text); the"
+             " whole model in each of 14 types (IQ1_S to Q8_0), every matrix with error-compensated rounding",
+    "error": "for every matrix and type, a cheap estimate of the damage (used to repair genomes and guide the solver)",
+    "refs": "the original writes its own answers (GSM8K); its next-word probabilities on them and which questions it"
+            " gets right are recorded, so drift and flips can be measured",
+    "preset": "llama.cpp's presets near the budget are built and tested on the held-out questions: the competitor",
+    "ga": "genetic search: genomes (one type per matrix, inside the RAM budget) scored by flips + 10 x drift on the"
+          " original's answers, 4 at a time; mutation, crossover and solver proposals; stops on a plateau (30-70)",
+    "final": "the top 3 are distilled (block scales and norms trained to match the original), scored on all 4,500"
+             " selection questions; the best must not be less accurate than the preset (guard); then winner vs"
+             " preset vs original on the held-out test: the verdict",
+    "bundle": "the winning file packed for the Pi, which downloads it and posts its real RAM and speed here"}
 PI: dict[str, str] = {}
 
 
@@ -32,7 +45,8 @@ def lanes() -> list[tuple[int, str, list[str]]]:
     for f in sorted(DATA.glob("logs/progress-b*.log")):
         b, lines = int(f.stem[10:]), f.read_text().splitlines()
         for sm in dict.fromkeys(m.split()[1] for m in lines if re.match(r"\d\d:\d\d \S+ step \w+: start", m)):
-            out.append((b, sm, [x for x in lines if x[6:].startswith(sm + " ")]))
+            ls = [x for x in lines if x[6:].startswith(sm + " ")]
+            out.append((b, sm, ls[max(i for i, x in enumerate(ls) if " step store: start" in x):]))  # this run only
     return out
 
 
@@ -40,8 +54,6 @@ def lane(b: int, sm: str, ls: list[str]) -> list[str]:
     size = float(re.sub(r"[^0-9.]", "", sm) or 7)
     now = time.gmtime(time.time() + 19800)
     now_m = now.tm_hour * 60 + now.tm_min
-    start = max((i for i, x in enumerate(ls) if " step store: start" in x), default=0)
-    ls = ls[start:]
     state, rows, clk = {}, [], now_m
     for x in ls:
         if m := re.search(r"step (\w+): (start|done)", x):
@@ -77,9 +89,11 @@ def lane(b: int, sm: str, ls: list[str]) -> list[str]:
 
 def render() -> str:
     head = [f"# Panther: live progress", "", f"Updated {time.strftime('%d %b %H:%M', time.gmtime(time.time() + 19800))}"
-            " IST. Each contest: our quantization vs llama.cpp's best preset that fits the same RAM budget, on "
-            "held-out questions. WIN / LOSE: the 95% interval of the accuracy difference is all above / below 0.", "",
-            "## Verdicts", "", "| contest | verdict | ours - preset, points [95% interval] | flips ours / preset |",
+            " IST, every 30 s. Each contest: one model at one RAM budget on the Raspberry Pi 5; our quantization (every"
+            " matrix its own type, smarter rounding, genetic search, distillation) against llama.cpp's best preset that"
+            " fits the same budget, on held-out questions. WIN / LOSE: the 95% interval of the accuracy difference is "
+            "all above / below 0, otherwise TIE. Every term: [How it works](https://github.com/RachitKumar205/panther#how-it-works).",
+            "", "## Verdicts", "", "| contest | verdict | ours - preset, points [95% interval] | flips ours / preset |",
             "|---|---|---|---|"]
     log = (DATA / "logs/panther.log").read_text().splitlines() if (DATA / "logs/panther.log").exists() else []
     state = {}
@@ -88,10 +102,16 @@ def render() -> str:
             state[m.group(1)] = m.group(2)
     paused = [f"**PAUSED** ({w})" for f, w in (("PAUSED", "by the user"), ("PAUSED.guard", "GitLab unhealthy"))
               if (DATA / f).exists()]
-    head[4:4] = paused + ([""] if paused else []) + ["## Contests", ""] + [f"- {k}: {v}" for k, v in state.items()] + \
-        ["", "Recent events:", "", *[f"    {x}" for x in log[-10:]], ""]
+    ln = lanes()
+    step = {f"{sm.lower()}-b{b}": next((m.group(1) for x in reversed(ls) if (m := re.search(r"step (\w+): start", x))),
+                                       "") for b, sm, ls in ln}
+    head[4:4] = paused + ([""] if paused else []) + ["## Contests", ""] + [
+        f"- **{k.replace('-b', '@')}**: {v}" + (f", now: {WHAT[step[k]]}" if v == "started" and step.get(k) else "")
+        for k, v in state.items()] + ["", "## Steps of every contest", ""] + [
+        f"{i}. **{s}**: {DESCRIBE[s]}" for i, s in enumerate(STEPS, 1)] + [
+        "", "## Recent events", "", *[f"    {x}" for x in sorted(log[-8:] + [x for _, _, ls in ln for x in ls[-6:]])[-20:]], ""]
     body = []
-    for b, sm, ls in lanes():
+    for b, sm, ls in ln:
         v = next((x for x in reversed(ls) if "our winner" in x), None)
         if v and (m := re.search(r"our winner ([+-][\d.]+) pts \[([+-][\d.]+), ([+-][\d.]+)\]", v)):
             d, lo, hi = map(float, m.groups())
@@ -102,7 +122,9 @@ def render() -> str:
         else:
             head.append(f"| {sm} @ {b} GiB | running | | |")
         body += lane(b, sm, ls)
-    pi = ["## On the Pi (our winners)", ""] + [f"- {k}: {v}" for k, v in sorted(PI.items())] + [""]
+    pi = ["## On the Pi (our winners: real peak RAM and speed)", ""] + [f"- {k}: {v}" for k, v in sorted(PI.items())
+                                                                        if "@" in k] + ["", "(none yet)" if not any(
+        "@" in k for k in PI) else "", ""]
     return "\n".join(head + [""] + pi + body) + "\n"
 
 
