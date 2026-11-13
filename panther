@@ -50,10 +50,15 @@ contest() {  # contest SIZE B MODEL. Downloading and building type copies (the d
   # model at a time; everything after runs in parallel with the other contests, sharing the GPU through its ledger.
   local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) fd ok=1
   mkdir -p "$DATA/locks"; log "$id: queued (waiting its turn to download and build the type copies)"
-  exec {fd}> "$DATA/locks/store-turn"; flock "$fd"
-  log "$id: started"
-  job cpu "$id-fetch" "${R[@]}" fetch "$2" "$3" && job gpu "$id-store" "${R[@]}" store "$2" "$3" || ok=0
-  exec {fd}>&-
+  local types; types="$(grep '^formats:' "$W/repo/configs/search.yaml" | tr ',' '\n' | wc -l)"
+  if [ "$(grep -o '"[A-Z0-9_]*"' "$DATA/store/$3/rounded.json" 2>/dev/null | wc -l)" -ge "$types" ]; then
+    log "$id: started (type copies already built)"
+  else
+    exec {fd}> "$DATA/locks/store-turn"; flock "$fd"
+    log "$id: started"
+    job cpu "$id-fetch" "${R[@]}" fetch "$2" "$3" && job gpu "$id-store" "${R[@]}" store "$2" "$3" || ok=0
+    exec {fd}>&-
+  fi
   if [ "$ok" = 1 ] && job gpu "$id-run" "${R[@]}" run "$2" "$3" && job cpu "$id-upload" "${R[@]}" upload "$2" "$3"
   then log "$id: done"; else log "$id: FAILED or stopped"; fi
   pgrep -f "panther _contest [^ ]+ [0-9]+ $3\$" | grep -qv "^$$\$" ||
