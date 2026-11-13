@@ -82,7 +82,7 @@ def lock(name: str):
 
 @contextmanager
 def gpu(nbytes: int, hold_s: int = 3600):
-    """Books GPU memory in a shared ledger and waits until it fits in 88 of the GPU's 96 GiB."""
+    """Books GPU memory in a shared ledger and waits until it fits in 92 of the GPU's 96 GiB."""
     ledger, key = DATA / "locks/gpu.json", f"{os.getpid()}-{time.time()}"
 
     def edit(fn):
@@ -94,7 +94,7 @@ def gpu(nbytes: int, hold_s: int = 3600):
             ok = fn(book)
             ledger.write_text(json.dumps(book))
             return ok
-    take = lambda b: (sum(v[0] for v in b.values()) + nbytes <= 88 * GIB or not b) and not b.update(  # noqa: E731
+    take = lambda b: (sum(v[0] for v in b.values()) + nbytes <= 92 * GIB or not b) and not b.update(  # noqa: E731
         {key: (nbytes, time.time() + hold_s)})
     while not edit(take):
         time.sleep(random.uniform(3, 8))
@@ -277,7 +277,7 @@ def score(model: str, a: dict[str, str] | None, label: str, path: Path | None = 
         llama.find(model, label, task=t, split="selection", n=n[t] if n else 0) for t in TASKS))
     try:
         path = path or (build(model, a) if built else Path("/dev/null"))
-        with gpu(path.stat().st_size + 8 * GIB, 1800):
+        with gpu(int(1.1 * path.stat().st_size) + 4 * GIB, 1800):
             kl = llama.run("kl", model, path, label, reference="answers")["metrics"]["kl_mean"]
             for t in TASKS:
                 llama.run("task", model, path, label, task=t, split="selection", n=n[t] if n else 0)
@@ -399,7 +399,7 @@ def preset_layout(model: str, budget: int) -> dict[str, str] | None:
 
 
 def ga(model: str) -> None:
-    """Steady state: as many genomes scored at once as the GPU holds (4-12, by model size), a new child whenever one finishes; each round the solver
+    """Steady state: as many genomes scored at once as the GPU holds (up to 16, as the GPU ledger allows), a new child whenever one finishes; each round the solver
     adds SOLVED proposals from a fit of every score so far. Stops on a plateau. Writes the TOP best."""
     if (lst := out(f"budget-{BUDGET}", f"list-{model}{SUFFIX}.json")).exists():
         return
@@ -421,7 +421,7 @@ def ga(model: str) -> None:
             if digest(a) not in seen and G.fits(a):
                 return a
         return G.mutate(pop[0][2])
-    inflight = max(INFLIGHT, min(12, int(60 * GIB // copy_of(model, "Q4_K").stat().st_size)))
+    inflight = max(INFLIGHT, min(16, int(80 * GIB // (copy_of(model, "Q4_K").stat().st_size + 4 * GIB))))
     with ProcessPoolExecutor(inflight) as ex:
         running = {}
 

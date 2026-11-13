@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Panther's one command. On your machine it syncs the code to the server and runs the same command there.
 #
-#   ./panther start 7b@3 14b@5     queue contests (model size @ RAM budget in GiB); 4 run at once, in this order
+#   ./panther start 7b@3 14b@5     start contests (model size @ RAM budget in GiB), all at once, adapting to the machine
 #   ./panther pause | resume        pause / resume everything (the live page keeps updating)
 #   ./panther stop [7b@3]           stop one contest or all; started again, a contest continues where it stopped
 #   ./panther status                what is running, GPU, disk; the live page has the rest
@@ -46,16 +46,16 @@ job() {  # job cpu|gpu NAME CMD...: one container, waited for; 0 if it exited 0.
   local rc; rc="$("${P[@]}" wait "$name" | head -1)"; "${P[@]}" rm "$name" >/dev/null 2>&1; [ "$rc" = 0 ]
 }
 
-contest() {  # contest SIZE B MODEL: wait for one of the slots, fetch, every pipeline step, upload; free the copies
-  local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) k fd
-  mkdir -p "$DATA/locks"; log "$id: queued"
-  while :; do
-    for k in $(seq "${PANTHER_SLOTS:-4}"); do exec {fd}> "$DATA/locks/slot-$k"; flock -n "$fd" && break 2; exec {fd}>&-; done
-    sleep 60
-  done
+contest() {  # contest SIZE B MODEL. Downloading and building type copies (the disk-heavy part) take turns, one
+  # model at a time; everything after runs in parallel with the other contests, sharing the GPU through its ledger.
+  local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) fd ok=1
+  mkdir -p "$DATA/locks"; log "$id: queued (waiting its turn to download and build the type copies)"
+  exec {fd}> "$DATA/locks/store-turn"; flock "$fd"
   log "$id: started"
-  if job cpu "$id-fetch" "${R[@]}" fetch "$2" "$3" && job gpu "$id-run" "${R[@]}" run "$2" "$3" \
-     && job cpu "$id-upload" "${R[@]}" upload "$2" "$3"; then log "$id: done"; else log "$id: FAILED or stopped"; fi
+  job cpu "$id-fetch" "${R[@]}" fetch "$2" "$3" && job gpu "$id-store" "${R[@]}" store "$2" "$3" || ok=0
+  exec {fd}>&-
+  if [ "$ok" = 1 ] && job gpu "$id-run" "${R[@]}" run "$2" "$3" && job cpu "$id-upload" "${R[@]}" upload "$2" "$3"
+  then log "$id: done"; else log "$id: FAILED or stopped"; fi
   pgrep -f "panther _contest [^ ]+ [0-9]+ $3\$" | grep -qv "^$$\$" ||
     find "$DATA/store/$3" -name "$3-*.gguf" ! -name "*-BF16.gguf" -delete 2>/dev/null
 }
