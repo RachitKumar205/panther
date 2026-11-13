@@ -42,6 +42,7 @@ PRESETS = {"IQ1_S": 1.56, "IQ1_M": 1.75, "IQ2_XXS": 2.06, "IQ2_XS": 2.31, "IQ2_S
            "IQ4_XS": 4.25, "Q3_K_L": 4.27, "Q4_K_S": 4.58, "Q4_K_M": 4.89, "Q5_K_S": 5.54, "Q5_K_M": 5.69,
            "Q6_K": 6.56, "Q8_0": 8.5}
 BUDGET = 0
+MARGIN = 100 * GIB  # downloads and type copies leave this much free for the searches running beside them
 
 
 def note(msg: str) -> None:
@@ -120,6 +121,10 @@ def fetch(model: str) -> None:
     if (hf / "config.json").exists() or (done.exists() and set(CFG["formats"]) <= set(
             json.loads(done.read_text()))):
         return
+    need = 2 * sum(x.rows * x.cols for x in Model(model).matrices) + MARGIN  # 16-bit weights + room for searches
+    while shutil.disk_usage(DATA).free < need:
+        note(f"{short(model)} fetch: waiting for {need / GIB:.0f} GB of free disk")
+        time.sleep(600)
     m = MODELS[model]
     subprocess.run([os.environ["PANTHER_HF"], "download", m["repo"], "--revision", m["revision"], "--local-dir",
                     str(hf)], check=True)
@@ -142,8 +147,8 @@ def store(model: str) -> None:
     M = Model(model)
     al, n = M.allowed(), sum(m.rows * m.cols for m in M.matrices)
     for t in CFG["formats"]:
-        while not copy_of(model, t).exists() and shutil.disk_usage(DATA).free < n * bpw(t) / 8 + 30 * GIB:
-            note(f"{short(model)} store: waiting for {n * bpw(t) / 8 / GIB + 30:.0f} GB of free disk for the {t} copy")
+        while not copy_of(model, t).exists() and shutil.disk_usage(DATA).free < n * bpw(t) / 8 + MARGIN:
+            note(f"{short(model)} store: waiting for {(n * bpw(t) / 8 + MARGIN) / GIB:.0f} GB of free disk for the {t} copy")
             time.sleep(600)
         if not copy_of(model, t).exists():  # embedding / head take Q8_0 where the type needs imatrix data they lack
             emb, head = ((t if t in al.get(n, al["token_embd.weight"]) else "Q8_0").lower()
