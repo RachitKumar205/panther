@@ -89,13 +89,33 @@ usually large: the weights that multiply them matter more and are rounded more c
   is rounded up, the next ones are nudged down to cancel it, so the sums stay right. Columns are rounded in order and
   each one's error is spread over the columns not yet rounded, weighted by how the inputs move together (measured on
   calibration text). Individual weights may move further from their originals; the matrix's outputs move less. Same
-  type, same file size, same speed. On the 7B's first layer this cut each matrix's output error about 3× in every type
-  tried (Q4_K, Q3_K, IQ3_S, Q2_K, IQ2_XS); the whole-model effect is being measured (`experiments/types`).
+  type, same file size, same speed. **Used for every type copy** (`src/panther/rounding.py`); measured below.
 - **Learned rounding** (GSQ): starts from GPTQ and *learns* for each weight whether to go up or down a level.
 - **Saliency** (GuidedQuant): one backward pass through the original measures how much each layer's output error moves
   the final answer, so rounding spends its effort where it matters.
 - **Rotation** (SpinQuant): a fixed reversible mixing of each layer's directions spreads out extreme values, so every
   type rounds more cleanly; baked into the weights, the architecture is unchanged. To be tested.
+
+**Which types work, and what smarter rounding buys** (Qwen2.5 7B, every matrix in one type, 2026-11-13). Drift is
+KL from the original on the selection text (lower is better):
+
+| Type | Bits/weight | Drift, llama.cpp rounding | Drift, error-compensated | |
+|---|---|---|---|---|
+| Q8_0 / Q6_K / Q5_K | 8.5 / 6.6 / 5.5 | 0.0011 / 0.0021 / 0.0048 | | near-lossless |
+| Q4_K | 4.5 | 0.0157 | 0.0145 | −8 % |
+| IQ4_XS / IQ4_NL / Q4_0 | 4.25 / 4.5 / 4.5 | 0.020 / 0.020 / 0.030 | | worse than Q4_K |
+| **Q3_K** | 3.44 | 0.134 | **0.064** | **−52 %**, now equal to IQ3_S |
+| IQ3_S | 3.44 | 0.064 | 0.065 | no change |
+| IQ3_XXS | 3.06 | 0.102 | | |
+| Q2_K | 2.63 | 0.241 | 0.214 | −11 % |
+| IQ2_XS | 2.31 | 0.333 | 0.302 | −9 % |
+| IQ2_XXS / IQ1_M | 2.06 / 1.75 | 0.562 / 0.980 | | |
+| MXFP4 / TQ2_0 | 4.25 / 2.06 | 0.235 / 13.2 | | do not work for normal models |
+
+Decision: the search may use both K and IQ types (K types are faster on the Pi and gain most from the rounding; IQ
+types are still better per bit around 2 bits), all built with error-compensated rounding; MXFP4, TQ and the legacy
+Q4_0/Q5_0 are out. At about 2 bits the gain is small because errors are compensated between blocks of 256 weights,
+not inside them; learned rounding (GSQ) is the known fix if needed.
 
 ### 4. Measuring quality
 
@@ -122,8 +142,8 @@ Once per model:
 
 1. **fetch**: download the original at a pinned revision.
 2. **store**: convert it to a 16-bit **GGUF** (llama.cpp's file format), compute the importance matrix, and quantize
-   the *whole* model once into every type the budget can use (**type copies**). Building any candidate later is
-   picking each matrix from the right copy, which takes seconds. (Next: smarter rounding builds these copies.)
+   the *whole* model once into every type the budget can use (**type copies**), each matrix with error-compensated
+   rounding. Building any candidate later is picking each matrix from the right copy, which takes seconds.
 3. **error**: the **offline error** of every matrix in every type (importance-weighted squared error), a cheap guess
    the search uses to repair and to fit its model.
 4. **refs**: the original's reference outputs: next-word probabilities on the selection text and on its own answers,
@@ -159,7 +179,7 @@ The end:
 
 | | First method | Second method |
 |---|---|---|
-| Type copies | llama.cpp's plain rounding | error-compensated rounding (being measured) |
+| Type copies | llama.cpp's plain rounding | error-compensated rounding |
 | Search score | accuracy − 10 × KL on benchmark text | flips + 10 × drift on the original's own answers |
 | After the search | nothing | distillation of the top 3 (next) |
 | Search itself | GA + solver | unchanged |
@@ -169,7 +189,7 @@ The end:
 On the server ([deploy/server](deploy/server/README.md)):
 
 ```bash
-setsid nohup deploy/server/run.sh "5 Qwen2.5-14B-Instruct" "7 Mistral-24B-Instruct" >/dev/null 2>&1 &
+setsid nohup deploy/server/run.sh -j 2 "3 Qwen2.5-7B-Instruct" "5 Qwen2.5-14B-Instruct" >/dev/null 2>&1 &
 ```
 
 On the Pi ([pi](pi/README.md)): `nohup bash pi/await.sh <hf-user> 5:14b 7:24b > ~/panther-pi/await.log 2>&1 &`
@@ -185,7 +205,7 @@ Tests: `uv sync && uv run pytest`
 | [scripts/server](scripts/server/README.md) | The pipeline and the status page |
 | [deploy/server](deploy/server/README.md) | Container image and jobs, the contest runner, server setup and removal |
 | [pi](pi/README.md) | Pi setup and the RAM/speed check of a winner |
-| [experiments/types](experiments/types/run.py) | Which types work, and plain vs error-compensated rounding (temporary) |
+
 
 ## Related work
 

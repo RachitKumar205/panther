@@ -15,5 +15,5 @@ contests:
 # Quantization types. A model's list for a budget is those from 1.5 bits/weight below to 2.5 above the average the
 # budget allows. Types that need importance-matrix data are never used where there is none (token embedding; the
 # output layer unless configs/models.yaml sets imatrix_process_output).
-formats: [IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, Q4_K, Q5_K, Q6_K, Q8_0]
+formats: [IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, Q2_K, IQ3_XXS, Q3_K, IQ3_S, IQ4_XS, Q4_K, Q5_K, Q6_K, Q8_0]
 requires_imatrix: [IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS]

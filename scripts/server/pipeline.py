@@ -1,6 +1,6 @@
 """The Panther pipeline (README: "How it works"). A contest is one model at one RAM budget (GiB).
 
-  pipeline.py fetch MODEL            # CPU container (has network): the weights at the pinned revision
+  pipeline.py fetch BUDGET MODEL     # CPU container (has network): the weights at the pinned revision
   pipeline.py run BUDGET MODEL       # GPU container: store, error, refs, preset, ga, final, bundle in order
   pipeline.py STEP BUDGET MODEL      # one of those steps; every step skips work already on disk
   pipeline.py upload BUDGET MODEL    # CPU container: the Pi bundle to Hugging Face
@@ -107,8 +107,10 @@ def gpu(nbytes: int, hold_s: int = 3600):
 # --- fetch, store, error, references ----------------------------------------------------------------------------
 
 def fetch(model: str) -> None:
-    hf = DATA / "hf" / model
-    if (STORE / model / f"{model}-BF16.gguf").exists() or (hf / "config.json").exists():
+    """The weights, unless the store already has everything this budget needs (rounding reads them)."""
+    hf, done = DATA / "hf" / model, STORE / model / "rounded.json"
+    if (hf / "config.json").exists() or (done.exists() and set(Model(model).menu(BUDGET)) <= set(
+            json.loads(done.read_text()))):
         return
     m = MODELS[model]
     subprocess.run([os.environ["PANTHER_HF"], "download", m["repo"], "--revision", m["revision"], "--local-dir",
@@ -124,7 +126,6 @@ def store(model: str) -> None:
         subprocess.run([os.environ.get("PANTHER_CONVERT_PY", sys.executable), "/opt/llama.cpp/convert_hf_to_gguf.py",
                         str(DATA / "hf" / model), "--outtype", "bf16", "--outfile", f"{bf16}.part"], env=env, check=True)
         os.rename(f"{bf16}.part", bf16)
-        shutil.rmtree(DATA / "hf" / model)
     if not imat.exists():
         po = ["--process-output"] if MODELS[model].get("imatrix_process_output") else []
         subprocess.run([str(BIN / "llama-imatrix"), "-m", str(bf16), "-f", str(DATA / "splits/calibration.txt"),
@@ -141,6 +142,18 @@ def store(model: str) -> None:
                             emb, "--output-tensor-type", head, str(bf16), part, FTYPE.get(t, t), str(THREADS)],
                            check=True, capture_output=True)
             os.rename(part, copy_of(model, t))
+    done = d / "rounded.json"  # types whose copy has error-compensated codes (panther.rounding)
+    have = json.loads(done.read_text()) if done.exists() else []
+    if todo := [t for t in M.menu(BUDGET) if t not in have]:
+        from panther.rounding import round_copies
+        h, i = M.matrices[2].cols, max(x.cols for x in M.matrices)
+        per_layer = 4 * (3 * h * h + i * i)  # bytes of the four input Hessians of one layer
+        with gpu(bf16.stat().st_size + 24 * GIB + 2 * per_layer, 6 * 3600):
+            round_copies(DATA / "hf" / model, bf16, {t: copy_of(model, t) for t in todo},
+                         DATA / "splits/calibration.txt", max(1, int(20 * GIB // per_layer)))
+        done.write_text(json.dumps(have + todo))
+    if (DATA / "hf" / model).exists():
+        shutil.rmtree(DATA / "hf" / model)  # the 16-bit GGUF is the original from here on
 
 
 _READ: dict[Path, dict] = {}
@@ -556,13 +569,10 @@ STEPS = {"store": store, "error": error, "refs": refs, "preset": preset, "ga": g
 
 def main() -> int:
     global BUDGET
-    cmd, *args = sys.argv[1:]
-    if cmd == "fetch":
-        fetch(args[0])
-        return 0
-    BUDGET, model = int(args[0]), args[1]
-    if cmd == "upload":
-        upload(model)
+    cmd, b, model = sys.argv[1:4]
+    BUDGET = int(b)
+    if cmd in ("fetch", "upload"):
+        (fetch if cmd == "fetch" else upload)(model)
         return 0
     for s in STEPS if cmd == "run" else [cmd]:
         t0 = time.time()

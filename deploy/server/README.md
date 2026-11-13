@@ -6,10 +6,10 @@ How Panther runs on the shared server (RHEL 10, SELinux enforcing, RTX PRO 6000 
 ## Running contests
 
 ```bash
-setsid nohup deploy/server/run.sh "5 Qwen2.5-14B-Instruct" "7 Mistral-24B-Instruct" >/dev/null 2>&1 &
+setsid nohup deploy/server/run.sh -j 2 "3 Qwen2.5-7B-Instruct" "5 Qwen2.5-14B-Instruct" >/dev/null 2>&1 &
 ```
 
-`run.sh` runs its contests one after another (start several for parallel lanes): fetch (CPU job), every pipeline
+`run.sh` is the one entrypoint: it runs its contests, up to `-j` at once: fetch (CPU job), every pipeline
 step (one GPU job), upload (CPU job). Steps skip finished work, so a stopped contest is simply started again. When
 a model has no later or running contest, its type copies are deleted (the original, importance matrix and presets
 stay). Log: `data/logs/run.log`; progress: `data/logs/progress-b<B>.log` and the status page.
