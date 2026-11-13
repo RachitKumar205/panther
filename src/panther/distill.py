@@ -98,5 +98,7 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
     del rw, out
     shutil.move(f"{dst}.part", dst)
     del m, opt, scales, norms
+    import gc
+    gc.collect()  # the parametrized layers form reference cycles: collect them, or their GPU memory stays held
     torch.cuda.empty_cache()  # hand the GPU back: llama.cpp runs next, in another process
     return dst
