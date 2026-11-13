@@ -537,11 +537,16 @@ def final(model: str) -> int:
             finally:
                 src.unlink(missing_ok=True)
         rows[k] = score(model, None, f"v2t:{digest(it['assignment'])}", path=files[k], full=True)
-        note(f"{sm} final {k}: score {rows[k]['score']:.2f} (flips {rows[k]['flips']:.2f}%, KL {rows[k]['kl']:.4f}, "
-             f"accuracy {rows[k]['accuracy']:.2f}) on all selection questions, after distillation")
+        plain = f"{k} undistilled"  # distillation can hurt near-lossless files: the undistilled version competes too
+        files[plain] = build(model, it["assignment"], out(model, "tuned", f"{BUDGET}-{digest(it['assignment'])}-plain.gguf"))
+        rows[plain] = score(model, None, f"v2:{digest(it['assignment'])}", path=files[plain], full=True)
+        for name in (k, plain):
+            note(f"{sm} final {name}: score {rows[name]['score']:.2f} (flips {rows[name]['flips']:.2f}%, KL "
+                 f"{rows[name]['kl']:.4f}, accuracy {rows[name]['accuracy']:.2f}) on all selection questions")
     win = min(rows, key=lambda k: rows[k]["score"])
-    label, p = f"v2t:{digest(items[win]['assignment'])}", json.loads(out(f"budget-{BUDGET}", f"preset-{model}.json")
-                                                                      .read_text())["preset"]
+    item = items[win.split()[0]]
+    label = f"{'v2' if win.endswith('undistilled') else 'v2t'}:{digest(item['assignment'])}"
+    p = json.loads(out(f"budget-{BUDGET}", f"preset-{model}.json").read_text())["preset"]
     score(model, None, f"preset:{p}", path=STORE / model / f"preset-{p}.gguf", full=True)
     d, lo, hi = stats.compare(correct(model, label), correct(model, f"preset:{p}"))
     note(f"{sm} guard: {win} vs preset {p} on all selection questions: {d:+.2f} pts [{lo:+.2f}, {hi:+.2f}]")
@@ -552,8 +557,8 @@ def final(model: str) -> int:
         ours = test(model, files[win], label)
         theirs, orig = test(model, STORE / model / f"preset-{p}.gguf", f"preset:{p}"), test(model, bf16, "original")
     d, lo, hi = stats.compare(ours["correct"], theirs["correct"])
-    res = {"winner": win, "file": str(files[win]), "assignment": items[win]["assignment"], "ram_gib":
-           items[win]["ram_gib"], "preset": p, "diff": d, "ci": [lo, hi], "verdict": stats.verdict(lo, hi)}
+    res = {"winner": win, "file": str(files[win]), "assignment": item["assignment"], "ram_gib": item["ram_gib"],
+           "preset": p, "diff": d, "ci": [lo, hi], "verdict": stats.verdict(lo, hi)}
     for k, r in (("ours", ours), ("preset_test", theirs), ("original", orig)):
         res[k] = {"accuracy": stats.acc(r["correct"]), "kl": r["kl"], "ppl": r["ppl"],
                   "flips": stats.flips(r["correct"], orig["correct"]),

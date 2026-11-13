@@ -201,7 +201,8 @@ importance_c the mean squared input of column c. Used only to repair genomes and
 
 ### The final step and the verdict
 
-1. Each of the top 3 distilled, then scored with the same formula on all 4,502 selection questions; lowest wins.
+1. Each of the top 3 distilled; the distilled and the undistilled version of each (6 files) scored with the same
+   formula on all 4,502 selection questions; lowest wins (distillation can hurt files that are already near-lossless).
 2. **Guard**: the winner vs the real preset file on those questions (paired bootstrap, below); if the whole 95 %
    interval is below 0, the winner is rejected and the contest ends without a result.
 3. **Held-out test**, never seen before: MMLU 1,000, HellaSwag 2,000, ARC 1,172, WinoGrande 1,267, and GSM8K (written
