@@ -564,6 +564,9 @@ def final(model: str) -> int:
                   "flips": stats.flips(r["correct"], orig["correct"]),
                   "per_task": {t: 100 * float(np.mean(v)) for t, v in r["correct"].items()}}
     out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").write_text(json.dumps(res, indent=1))
+    for f in files.values():  # only the winner's file is kept
+        if f != files[win]:
+            f.unlink(missing_ok=True)
     note(f"{sm} held-out test vs preset {p}: {res['ours']['accuracy']:.2f} vs {res['preset_test']['accuracy']:.2f} "
          f"(original {res['original']['accuracy']:.2f}) | our winner {d:+.2f} pts [{lo:+.2f}, {hi:+.2f}] "
          f"{res['verdict']}, flips {res['ours']['flips']:.2f} vs {res['preset_test']['flips']:.2f}%")
