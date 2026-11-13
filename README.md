@@ -190,7 +190,7 @@ importance_c the mean squared input of column c. Used only to repair genomes and
   **W × exp(θ)** (θ starts at 0, so the student starts as the file; exp keeps scales positive); plus every **norm
   weight**. The whole numbers never change.
 - **Loss**: at every position, KL(teacher ‖ student) over the teacher's top 64 (teacher probabilities renormalized
-  over them; the student's from its full output). Adam, 300 steps of 4 sequences; learning rate 0.002 for θ, 0.0001
+  over them; the student's from its full output). Adam, 600 steps of 2 sequences; learning rate 0.002 for θ, 0.0001
   for norms; activations recomputed instead of stored, to save memory.
 - **Written back**: every K and IQ type stores one 16-bit scale **d** per block and a block's values are proportional
   to it, so **d ← d × exp(θ)** at the block's byte position (Q2_K, Q4_K, Q5_K also scale their minimum, dmin; Q8_0's

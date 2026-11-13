@@ -521,8 +521,10 @@ def final(model: str) -> int:
                 with gpu(bf16.stat().st_size + 20 * GIB, 3 * 3600):  # teacher, then student: never both
                     distill(src, bf16, [DATA / "splits/text" / f"answers-{model}.txt", DATA / "splits/calibration.txt"],
                             files[k], lambda m, k=k: note(f"{sm} {k} {m}"))
-            except Exception as e:  # noqa: BLE001  (e.g. an architecture transformers cannot load from GGUF)
-                note(f"{sm} {k}: distillation not possible ({type(e).__name__}: {e}); scored as built")
+            except Exception as e:  # noqa: BLE001  (an architecture transformers cannot load from GGUF; never memory)
+                if "out of memory" in str(e).lower():
+                    raise
+                note(f"{sm} {k}: distillation not possible ({type(e).__name__}: {str(e)[:120]}); scored as built")
                 shutil.copy(src, files[k])
             finally:
                 src.unlink(missing_ok=True)

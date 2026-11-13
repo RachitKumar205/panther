@@ -18,7 +18,7 @@ LINEAR = {"self_attn.q_proj": "attn_q", "self_attn.k_proj": "attn_k", "self_attn
           "self_attn.o_proj": "attn_output", "mlp.gate_proj": "ffn_gate", "mlp.up_proj": "ffn_up",
           "mlp.down_proj": "ffn_down"}
 NORM = {"input_layernorm": "attn_norm", "post_attention_layernorm": "ffn_norm"}
-SEQ, BATCH, TOPK, STEPS = 512, 4, 64, 300
+SEQ, BATCH, TOPK, STEPS = 512, 2, 64, 600
 
 
 def _load(path: Path):
@@ -58,8 +58,8 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
             th = torch.zeros(lin.weight.shape[0], lin.weight.shape[1] // 256, device="cuda", requires_grad=True)
 
             class Scale(torch.nn.Module):
-                def forward(self, w, th=th):
-                    return w * torch.exp(th).repeat_interleave(256, 1).to(w.dtype)
+                def forward(self, w, th=th):  # one multiplier per 256 weights, broadcast (no full-size copy)
+                    return (w.view(w.shape[0], -1, 256) * torch.exp(th).to(w.dtype)[:, :, None]).view(w.shape)
             P.register_parametrization(lin, "weight", Scale())
             scales[name] = th
         for hf, g in NORM.items():
