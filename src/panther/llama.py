@@ -136,7 +136,7 @@ def complete(gguf: Path, prompts: list[str], max_tokens: int = 256, log: Path | 
                             str(8 * 2048), "-t", str(THREADS), "-ngl", "99", "--no-webui"],
                            stdout=open(log or os.devnull, "w"), stderr=subprocess.STDOUT)
     try:
-        for _ in range(600):
+        for _ in range(1800):  # a large model loads slowly while the disk is busy
             try:
                 if urllib.request.urlopen(url + "/health", timeout=5).status == 200:
                     break
