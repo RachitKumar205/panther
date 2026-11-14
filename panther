@@ -7,7 +7,7 @@
 #   ./panther status                what is running, GPU, disk; the live page has the rest
 #   ./panther build | test          build the server image | run the tests (on your machine)
 #   ./panther exec CMD...           one command in a GPU container (log: data/logs/exec-<pid>.log)
-#   ./panther save 14b              save a model's type copies to its private Hugging Face repo (also automatic)
+#   ./panther save 14b | upload 24b@7   save type copies / upload a winner for the Pi (both also automatic)
 #
 # Live page: https://huggingface.co/<user>/panther-status. Settings: deploy/server/local.env (git-ignored).
 set -uo pipefail
@@ -126,6 +126,7 @@ case "${1:-}" in
   _contest) contest "$2" "$3" "$4" ;;
   exec) shift; job gpu "exec-$$" "$@" ;;
   save) job cpu "save-$2" /opt/venv/bin/python scripts/server/pipeline.py save 0 "$(model "$2@0")" ;;
+  upload) job cpu "upload-$2" /opt/venv/bin/python scripts/server/pipeline.py upload "${2#*@}" "$(model "$2")" ;;
   _guard) guard ;;
   _status) job cpu status /opt/venv/bin/python scripts/server/status.py ;;
   *) sed -n 2,11p "$0" ;;

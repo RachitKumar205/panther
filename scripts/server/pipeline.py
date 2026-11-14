@@ -166,12 +166,12 @@ def fetch(model: str) -> None:
 
 def save(model: str) -> None:
     """The finished store (16-bit original, importance matrix, presets, type copies) to a private Hugging Face repo,
-    so later runs download it instead of rebuilding."""
+    so later runs download it instead of rebuilding. Public: the models are openly licensed."""
     from huggingface_hub import HfApi
     if not stored(model):
         return
     api, repo = HfApi(), store_repo(model)
-    api.create_repo(repo, private=True, exist_ok=True)
+    api.create_repo(repo, private=False, exist_ok=True)
     have = set(api.list_repo_files(repo))
     if all(f.name in have for f in (STORE / model).iterdir()):
         return
@@ -653,7 +653,7 @@ def bundle(model: str) -> None:
 def upload(model: str) -> None:
     from huggingface_hub import HfApi
     repo = os.environ["PANTHER_HF_REPO"].format(size=short(model).lower(), budget=BUDGET) + SUFFIX
-    HfApi().create_repo(repo, private=True, exist_ok=True)
+    HfApi().create_repo(repo, private=False, exist_ok=True)
     HfApi().upload_folder(repo_id=repo, folder_path=DATA / "pi_bundle" / f"budget-{BUDGET}-{short(model).lower()}{SUFFIX}")
     note(f"{short(model)} Pi bundle uploaded")
 
