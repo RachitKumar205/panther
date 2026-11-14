@@ -98,10 +98,13 @@ candidate's drift is measured on exactly that text.
 
 1. **fetch** (container with internet): the original model, at a pinned version.
 2. **store** (GPU): convert to a 16-bit **GGUF** (llama.cpp's file format), compute the importance matrix, build the
-   14 **type copies** (the whole model in each type, every matrix with smarter rounding), delete the download. A
+   14 **type copies** (the whole model in each type, every matrix with smarter rounding; each copy's file is written
+   directly, its layer matrices quantized only once, by the rounding), delete the download. A
    candidate is later assembled in seconds by picking each matrix from the right copy. Contests of the same model
    share one store.
 3. **error**: for every matrix and type, a cheap estimate of the damage (for repairs and the solver).
+   Steps 4 and 5 start on the GPU as soon as the 16-bit original and its importance matrix exist, while the type
+   copies are still being built on the CPU.
 4. **refs**: the original writes its GSM8K answers; its next-word probabilities on them and on the selection text,
    and which questions it gets right, are recorded.
 5. **preset**: llama.cpp's presets near the budget are built and tested on the held-out questions: of the two largest
@@ -178,6 +181,10 @@ importance_c the mean squared input of column c. Used only to repair genomes and
   also holds about 2.7 × its file in RAM; 1.5B: ~11, 7B: 3, 14B: 2),
   as the GPU allows next to the other contests. Each is built from the type copies in seconds, books GPU memory
   (file × 1.1 + 4 GiB), is scored, then deleted. The best 16 are kept.
+- **First look** (once those 16 exist): a new genome is first scored on a third of the questions (MMLU 100, the
+  others 66) plus the full drift. If that score is already more than 3 above the worst of the 16 (about 2 standard
+  errors of the flips on that many questions), it is **dropped** without finishing; it would almost surely not
+  enter the 16. Otherwise it is scored on all 900 as usual. Dropped genomes count toward the stop rule.
 - **Stop**: after at least 30 genomes, once 15 in a row improve the best by less than 0.2; at most 70. The 3 lowest
   scores go to the final step.
 
@@ -208,11 +215,14 @@ importance_c the mean squared input of column c. Used only to repair genomes and
 
 1. Each of the top 3 distilled; the distilled and the undistilled version of each (6 files) scored with the same
    formula on all 4,502 selection questions; lowest wins (distillation can hurt files that are already near-lossless).
+   Overlapped: one distillation at a time (it needs most of the GPU), while every file already built (the
+   undistilled ones, finished distillations, the preset) is scored beside it.
 2. **Guard**: the winner vs the real preset file on those questions (paired bootstrap, below); if the whole 95 %
    interval is below 0, the winner is rejected and the contest ends without a result.
 3. **Held-out test**, never seen before: MMLU 1,000, HellaSwag 2,000, ARC 1,172, WinoGrande 1,267, and GSM8K (written
    answers, 5 worked examples, the final number must match exactly). **Accuracy = mean of the 5 task accuracies.**
-   Also drift on the selection text, perplexity on web text, flips against the original.
+   Also drift on the selection text, perplexity on web text, flips against the original. Ours and the preset are tested
+   side by side; the original's results were recorded in step 4.
 4. **Paired bootstrap**: 10,000 random resamples of the questions within each task, the same questions for both
    files; ours − preset each time; the middle 95 % is the **95 % interval**. **WIN** if all of it is above 0,
    **LOSE** if all below, **TIE** otherwise.

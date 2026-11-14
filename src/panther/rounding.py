@@ -22,8 +22,9 @@ ROLE_INPUT = {"attn_q": "attn_in", "attn_k": "attn_in", "attn_v": "attn_in", "at
 _LIB = None
 
 
-def quant(w: np.ndarray, imp: np.ndarray, qtype, threads: int = THREADS) -> tuple[np.ndarray, np.ndarray]:
-    """(codes, dequantized values) of the rows of w in qtype, by llama.cpp's quantizer on every thread."""
+def quant(w: np.ndarray, imp: np.ndarray | None, qtype, threads: int = THREADS, deq: bool = True):
+    """(codes, dequantized values or None) of the rows of w in qtype, by llama.cpp's quantizer on every thread.
+    imp None: llama.cpp's own weighting, as llama-quantize uses for a tensor the importance matrix lacks."""
     global _LIB
     from gguf.quants import dequantize
     if _LIB is None:
@@ -34,15 +35,69 @@ def quant(w: np.ndarray, imp: np.ndarray, qtype, threads: int = THREADS) -> tupl
         _LIB.ggml_row_size.argtypes = [ctypes.c_int, ctypes.c_int64]
     t, (rows, n) = int(qtype.value), w.shape
     _LIB.ggml_quantize_init(t)
-    w, imp = np.ascontiguousarray(w, np.float32), np.ascontiguousarray(imp, np.float32)
+    w = np.ascontiguousarray(w, np.float32)
+    imp = None if imp is None else np.ascontiguousarray(imp, np.float32)
     dst = np.empty((rows, _LIB.ggml_row_size(t, n)), np.uint8)
 
     def part(idx):
         a, b = int(idx[0]), int(idx[-1]) + 1
-        _LIB.ggml_quantize_chunk(t, w[a:b].ctypes.data, dst[a:b].ctypes.data, 0, b - a, n, imp.ctypes.data)
+        _LIB.ggml_quantize_chunk(t, w[a:b].ctypes.data, dst[a:b].ctypes.data, 0, b - a, n,
+                                 None if imp is None else imp.ctypes.data)
     with ThreadPoolExecutor(threads) as ex:
         list(ex.map(part, [i for i in np.array_split(np.arange(rows), threads) if len(i)]))
-    return dst, dequantize(dst, qtype).reshape(rows, n)
+    return dst, dequantize(dst, qtype).reshape(rows, n) if deq else None
+
+
+def f32(t) -> np.ndarray:
+    """A tensor of the 16-bit GGUF as float32, rows x columns."""
+    d = np.asarray(t.data)
+    if t.tensor_type.name == "BF16":
+        d = (d.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
+    return d.astype(np.float32).reshape(t.shape[::-1].tolist())
+
+
+def blank(bf16: Path, imat: Path, qtype: str, ftype: str, emb: str, head: str, dst: Path) -> None:
+    """A type copy written directly, instead of by llama-quantize: the word table and the output layer quantized as
+    llama-quantize does (importance from the importance matrix where it has them), norms and biases copied, and
+    every layer matrix left as zeros of its final size for round_copies to fill. llama-quantize quantized every
+    layer matrix only for round_copies to overwrite it: this skips that whole pass."""
+    import gguf
+    r, imx = gguf.GGUFReader(bf16), {t.name: t for t in gguf.GGUFReader(imat).tensors}
+    w = gguf.GGUFWriter(f"{dst}.part", r.fields["general.architecture"].contents())
+    for f in r.fields.values():
+        if f.name not in ("general.architecture", "general.file_type") and not f.name.startswith("GGUF."):
+            w.add_key_value(f.name, f.contents(), f.types[0], sub_type=f.types[-1] if len(f.types) > 1 else None)
+    w.add_file_type(int(gguf.LlamaFileType[f"MOSTLY_{ftype}"]))
+    plan = []
+    for t in r.tensors:
+        typ = {"token_embd.weight": emb, "output.weight": head}.get(t.name)
+        if t.name.startswith("blk.") and len(t.shape) == 2:
+            assert t.name.split(".")[2] in ROLE_INPUT, f"{t.name}: not a matrix round_copies fills"
+            typ = qtype
+        if typ is None:  # norms, biases: as they are
+            plan.append((t, None))
+            w.add_tensor_info(t.name, t.data.shape, t.data.dtype, t.data.nbytes, t.tensor_type)
+            continue
+        qt, (n, rows) = gguf.GGMLQuantizationType[typ.upper()], (int(x) for x in t.shape[:2])
+        assert n % gguf.GGML_QUANT_SIZES[qt][0] == 0, f"{t.name}: {n} columns do not fit {typ}"
+        shape = (rows, gguf.quant_shape_to_byte_shape((n,), qt)[0])
+        plan.append((t, (qt, shape)))
+        w.add_tensor_info(t.name, shape, np.dtype(np.uint8), shape[0] * shape[1], qt)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_ti_data_to_file()
+    for t, q in plan:
+        if q is None:
+            w.write_tensor_data(np.asarray(t.data))
+        elif t.name.startswith("blk."):
+            w.write_tensor_data(np.zeros(q[1], np.uint8))
+        else:
+            im = imx.get(f"{t.name}.in_sum2")
+            imp = None if im is None else np.asarray(im.data, np.float32).reshape(-1) / float(
+                np.asarray(imx[f"{t.name}.counts"].data).reshape(-1)[0])
+            w.write_tensor_data(quant(f32(t), imp, q[0], deq=False)[0])
+    w.close()
+    os.rename(f"{dst}.part", dst)
 
 
 def gptq(w, h, qtype, threads: int = THREADS) -> np.ndarray:
@@ -75,6 +130,8 @@ def round_copies(hf_dir: Path | None, bf16: Path, copies: dict[str, Path], calib
     tok = AutoTokenizer.from_pretrained(**src_args)
     ids = tok(calib.read_text(), return_tensors="pt").input_ids[0][: SEQS * SEQ_LEN].view(SEQS, SEQ_LEN)
     m = AutoModelForCausalLM.from_pretrained(**src_args, dtype=torch.bfloat16).cuda().eval()
+    e = torch.eye(2, device="cuda")  # GPU linear algebra set up once, before threads race to do it
+    torch.linalg.solve_triangular(torch.linalg.cholesky(torch.cholesky_inverse(torch.linalg.cholesky(e))), e, upper=False)
     src = {t.name: t for t in gguf.GGUFReader(bf16).tensors}
     out = {t: gguf.GGUFReader(p, "r+") for t, p in copies.items()}
     dst = {t: {x.name: x for x in r.tensors} for t, r in out.items()}

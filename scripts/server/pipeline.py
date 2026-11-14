@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from hashlib import sha256
 from itertools import zip_longest
@@ -32,6 +32,8 @@ from panther.solver import solve
 RW, STORE, BIN = DATA / "rewrite", DATA / "store", llama.BIN
 TASKS = ["mmlu", "hellaswag", "arc_challenge", "winogrande"]
 FIT = {"mmlu": 300, "arc_challenge": 200, "hellaswag": 200, "winogrande": 200}  # the GA's selection questions
+FIRST = {t: v // 3 for t, v in FIT.items()}  # a first look: a genome clearly worse here is not finished
+DROP_MARGIN = 3.0  # dropped only if its first-look score is this much worse than the population's worst (~2 SE)
 WINDOW = (-0.01, 0.005)  # a genome's RAM must be within -1% / +0.5% of the budget
 POP, ELITE, INFLIGHT, MAX_EVALS, MIN_EVALS, PATIENCE, MIN_GAIN, TOP, SOLVED = 16, 4, 4, 70, 30, 15, 0.2, 3, 4
 KL_WEIGHT = 10  # score = flips % + 10 x KL on the original's own answers (lower is better)
@@ -203,11 +205,8 @@ def store(model: str) -> None:
         if not copy_of(model, t).exists():  # embedding / head take Q8_0 where the type needs imatrix data they lack
             emb, head = ((t if t in al.get(n, al["token_embd.weight"]) else "Q8_0").lower()
                          for n in ("token_embd.weight", "output.weight"))
-            part = f"{copy_of(model, t)}.part"
-            subprocess.run([str(BIN / "llama-quantize"), "--pure", "--imatrix", str(imat), "--token-embedding-type",
-                            emb, "--output-tensor-type", head, str(bf16), part, FTYPE.get(t, t), str(THREADS)],
-                           check=True, capture_output=True)
-            os.rename(part, copy_of(model, t))
+            from panther.rounding import blank  # layer matrices come from the rounding below, quantized once
+            blank(bf16, imat, t, FTYPE.get(t, t), emb, head, copy_of(model, t))
     done = d / "rounded.json"  # types whose copy has error-compensated codes (panther.rounding)
     have = json.loads(done.read_text()) if done.exists() else []
     if todo := [t for t in CFG["formats"] if t not in have]:
@@ -285,6 +284,7 @@ def refs(model: str) -> None:
                 os.rename(f"{ref}/{name}.part", ref / f"{name}.kld")
         for t in TASKS:
             llama.run("task", model, bf16, "original", task=t, split="selection", n=FIT[t])
+            llama.run("task", model, bf16, "original", task=t, split="selection", n=FIRST[t])
             llama.run("task", model, bf16, "original", task=t, split="selection", n=0)
         test(model, bf16, "original")
 
@@ -333,8 +333,11 @@ def test(model: str, path: Path, label: str) -> dict:
         "metrics"]["ppl"]}
 
 
-def score(model: str, a: dict[str, str] | None, label: str, path: Path | None = None, full: bool = False) -> dict:
-    """Flips against the original and KL on its own answers (GA questions, or all selection questions if full)."""
+def score(model: str, a: dict[str, str] | None, label: str, path: Path | None = None, full: bool = False,
+          cut: float | None = None) -> dict:
+    """Flips against the original and KL on its own answers (GA questions, or all selection questions if full).
+    With cut: a first look on a third of the questions; a genome already worse than cut there is dropped
+    ("dropped": True, its score from that third) instead of finishing."""
     n = None if full else FIT
     built = path is None and not (llama.find(model, label, reference="answers") and all(
         llama.find(model, label, task=t, split="selection", n=n[t] if n else 0) for t in TASKS))
@@ -342,6 +345,13 @@ def score(model: str, a: dict[str, str] | None, label: str, path: Path | None = 
         path = path or (build(model, a) if built else Path("/dev/null"))
         with gpu(int(1.1 * path.stat().st_size) + 4 * GIB, 1800):
             kl = llama.run("kl", model, path, label, reference="answers")["metrics"]["kl_mean"]
+            if cut is not None:
+                for t in TASKS:
+                    llama.run("task", model, path, label, task=t, split="selection", n=FIRST[t])
+                c = correct(model, label, FIRST)
+                f = stats.flips(c, correct(model, "original", FIRST))
+                if f + KL_WEIGHT * kl > cut:
+                    return {"score": f + KL_WEIGHT * kl, "flips": f, "kl": kl, "accuracy": stats.acc(c), "dropped": True}
             for t in TASKS:
                 llama.run("task", model, path, label, task=t, split="selection", n=n[t] if n else 0)
     finally:
@@ -354,8 +364,8 @@ def score(model: str, a: dict[str, str] | None, label: str, path: Path | None = 
 
 def _score_job(job):
     global BUDGET
-    BUDGET, model, a = job
-    return score(model, a, f"v2:{digest(a)}")
+    BUDGET, model, a, cut = job
+    return score(model, a, f"v2:{digest(a)}", cut=cut)
 
 
 # --- the genetic search ----------------------------------------------------------------------------------------
@@ -470,8 +480,12 @@ def ga(model: str) -> None:
         if time.time() - f.stat().st_mtime > 3600:
             f.unlink()
     G, sm = Genes(model, BUDGET), short(model)
+    if not all(llama.find(model, "original", task=t, split="selection", n=FIRST[t]) for t in TASKS):
+        with lock(f"{model}-first"), gpu(copy_of(model, "BF16").stat().st_size + 8 * GIB, 3600):  # first look
+            for t in TASKS:
+                llama.run("task", model, copy_of(model, "BF16"), "original", task=t, split="selection", n=FIRST[t])
     queue, pop, seen, scored, hist = G.initial(preset_layout(model, BUDGET)), [], set(), [], []
-    best, last_gain, n = float("inf"), 0, 0
+    best, last_gain, n, dropped = float("inf"), 0, 0, 0
     note(f"{sm} GA: {len(queue)} starting genomes")
 
     def child() -> dict[str, str]:
@@ -493,7 +507,8 @@ def ga(model: str) -> None:
 
         def submit(a: dict[str, str]) -> None:
             seen.add(digest(a))
-            running[ex.submit(_score_job, (BUDGET, model, a))] = a
+            cut = pop[-1][0] + DROP_MARGIN if len(pop) >= POP else None  # a full population: weak ones dropped early
+            running[ex.submit(_score_job, (BUDGET, model, a, cut))] = a
         while queue and len(running) < inflight:
             submit(queue.pop(0))
         while running:
@@ -506,16 +521,18 @@ def ga(model: str) -> None:
                 note(f"{sm} GA: genome {n} failed ({e})")
                 r = {"score": float("inf")}
             hist.append({"n": n, "digest": digest(a), **r})
-            if r["score"] < float("inf"):
+            if r.get("dropped"):
+                dropped += 1
+            elif r["score"] < float("inf"):
                 scored.append((r["score"], a))
                 pop = sorted(pop + [(r["score"], digest(a), a)])[:POP]
-            if r["score"] < best:
+            if r["score"] < best and not r.get("dropped"):
                 last_gain, best = (n if r["score"] < best - MIN_GAIN else last_gain), r["score"]
                 out(f"budget-{BUDGET}", f"ga-{model}-live.json").write_text(json.dumps({"n": n, **r, "assignment": a}))
                 note(f"{sm} GA: genome {n}: new best score {best:.2f} (flips {r['flips']:.2f}%, KL {r['kl']:.4f}, "
                      f"accuracy {r['accuracy']:.2f}, RAM {G.ram(a) / GIB:.3f} GiB)")
             elif n % 10 == 0:
-                note(f"{sm} GA: {n} genomes, best score {best:.2f}")
+                note(f"{sm} GA: {n} genomes, best score {best:.2f} ({dropped} dropped after a first look)")
             if n + len(running) < MAX_EVALS and (n < MIN_EVALS or n - last_gain < PATIENCE):
                 if not queue and len(scored) >= 8:
                     try:
@@ -528,7 +545,7 @@ def ga(model: str) -> None:
     lst.write_text(json.dumps({f"{sm}:ga{i}": {"assignment": a, "score": s, "ram_gib": G.ram(a) / GIB}
                                for i, (s, _, a) in enumerate(pop[:TOP], 1)}, indent=1))
     out(f"budget-{BUDGET}", f"ga-{model}{SUFFIX}.json").write_text(json.dumps(hist, indent=1))
-    note(f"{sm} GA done: {n} genomes; best score {best:.2f}")
+    note(f"{sm} GA done: {n} genomes ({dropped} dropped after a first look); best score {best:.2f}")
 
 
 # --- the competitor and the final comparison -------------------------------------------------------------------
@@ -570,47 +587,61 @@ def preset(model: str) -> None:
 
 
 def final(model: str) -> int:
-    """The GA's top 3, each distilled (the original as teacher), scored on all selection questions: the lowest
-    score wins. Guard: not less accurate than the preset there. Then both on the held-out test, question by question."""
+    """The GA's top 3, each distilled (the original as teacher) and undistilled, scored on all selection questions:
+    the lowest score wins. Guard: not less accurate than the preset there. Then both on the held-out test, question
+    by question. Overlapped: one distillation at a time (it needs most of the GPU) while everything already built is
+    scored beside it, and the held-out tests run side by side."""
+    import threading
     from panther.distill import distill
     sm, bf16 = short(model), copy_of(model, "BF16")
     items = json.loads(out(f"budget-{BUDGET}", f"list-{model}{SUFFIX}.json").read_text())
-    files, rows = {}, {}
-    for k, it in items.items():
-        files[k] = out(model, "tuned", f"{BUDGET}-{digest(it['assignment'])}.gguf")
-        if not files[k].exists():
-            src = build(model, it["assignment"])
-            try:
-                with gpu(2 * bf16.stat().st_size + 12 * GIB, 3 * 3600):  # generous: weights, logits, gradients
-                    distill(src, bf16, [DATA / "splits/text" / f"answers-{model}.txt", DATA / "splits/calibration.txt"],
-                            files[k], lambda m, k=k: note(f"{sm} {k} {m}"))
-            except Exception as e:  # noqa: BLE001  (an architecture transformers cannot load from GGUF; never memory)
-                if "out of memory" in str(e).lower():
-                    raise
-                note(f"{sm} {k}: distillation not possible ({type(e).__name__}: {str(e)[:120]}); scored as built")
-                shutil.copy(src, files[k])
-            finally:
-                src.unlink(missing_ok=True)
-        rows[k] = score(model, None, f"v2t:{digest(it['assignment'])}", path=files[k], full=True)
-        plain = f"{k} undistilled"  # distillation can hurt near-lossless files: the undistilled version competes too
-        files[plain] = build(model, it["assignment"], out(model, "tuned", f"{BUDGET}-{digest(it['assignment'])}-plain.gguf"))
-        rows[plain] = score(model, None, f"v2:{digest(it['assignment'])}", path=files[plain], full=True)
-        for name in (k, plain):
-            note(f"{sm} final {name}: score {rows[name]['score']:.2f} (flips {rows[name]['flips']:.2f}%, KL "
-                 f"{rows[name]['kl']:.4f}, accuracy {rows[name]['accuracy']:.2f}) on all selection questions")
+    p = json.loads(out(f"budget-{BUDGET}", f"preset-{model}.json").read_text())["preset"]
+    files, rows, one = {}, {}, threading.Lock()
+
+    def scored(name: str, label: str, path: Path) -> None:
+        rows[name] = r = score(model, None, label, path=path, full=True)
+        note(f"{sm} final {name}: score {r['score']:.2f} (flips {r['flips']:.2f}%, KL {r['kl']:.4f}, accuracy "
+             f"{r['accuracy']:.2f}) on all selection questions")
+
+    def finalist(k: str, it: dict, ex: ThreadPoolExecutor) -> list:
+        dg, plain = digest(it["assignment"]), f"{k} undistilled"  # distillation can hurt near-lossless files
+        files[plain] = build(model, it["assignment"], out(model, "tuned", f"{BUDGET}-{dg}-plain.gguf"))
+        jobs, files[k] = [ex.submit(scored, plain, f"v2:{dg}", files[plain])], out(model, "tuned", f"{BUDGET}-{dg}.gguf")
+        with one:
+            if not files[k].exists():
+                try:
+                    with gpu(bf16.stat().st_size + 20 * GIB, 3 * 3600):  # student weights + activations
+                        distill(files[plain], bf16, [DATA / "splits/text" / f"answers-{model}.txt",
+                                                     DATA / "splits/calibration.txt"],
+                                files[k], lambda m: note(f"{sm} {k} {m}"))
+                except Exception as e:  # noqa: BLE001  (an architecture transformers cannot load from GGUF)
+                    if "out of memory" in str(e).lower():
+                        raise
+                    note(f"{sm} {k}: distillation not possible ({type(e).__name__}: {str(e)[:120]}); scored as built")
+                    shutil.copy(files[plain], files[k])
+        return jobs + [ex.submit(scored, k, f"v2t:{dg}", files[k])]
+    with ThreadPoolExecutor(8) as ex, ThreadPoolExecutor(len(items)) as fx:
+        jobs = [ex.submit(score, model, None, f"preset:{p}", path=STORE / model / f"preset-{p}.gguf", full=True)]
+        for f in [fx.submit(finalist, k, it, ex) for k, it in items.items()]:
+            jobs += f.result()
+        for f in jobs:
+            f.result()
     win = min(rows, key=lambda k: rows[k]["score"])
     item = items[win.split()[0]]
     label = f"{'v2' if win.endswith('undistilled') else 'v2t'}:{digest(item['assignment'])}"
-    p = json.loads(out(f"budget-{BUDGET}", f"preset-{model}.json").read_text())["preset"]
-    score(model, None, f"preset:{p}", path=STORE / model / f"preset-{p}.gguf", full=True)
     d, lo, hi = stats.compare(correct(model, label), correct(model, f"preset:{p}"))
     note(f"{sm} guard: {win} vs preset {p} on all selection questions: {d:+.2f} pts [{lo:+.2f}, {hi:+.2f}]")
     if hi < 0:
         note(f"{sm} guard: WORSE than the preset; not taken as our result")
         return 2
-    with gpu(files[win].stat().st_size + 12 * GIB, 4 * 3600):
-        ours = test(model, files[win], label)
-        theirs, orig = test(model, STORE / model / f"preset-{p}.gguf", f"preset:{p}"), test(model, bf16, "original")
+
+    def held(path: Path, lab: str) -> dict:
+        with gpu(path.stat().st_size + 12 * GIB, 4 * 3600):
+            return test(model, path, lab)
+    with ThreadPoolExecutor(2) as ex:  # side by side; the original's held-out results were recorded by refs
+        a, b = ex.submit(held, files[win], label), ex.submit(held, STORE / model / f"preset-{p}.gguf", f"preset:{p}")
+        orig = test(model, bf16, "original")
+        ours, theirs = a.result(), b.result()
     d, lo, hi = stats.compare(ours["correct"], theirs["correct"])
     res = {"winner": win, "file": str(files[win]), "assignment": item["assignment"], "ram_gib": item["ram_gib"],
            "preset": p, "diff": d, "ci": [lo, hi], "verdict": stats.verdict(lo, hi)}
