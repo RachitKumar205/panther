@@ -141,7 +141,7 @@ def stored(model: str) -> bool:
 
 
 def fetch(model: str) -> None:
-    """The type copies saved by an earlier run (private Hugging Face repo), else the weights if they are needed:
+    """The type copies saved by an earlier run (public Hugging Face repo), else the weights if they are needed:
     to convert, or to round InternLM (transformers cannot load it from GGUF)."""
     if stored(model):
         return
@@ -165,7 +165,7 @@ def fetch(model: str) -> None:
 
 
 def save(model: str) -> None:
-    """The finished store (16-bit original, importance matrix, presets, type copies) to a private Hugging Face repo,
+    """The finished store (16-bit original, importance matrix, presets, type copies) to a public Hugging Face repo,
     so later runs download it instead of rebuilding. Public: the models are openly licensed."""
     from huggingface_hub import HfApi
     if not stored(model):

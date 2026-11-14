@@ -109,7 +109,7 @@ candidate's drift is measured on exactly that text.
 6. **ga**: the genetic search (below); keeps the top 3.
 7. **final**: distill the top 3, score them on all 4,500 selection questions (lowest score wins), **guard** (not less
    accurate than the preset), then winner vs preset vs original on the **held-out test**: **WIN / TIE / LOSE**.
-8. **bundle**, **upload**: the winning file to a private Hugging Face repo.
+8. **bundle**, **upload**: the winning file to a public Hugging Face repo.
 9. **The Pi** downloads it, measures real peak RAM and speed, and posts them to the page. Only our winners run on
    the Pi.
 

@@ -126,7 +126,7 @@ case "${1:-}" in
   _contest) contest "$2" "$3" "$4" ;;
   exec) shift; job gpu "exec-$$" "$@" ;;
   save) job cpu "save-$2" /opt/venv/bin/python scripts/server/pipeline.py save 0 "$(model "$2@0")" ;;
-  upload) job cpu "upload-$2" /opt/venv/bin/python scripts/server/pipeline.py upload "${2#*@}" "$(model "$2")" ;;
+  upload) job cpu "upload-${2/@/-b}" /opt/venv/bin/python scripts/server/pipeline.py upload "${2#*@}" "$(model "$2")" ;;
   _guard) guard ;;
   _status) job cpu status /opt/venv/bin/python scripts/server/status.py ;;
   *) sed -n 2,11p "$0" ;;
