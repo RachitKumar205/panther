@@ -41,6 +41,15 @@ def clock(line: str) -> int:
     return int(h) * 60 + int(m)
 
 
+def recent(lines: list[str]) -> list[str]:
+    """The newest 20 events, oldest first; lines carry only HH:MM (IST), so a line from just before midnight counts
+    as older than one from this afternoon."""
+    t = time.gmtime(time.time() + 19800)
+    now = t.tm_hour * 60 + t.tm_min
+    lines = [x for x in dict.fromkeys(lines) if re.match(r"\d\d:\d\d ", x)]
+    return sorted(lines, key=lambda x: (clock(x) - now - 1) % 1440)[-20:]
+
+
 def lanes() -> list[tuple[int, str, list[str]]]:
     out = []
     for f in sorted(DATA.glob("logs/progress-b*.log")):
@@ -150,7 +159,7 @@ def render() -> str:
         f"- **{k.replace('-b', '@')}**: {v}" + (f", now: {WHAT[step[k]]}" if v == "started" and step.get(k) else "")
         for k, v in state.items()] + ["", "## Steps of every contest", ""] + [
         f"{i}. **{s}**: {DESCRIBE[s]}" for i, s in enumerate(STEPS, 1)] + [
-        "", "## Recent events", "", *[f"    {x}" for x in sorted(log[-8:] + [x for _, _, ls in ln for x in ls[-6:]])[-20:]], ""]
+        "", "## Recent events", "", *[f"    {x}" for x in recent(log[-10:] + [x for _, _, ls in ln for x in ls[-6:]])], ""]
     body = []
     for b, sm, ls in ln:
         v = next((x for x in reversed(ls) if "our winner" in x), None)
