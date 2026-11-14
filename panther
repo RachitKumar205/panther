@@ -47,6 +47,7 @@ job() {  # job cpu|gpu NAME CMD...: one container, waited for; returns its exit 
   local rc; rc="$("${P[@]}" wait "$name" | head -1)"; "${P[@]}" rm "$name" >/dev/null 2>&1; return "${rc:-1}"
 }
 
+turn() { mkdir -p "$DATA/store/$1"; touch "$DATA/store/$1/.turn"; }  # lets the model's early GPU step begin
 contest() {  # contest SIZE B MODEL. Downloading and building type copies (the disk-heavy part) take turns, one
   # model at a time; everything after runs in parallel with the other contests, sharing the GPU through its ledger.
   local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) fd ok=1 sp="" pp="" rc
@@ -54,15 +55,17 @@ contest() {  # contest SIZE B MODEL. Downloading and building type copies (the d
   job gpu "$id-prep" "${R[@]}" prep "$2" "$3" & pp=$!  # refs + preset as soon as the original exists, beside the copies
   local types; types="$(grep '^formats:' "$W/repo/configs/search.yaml" | tr ',' '\n' | wc -l)"
   if [ "$(grep -o '"[A-Z0-9_]*"' "$DATA/store/$3/rounded.json" 2>/dev/null | wc -l)" -ge "$types" ]; then
-    log "$id: started (type copies already built)"
+    log "$id: started (type copies already built)"; turn "$3"
   elif [ "$(ls "$DATA/store/$3/$3"-*.gguf 2>/dev/null | grep -vc BF16)" -ge "$types" ] && [ -f "$DATA/store/$3/$3-BF16.gguf" ]
   then  # copies on disk: rounding adds no disk, no turn
     log "$id: started (type copies on disk; rounding them)"
+    turn "$3"
     job gpu "$id-store" "${R[@]}" store "$2" "$3" || ok=0
   else
     while :; do  # a model without enough disk yet gives the turn back and retries in 10 minutes
       exec {fd}> "$DATA/locks/store-turn"; flock "$fd"
       log "$id: started"
+      turn "$3"
       job cpu "$id-fetch" "${R[@]}" fetch "$2" "$3"; rc=$?
       [ "$rc" = 3 ] || break
       exec {fd}>&-; log "$id: waiting for disk; other models go first"; sleep 600

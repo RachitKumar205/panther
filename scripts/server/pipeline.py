@@ -191,8 +191,9 @@ def store(model: str) -> None:
         shutil.rmtree(hf)  # rounding reads the 16-bit GGUF
     if not imat.exists():
         po = ["--process-output"] if MODELS[model].get("imatrix_process_output") else []
-        subprocess.run([str(BIN / "llama-imatrix"), "-m", str(bf16), "-f", str(DATA / "splits/calibration.txt"),
-                        "-o", f"{imat}.part.gguf", "-c", "512", "-ngl", "99", "-t", str(THREADS)] + po, check=True)
+        with gpu(bf16.stat().st_size + 4 * GIB):  # the whole 16-bit model on the GPU: booked like every other job
+            subprocess.run([str(BIN / "llama-imatrix"), "-m", str(bf16), "-f", str(DATA / "splits/calibration.txt"),
+                            "-o", f"{imat}.part.gguf", "-c", "512", "-ngl", "99", "-t", str(THREADS)] + po, check=True)
         os.rename(f"{imat}.part.gguf", imat)
     M = Model(model)
     al, n = M.allowed(), sum(m.rows * m.cols for m in M.matrices)
@@ -653,9 +654,11 @@ def upload(model: str) -> None:
 
 
 def prep(model: str) -> None:
-    """refs and preset as soon as the 16-bit original and the importance matrix exist: they run on the GPU while the
-    type copies are built on the CPU."""
-    while not (copy_of(model, "BF16").exists() and (STORE / model / f"{model}.imatrix.gguf").exists()):
+    """refs and preset once this model has its build turn and the 16-bit original and the importance matrix exist:
+    they run on the GPU while the type copies are built on the CPU. A queued model waits, so it never takes the GPU
+    from the model being built."""
+    while not ((STORE / model / ".turn").exists() and copy_of(model, "BF16").exists()
+               and (STORE / model / f"{model}.imatrix.gguf").exists()):
         time.sleep(60)
     for s in ("refs", "preset"):
         with lock(f"{model}-{s}" if s == "refs" else f"{model}-{BUDGET}-{s}"):
