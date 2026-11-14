@@ -291,7 +291,10 @@ About 1,430 lines (blank and comment lines excluded):
   their own formats.
 - Distillation of quantized models: **EfficientQAT** (training only the quantization scales end to end). Its first stage
   (training the codes block by block) is being added as an experiment, starting with fake quantizers for llama.cpp's
-  Q2_K, IQ2_XS and IQ2_S that match llama.cpp's decoding bit for bit (`src/panther/fakequant.py`).
+  Q2_K, IQ2_XS and IQ2_S that match llama.cpp's decoding bit for bit (`src/panther/fakequant.py`). `./panther qat 14b@5` runs Stage 1
+  (`src/panther/blockap.py`) on a finished contest's winner at the paper's size (4,096 samples x 2,048 tokens, 2
+  epochs). The paper's text (RedPajama-1T-Sample) has been taken down, so FineWeb-Edu stands in, without the
+  documents our own splits use. On the 1.5B (all blocks, a small trial) web-text perplexity went 19.92 -> 17.38.
 - Measuring: **Accuracy is Not All You Need** (NeurIPS 2024): flips and KL over accuracy.
 - What Panther adds: allocation search over better-rounded type copies, K and IQ types, distillation into stock GGUF,
   RAM budgets that include the KV cache, verified on a real Pi, and a search score that does not reward luck.

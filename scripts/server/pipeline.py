@@ -704,40 +704,44 @@ QAT_SIZES = {"block": (4096, 2048), "e2e": (4096, 4096), "val": (64, 2048)}  # E
 
 
 def corpus(model: str) -> None:
-    """RedPajama-1T-Sample (EfficientQAT's text) without its book slice, tokenized for this model and drawn as
-    EfficientQAT draws it: documents shuffled with seed 0, the first 90 % for training and the rest for validation;
-    each sample a random window in a random document longer than the window."""
-    d, dst = DATA / "corpus" / "redpajama", out(model, "qat", "tokens.npz")
+    """Token samples for EfficientQAT, drawn as its code draws them (documents shuffled with seed 0, the first 90 %
+    for training and the rest for validation; each sample a random window in a random document longer than the
+    window). The paper's text, RedPajama-1T-Sample, has been taken down; FineWeb-Edu stands in: the file pinned in
+    the splits manifest, without the documents our calibration, selection and test texts were cut from."""
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoTokenizer
+    dst = out(model, "qat", "tokens.npz")
     if dst.exists():
         return
-    c = CFG["qat_corpus"]
-    if not (d / "manifest.json").exists():
-        subprocess.run([os.environ["PANTHER_HF"], "download", c["repo"], "--repo-type", "dataset", "--revision",
-                        c["revision"], "--local-dir", str(d), "--include", "*.jsonl", "--exclude", "*book*"], check=True)
-        files = {f.name: digest_file(f) for f in sorted(d.glob("*.jsonl"))}
-        (d / "manifest.json").write_text(json.dumps({**c, "files": files}, indent=1))
-        note(f"QAT corpus: {len(files)} RedPajama files at revision {c['revision']}")
-    from transformers import AutoTokenizer
+    src = json.loads((DATA / "splits/manifest.json").read_text())["sources"]["fineweb_edu"]
+    (name, want), = src["files"].items()
+    f = Path(hf_hub_download(src["repo"], name, repo_type="dataset", revision=src["revision"]))
+    if digest_file(f) != want:
+        raise SystemExit(f"{f}: not the pinned file")
+    used = {i for g in (DATA / "splits/text").glob("*.ids.json") for i in json.loads(g.read_text())}
+    t = pq.read_table(f, columns=["text", "id", "token_count"]).to_pydict()
+    docs = [(x, n) for x, i, n in zip(t["text"], t["id"], t["token_count"]) if i not in used]
     hf, bf16 = DATA / "hf" / model, copy_of(model, "BF16")
     tok = (AutoTokenizer.from_pretrained(str(hf)) if (hf / "config.json").exists() else
            AutoTokenizer.from_pretrained(str(bf16.parent), gguf_file=bf16.name))
-    docs = [json.loads(x)["text"] for f in sorted(d.glob("*.jsonl")) for x in open(f, encoding="utf-8")]
     rng = random.Random(0)
     order = list(range(len(docs)))
     rng.shuffle(order)
     cut = int(0.9 * len(order))
 
     def draw(pool: list[int], n: int, length: int) -> np.ndarray:
+        pool = [i for i in pool if docs[i][1] > length * 0.8]  # the file's own token counts: skip clearly short ones
         a, k = np.empty((n, length), np.int32), 0
         while k < n:
-            ids = tok(docs[rng.choice(pool)]).input_ids
+            ids = tok(docs[rng.choice(pool)][0]).input_ids
             if len(ids) > length:
                 i = rng.randint(0, len(ids) - length - 1)
                 a[k], k = ids[i:i + length], k + 1
         return a
     np.savez(f"{dst}.part.npz", **{k: draw(order[:cut] if k != "val" else order[cut:], *v) for k, v in QAT_SIZES.items()})
     os.rename(f"{dst}.part.npz", dst)
-    note(f"{short(model)} QAT corpus: {len(docs)} documents; samples drawn")
+    note(f"{short(model)} QAT corpus: FineWeb-Edu, {len(docs)} documents ({len(used)} held out); samples drawn")
 
 
 def digest_file(f: Path) -> str:
