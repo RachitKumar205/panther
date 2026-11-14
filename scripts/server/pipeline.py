@@ -763,44 +763,61 @@ E2E_LR = 2e-3  # Stage 2, relative: the paper's 2e-5 scaled like Stage 1's (2e-4
 # (selection-text perplexity 16.70 -> 16.17); 2e-3, the final step's distillation rate, reached 14.66 (original 9.32)
 
 
+def _qatfiles(model: str) -> dict[str, Path]:
+    return {k: out(model, "qat", f"{BUDGET}-{k}.gguf") for k in ("start", "stage1", "stage12", "stage2")}
+
+
+def _stage2(model: str, src: Path, dst: Path, what: str) -> None:
+    """Stage 2 on src (scales only, end to end, KL to the original's top 64 on the 4,096 x 4,096 samples). The
+    original's probabilities are computed once, by whichever job gets there first, and saved for the other."""
+    import torch
+    from panther.distill import distill, teacher_tops
+    if dst.exists():
+        return
+    bf16, sm = copy_of(model, "BF16"), short(model)
+    ids = torch.from_numpy(np.load(out(model, "qat", "tokens.npz"))["e2e"].astype(np.int64))
+    tf = out(model, "qat", "teacher-tops.npz")
+    with gpu(bf16.stat().st_size + 22 * GIB, 12 * 3600):  # model + logits and their gradients at 4,096 tokens
+        with lock(f"{model}-teacher-tops"):
+            if not tf.exists():
+                tv, ti = teacher_tops(bf16, ids, 1)
+                np.savez(f"{tf}.part.npz", v=tv.numpy(), i=ti.numpy())
+                os.rename(f"{tf}.part.npz", tf)
+                del tv, ti  # 6 GB on the CPU; read back below
+        z = np.load(tf)
+        distill(src, bf16, [], dst, lambda m: note(f"{sm} QAT {what}: {m}"), ids=ids,
+                tops=(torch.from_numpy(z["v"]), torch.from_numpy(z["i"])), steps=None, batch=1, accum=32,
+                lr=E2E_LR, train_norms=False)
+
+
 def qat(model: str) -> None:
     """EfficientQAT on this contest's winner: its types rebuilt with our rounding (the undistilled file the final
     step started from); Stage 1 (Block-AP); Stage 2 (scales only, end to end, KL to the original instead of the
-    paper's cross-entropy) on that, and on the undistilled file as the control; then all three files tested like
-    the winner, against the winner and the preset."""
-    import torch
+    paper's cross-entropy) on that; both files tested like the winner. The control (qatcontrol) runs beside it."""
     from panther.blockap import train
-    from panther.distill import distill, teacher_tops
     w = json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())["assignment"]
     store(model, sorted(set(w.values())))
-    f = {k: out(model, "qat", f"{BUDGET}-{k}.gguf") for k in ("start", "stage1", "stage12", "stage2")}
-    cache, bf16, sm = DATA / "cache" / "blockap" / model, copy_of(model, "BF16"), short(model)
+    f, cache, bf16, sm = _qatfiles(model), DATA / "cache" / "blockap" / model, copy_of(model, "BF16"), short(model)
     if not f["start"].exists():
         build(model, w, f["start"])
-    t = np.load(out(model, "qat", "tokens.npz"))
     if not f["stage1"].exists():
-        with gpu(64 * GIB, 12 * 3600):  # a block in training ~20 GB; resuming holds every trained block, ~60 GB
+        t = np.load(out(model, "qat", "tokens.npz"))
+        resume = any(cache.glob("block-*.npz"))  # a resume holds every trained block on the GPU (14B: ~60 GB)
+        with gpu((64 if resume else 24) * GIB, 12 * 3600):
             train(bf16, f["start"], t["block"], t["val"], f["stage1"], cache, lambda m: note(f"{sm} {m}"))
         shutil.rmtree(cache, ignore_errors=True)
         note(f"{sm} QAT stage 1 done")
-    if not (f["stage12"].exists() and f["stage2"].exists()):
-        ids, tf = torch.from_numpy(t["e2e"].astype(np.int64)), out(model, "qat", "teacher-tops.npz")
-        with gpu(2 * bf16.stat().st_size + 12 * GIB, 12 * 3600):
-            if tf.exists():
-                z = np.load(tf)
-                tops = torch.from_numpy(z["v"]), torch.from_numpy(z["i"])
-            else:
-                tops = teacher_tops(bf16, ids, 1)
-                np.savez(tf, v=tops[0].numpy(), i=tops[1].numpy())
-            for src, dst, k in ((f["stage1"], f["stage12"], "stage 2 after stage 1"), (f["start"], f["stage2"],
-                                                                                       "stage 2 only (control)")):
-                if not dst.exists():
-                    distill(src, bf16, [], dst, lambda m, k=k: note(f"{sm} QAT {k}: {m}"), ids=ids, tops=tops,
-                            steps=None, batch=1, accum=32, lr=E2E_LR, train_norms=False)
-    with lock(f"{model}-refs"):
-        refs(model)  # the original's reference outputs (a finished contest's were cleaned up)
-    qateval(model, {"stage 1 + 2": (f["stage12"], f"qat12:{BUDGET}"), "stage 2 only": (f["stage2"], f"qat2:{BUDGET}"),
-                    "stage 1 only": (f["stage1"], f"qat1:{BUDGET}")})
+    _stage2(model, f["stage1"], f["stage12"], "stage 2 after stage 1")
+    qateval(model, {"stage 1 + 2": (f["stage12"], f"qat12:{BUDGET}"), "stage 1 only": (f["stage1"], f"qat1:{BUDGET}")})
+
+
+def qatcontrol(model: str) -> None:
+    """The control, beside Stage 1 (it does not need it): Stage 2 alone on the undistilled file, then tested."""
+    f = _qatfiles(model)
+    while not f["start"].exists():  # the main job rebuilds it
+        time.sleep(60)
+    _stage2(model, f["start"], f["stage2"], "stage 2 only (control)")
+    qateval(model, {"stage 2 only": (f["stage2"], f"qat2:{BUDGET}")})
 
 
 def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
@@ -812,9 +829,10 @@ def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
     win = json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())
     wf, wl = Path(win["file"]), f"{'v2' if win['winner'].endswith('undistilled') else 'v2t'}:{digest(win['assignment'])}"
     rj = out(f"budget-{BUDGET}", f"qat-{model}.json")
-    res = json.loads(rj.read_text()) if rj.exists() else {}
+    with lock(f"{model}-refs"):
+        refs(model)  # the original's reference outputs (a finished contest's were cleaned up)
     for name, (path, label) in files.items():
-        if name in res:
+        if rj.exists() and name in json.loads(rj.read_text()):
             continue
         sel = score(model, None, label, path=path, full=True)
         score(model, None, pl, path=pf, full=True)
@@ -823,7 +841,7 @@ def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
             ours, theirs, winner, orig = (test(model, path, label), test(model, pf, pl), test(model, wf, wl),
                                           test(model, bf16, "original"))
         vw, vp = stats.compare(ours["correct"], winner["correct"]), stats.compare(ours["correct"], theirs["correct"])
-        res[name] = {"file": str(path), "selection": sel, "guard_vs_preset": g,
+        r = {"file": str(path), "selection": sel, "guard_vs_preset": g,
                      "held_out": {"accuracy": stats.acc(ours["correct"]), "kl": ours["kl"], "ppl": ours["ppl"],
                                   "flips": stats.flips(ours["correct"], orig["correct"]),
                                   "per_task": {k: 100 * float(np.mean(v)) for k, v in ours["correct"].items()}},
@@ -832,8 +850,10 @@ def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
                      "vs_preset": {"diff": vp[0], "ci": vp[1:], "verdict": stats.verdict(*vp[1:]), "preset": p,
                                    "preset_accuracy": stats.acc(theirs["correct"])},
                      "original_accuracy": stats.acc(orig["correct"])}
-        rj.write_text(json.dumps(res, indent=1, default=float))
-        note(f"{sm} QAT {name}: held-out {res[name]['held_out']['accuracy']:.2f} (winner {stats.acc(winner['correct']):.2f}, "
+        with lock(f"{model}-qateval"):  # the main job and the control write the same file
+            res = json.loads(rj.read_text()) if rj.exists() else {}
+            rj.write_text(json.dumps({**res, name: r}, indent=1, default=float))
+        note(f"{sm} QAT {name}: held-out {r['held_out']['accuracy']:.2f} (winner {stats.acc(winner['correct']):.2f}, "
              f"preset {p} {stats.acc(theirs['correct']):.2f}, original {stats.acc(orig['correct']):.2f}) | vs winner "
              f"{vw[0]:+.2f} [{vw[1]:+.2f}, {vw[2]:+.2f}] {stats.verdict(*vw[1:])}, vs preset {vp[0]:+.2f} "
              f"[{vp[1]:+.2f}, {vp[2]:+.2f}] {stats.verdict(*vp[1:])}")
@@ -846,8 +866,9 @@ def main() -> int:
     global BUDGET
     cmd, b, model = sys.argv[1:4]
     BUDGET = int(b)
-    if cmd in ("fetch", "upload", "save", "qatdata", "qat"):
-        {"fetch": fetch, "upload": upload, "save": save, "qatdata": qatdata, "qat": qat}[cmd](model)
+    if cmd in ("fetch", "upload", "save", "qatdata", "qat", "qatcontrol"):
+        {"fetch": fetch, "upload": upload, "save": save, "qatdata": qatdata, "qat": qat,
+         "qatcontrol": qatcontrol}[cmd](model)
         return 0
     if cmd == "prep":
         prep(model)

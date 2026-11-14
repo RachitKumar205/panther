@@ -135,8 +135,10 @@ case "${1:-}" in
     m="$(model "$2")"; [ -n "$m" ] || { echo "unknown contest '$2' (write it like 14b@5)"; exit 1; }
     (setsid nohup "$0" _qat "${2%@*}" "${2#*@}" "$m" >/dev/null 2>&1 < /dev/null &); echo "started QAT for $2 ($m)" ;;
   _qat) R=(/opt/venv/bin/python scripts/server/pipeline.py); log "$2-b$3: QAT started"
-    if job cpu "$2-b$3-qatdata" "${R[@]}" qatdata "$3" "$4" && job gpu "$2-b$3-qat" "${R[@]}" qat "$3" "$4"
-    then log "$2-b$3: QAT done"; else log "$2-b$3: QAT FAILED or stopped (files kept, to resume)"; fi ;;
+    job cpu "$2-b$3-qatdata" "${R[@]}" qatdata "$3" "$4" || { log "$2-b$3: QAT FAILED or stopped (files kept)"; exit; }
+    job gpu "$2-b$3-qatctl" "${R[@]}" qatcontrol "$3" "$4" & c=$!  # the control, beside Stage 1
+    job gpu "$2-b$3-qat" "${R[@]}" qat "$3" "$4"; a=$?; wait "$c"; b=$?
+    if [ "$a" = 0 ] && [ "$b" = 0 ]; then log "$2-b$3: QAT done"; else log "$2-b$3: QAT FAILED or stopped (files kept, to resume)"; fi ;;
   exec) shift; job gpu "exec-$$" "$@" ;;
   save) job cpu "save-${2%@*}" /opt/venv/bin/python scripts/server/pipeline.py save 0 "$(model "$2@0")" ;;
   upload) job cpu "upload-${2/@/-b}" /opt/venv/bin/python scripts/server/pipeline.py upload "${2#*@}" "$(model "$2")" ;;
