@@ -277,7 +277,7 @@ About 1,430 lines (blank and comment lines excluded):
 |---|---|
 | `panther` | the one command |
 | [scripts/server](scripts/server/README.md) | `pipeline.py` (every step, the search), `status.py` (the page) |
-| [src/panther](src/panther/README.md) | `rounding.py`, `distill.py`, `llama.py` (runs llama.cpp, checks its output), `model.py` (RAM model, types), `stats.py`, `solver.py` |
+| [src/panther](src/panther/README.md) | `rounding.py`, `distill.py`, `llama.py` (runs llama.cpp, checks its output), `model.py` (RAM model, types), `stats.py`, `solver.py`, `fakequant.py` (fake quantizers, for the EfficientQAT experiment) |
 | [deploy/server](deploy/server/README.md) | container image, server setup and removal |
 | [pi](pi/README.md) | the Pi's check |
 | [configs](configs/README.md) | models (pinned versions), budgets, types |
@@ -289,7 +289,9 @@ About 1,430 lines (blank and comment lines excluded):
 - Better rounding: **GPTQ**; **GSQ** (2026, learned rounding written back into GGUF Q2_K); **YAQA** (2025, rounding
   against the whole model's KL); **GuidedQuant** (ICML 2025). The strongest 2-bit methods (QTIP, PV-Tuning, AQLM) need
   their own formats.
-- Distillation of quantized models: **EfficientQAT** (training only the quantization scales end to end).
+- Distillation of quantized models: **EfficientQAT** (training only the quantization scales end to end). Its first stage
+  (training the codes block by block) is being added as an experiment, starting with fake quantizers for llama.cpp's
+  Q2_K, IQ2_XS and IQ2_S that match llama.cpp's decoding bit for bit (`src/panther/fakequant.py`).
 - Measuring: **Accuracy is Not All You Need** (NeurIPS 2024): flips and KL over accuracy.
 - What Panther adds: allocation search over better-rounded type copies, K and IQ types, distillation into stock GGUF,
   RAM budgets that include the KV cache, verified on a real Pi, and a search score that does not reward luck.
