@@ -200,6 +200,7 @@ def store(model: str, types: list[str] | None = None) -> None:
         os.rename(f"{imat}.part.gguf", imat)
     M = Model(model)
     al, n = M.allowed(), sum(m.rows * m.cols for m in M.matrices)
+    done = d / "rounded.json"  # types whose copy has error-compensated codes (panther.rounding)
     for t in types:
         if not copy_of(model, t).exists():
             wait_disk(int(n * bpw(t) / 8), f"{short(model)} store, {t} copy")
@@ -208,7 +209,6 @@ def store(model: str, types: list[str] | None = None) -> None:
                          for n in ("token_embd.weight", "output.weight"))
             from panther.rounding import blank  # layer matrices come from the rounding below, quantized once
             blank(bf16, imat, t, FTYPE.get(t, t), emb, head, copy_of(model, t))
-    done = d / "rounded.json"  # types whose copy has error-compensated codes (panther.rounding)
     have = json.loads(done.read_text()) if done.exists() else []
     if todo := [t for t in types if t not in have]:
         from panther.rounding import round_copies
@@ -771,7 +771,7 @@ def qat(model: str) -> None:
         build(model, w, start)
     if not s1.exists():
         t = np.load(out(model, "qat", "tokens.npz"))
-        with gpu(32 * GIB, 12 * 3600):
+        with gpu(64 * GIB, 12 * 3600):  # a block in training ~20 GB; resuming holds every trained block, ~60 GB
             train(copy_of(model, "BF16"), start, t["block"], t["val"], s1, cache, lambda m: note(f"{short(model)} {m}"))
         shutil.rmtree(cache, ignore_errors=True)
     note(f"{short(model)} QAT stage 1 done: {s1}")

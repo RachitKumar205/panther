@@ -15,8 +15,11 @@ memory at the paper's size (14B: 2 x 86 GB), so they are streamed from disk (bf1
 from __future__ import annotations
 
 import copy
+import json
 import math
+import os
 import shutil
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -60,6 +63,19 @@ class QLinear(torch.nn.Module):
         return fq.pack(self.t, {**st, **fq.encode(self.t, self.W, st)})
 
 
+def _restored(layer, b: int, src: dict, saved: dict):
+    """A trained block, rebuilt from its saved bytes (other matrices at the file's values), on the GPU."""
+    from gguf.quants import dequantize
+    q = copy.deepcopy(layer).cuda()
+    mods = dict(q.named_modules())
+    for hf, g in LINEAR.items():
+        name = f"blk.{b}.{g}.weight"
+        raw = saved.get(name, np.asarray(src[name].data))
+        mods[hf].weight.data = torch.from_numpy(dequantize(raw, src[name].tensor_type).reshape(
+            mods[hf].weight.shape)).to(mods[hf].weight)
+    return q
+
+
 def _run(layer, x, rope):
     y = layer(x, attention_mask=None, position_embeddings=rope)
     return y[0] if isinstance(y, tuple) else y
@@ -81,35 +97,64 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
     cache.mkdir(parents=True, exist_ok=True)
     assert n % BATCH == 0 and len(val) % BATCH == 0
     # bf16 bits, stored as int16 (numpy has no bf16): exact, and no fp16 overflow
-    fp, qn = (np.lib.format.open_memmap(cache / f"{k}.npy", "w+", np.int16, (n, L, H)) for k in ("fp", "q"))
+    mode = "r+" if (cache / "fp.npy").exists() else "w+"
+    fp, qn = (np.lib.format.open_memmap(cache / f"{k}.npy", mode, np.int16, (n, L, H)) for k in ("fp", "q"))
     pos = torch.arange(L, device="cuda")[None].expand(BATCH, L)
-    emb = m.model.embed_tokens.cuda()
-    qemb = torch.from_numpy(dequantize(src["token_embd.weight"].data, src["token_embd.weight"].tensor_type)
-                            .reshape(-1, H)).to("cuda", torch.bfloat16)  # what the quantized model really reads
-    io = ThreadPoolExecutor(4)
+    rope_layer = m.model.rotary_emb.cuda()
+    rope = rope_layer(torch.zeros(1, device="cuda", dtype=torch.bfloat16), pos)
+    rd, wr, pending = ThreadPoolExecutor(2), ThreadPoolExecutor(2), deque()
 
-    def put(arr, i, x):  # hidden states -> the disk cache, in the background
-        return io.submit(arr.__setitem__, slice(i, i + len(x)), x.to(torch.bfloat16).view(torch.int16).cpu().numpy())
+    def put(arr, i, x):  # hidden states -> the disk cache, in the background; at most 8 batches wait in memory
+        while len(pending) >= 8:
+            pending.popleft().result()
+        pending.append(wr.submit(arr.__setitem__, slice(i, i + len(x)),
+                                 x.to(torch.bfloat16).view(torch.int16).cpu().numpy()))
+
+    def flush():
+        while pending:
+            pending.popleft().result()
 
     def get(arr, i):
-        return io.submit(lambda: torch.from_numpy(np.array(arr[i:i + BATCH])).view(torch.bfloat16))
+        return rd.submit(lambda: torch.from_numpy(np.array(arr[i:i + BATCH])).view(torch.bfloat16))
 
-    pending = []
-    with torch.no_grad():
-        for i in range(0, n, BATCH):
-            ids = torch.from_numpy(tokens[i:i + BATCH].astype(np.int64)).cuda()
-            pending += [put(fp, i, emb(ids)), put(qn, i, qemb[ids])]
-        ids = torch.from_numpy(val.astype(np.int64)).cuda()
-        vfp, vq = emb(ids).cpu(), qemb[ids].cpu()  # validation samples stay in memory
-    for p in pending:
-        p.result()
+    def saved(b: int) -> Path:
+        return cache / f"block-{b}.npz"
+    # resume: blocks already trained are kept (their codes and scales); the caches are rebuilt unless they are
+    # known to hold exactly the inputs of the next block
+    done = 0
+    while saved(done).exists() and (blocks is None or done < blocks):
+        done += 1
+    state = json.loads((cache / "state.json").read_text()) if (cache / "state.json").exists() else {}
+    with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
+        emb = m.model.embed_tokens.cuda()
+        qemb = torch.from_numpy(dequantize(src["token_embd.weight"].data, src["token_embd.weight"].tensor_type)
+                                .reshape(-1, H)).to("cuda", torch.bfloat16)  # what the quantized model really reads
+        origs = [m.model.layers[b].cuda() for b in range(done)]
+        quants = [_restored(m.model.layers[b], b, src, dict(np.load(saved(b)))) for b in range(done)]
+
+        def through(ids):
+            x, xq = emb(ids), qemb[ids]
+            for o, q in zip(origs, quants):
+                x, xq = _run(o, x, rope), _run(q, xq, rope)
+            return x, xq
+        if state != {"done": done, "clean": True, "n": n}:
+            if done:
+                log(f"block-ap: resuming after block {done - 1}; rebuilding the caches through the trained blocks")
+            for i in range(0, n, BATCH):
+                x, xq = through(torch.from_numpy(tokens[i:i + BATCH].astype(np.int64)).cuda())
+                put(fp, i, x)
+                put(qn, i, xq)
+            flush()
+        vs = [through(torch.from_numpy(val[i:i + BATCH].astype(np.int64)).cuda()) for i in range(0, len(val), BATCH)]
+        vfp, vq = torch.cat([v[0] for v in vs]).cpu(), torch.cat([v[1] for v in vs]).cpu()  # stay in memory
+    for o in origs:
+        o.cpu()
     m.model.embed_tokens.cpu()
-    del emb, qemb
-    rope_layer = m.model.rotary_emb.cuda()
-    packed = {}
-    for b in range(blocks or len(m.model.layers)):
+    del emb, qemb, origs, quants, vs
+    torch.cuda.empty_cache()
+    for b in range(done, blocks or len(m.model.layers)):
+        (cache / "state.json").write_text(json.dumps({"done": b, "clean": False, "n": n}))  # caches change below
         orig = m.model.layers[b].cuda()
-        rope = rope_layer(torch.zeros(1, device="cuda", dtype=torch.bfloat16), pos)
         ql = copy.deepcopy(orig).float()
         mods = dict(ql.named_modules())
         qlin = {}
@@ -140,7 +185,7 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
                            for i in range(0, len(vq), BATCH)) / math.ceil(len(vq) / BATCH)
         before, total = val_loss(), 0.0
         for ep in range(EPOCHS):
-            nxt, writes = (get(fp, 0), get(qn, 0)), []
+            nxt = (get(fp, 0), get(qn, 0))
             for i in range(0, n, BATCH):
                 xf, xq = (f.result().cuda() for f in nxt)
                 if i + BATCH < n:
@@ -148,7 +193,7 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
                 with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                     tgt = _run(orig, xf, rope) if ep == 0 else xf  # epoch 2 reads the targets epoch 1 stored
                 if ep == 0:
-                    writes.append(put(fp, i, tgt))  # the cache becomes the original's input to the next block
+                    put(fp, i, tgt)  # the cache becomes the original's input to the next block
                 with torch.autocast("cuda", torch.bfloat16):
                     loss = torch.nn.functional.mse_loss(_run(ql, xq, rope).float(), tgt.float())
                 opt.zero_grad(set_to_none=True)
@@ -156,20 +201,19 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
                 opt.step()
                 sched.step()
                 total += loss.item()
-            for w in writes:
-                w.result()
+            flush()  # epoch 2 reads what epoch 1 wrote
         for q in qlin.values():
             q.frozen, q.codes = True, fq.encode(q.t, q.W, q.scales())  # the final codes, used from here on
         after = val_loss()
-        writes = []
         with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):  # the quantized block's output: next input
             for i in range(0, n, BATCH):
-                writes.append(put(qn, i, _run(ql, get(qn, i).result().cuda(), rope)))
+                put(qn, i, _run(ql, get(qn, i).result().cuda(), rope))
             vq = torch.cat([_run(ql, vq[i:i + BATCH].cuda(), rope).cpu() for i in range(0, len(vq), BATCH)])
             vfp = torch.cat([_run(orig, vfp[i:i + BATCH].cuda(), rope).cpu() for i in range(0, len(vfp), BATCH)])
-        for w in writes:
-            w.result()
-        packed.update({k: q.final() for k, q in qlin.items()})
+        flush()
+        np.savez(f"{saved(b)}.part.npz", **{k: q.final() for k, q in qlin.items()})
+        os.rename(f"{saved(b)}.part.npz", saved(b))
+        (cache / "state.json").write_text(json.dumps({"done": b + 1, "clean": True, "n": n}))
         log(f"block-ap block {b}: validation MSE {before:.5f} -> {after:.5f} (train {total / steps:.5f})")
         m.model.layers[b] = orig.cpu()
         del ql, qlin, opt, ws, ss
@@ -177,8 +221,9 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
     shutil.copy(start, f"{dst}.part")
     rw = gguf.GGUFReader(f"{dst}.part", "r+")
     out = {t.name: t for t in rw.tensors}
-    for name, raw in packed.items():
-        out[name].data[:] = raw.reshape(out[name].data.shape)
+    for b in range(blocks or len(m.model.layers)):
+        for name, raw in np.load(saved(b)).items():
+            out[name].data[:] = raw.reshape(out[name].data.shape)
     rw.data.flush()
     del rw, out
     shutil.move(f"{dst}.part", dst)

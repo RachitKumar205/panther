@@ -79,7 +79,9 @@ contest() {  # contest SIZE B MODEL. Downloading and building type copies (the d
   then log "$id: done"; else log "$id: FAILED or stopped (its files are kept, to resume)"; return; fi
   [ -n "$sp" ] && wait "$sp"
   pgrep -f "panther _contest [^ ]+ [0-9]+ $3\$" | grep -qv "^$$\$" || pgrep -f "pipeline.py save [0-9]+ $3" >/dev/null ||
-    find "$DATA/store/$3" "$DATA/reference/$3" \( \( -name "$3-*.gguf" ! -name "*-BF16.gguf" \) -o -name "*.kld" \) -delete 2>/dev/null
+    { mkdir -p "$DATA/archive/rounded"; f="$DATA/store/$3/rounded.json"  # the record goes with the copies it describes
+      [ -f "$f" ] && cp -p "$f" "$DATA/archive/rounded/$3-$(date -r "$f" +%Y%m%dT%H%M).json" && rm -f "$f"
+      find "$DATA/store/$3" "$DATA/reference/$3" \( \( -name "$3-*.gguf" ! -name "*-BF16.gguf" \) -o -name "*.kld" \) -delete 2>/dev/null; }
 }
 
 guard() {  # pauses everything while GitLab is unhealthy (3 bad checks), resumes after 5 good ones
