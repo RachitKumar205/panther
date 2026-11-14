@@ -759,22 +759,84 @@ def qatdata(model: str) -> None:
     corpus(model)
 
 
+E2E_LR = 2e-3  # Stage 2, relative: the paper's 2e-5 scaled like Stage 1's (2e-4) moved little in a 1.5B test
+# (selection-text perplexity 16.70 -> 16.17); 2e-3, the final step's distillation rate, reached 14.66 (original 9.32)
+
+
 def qat(model: str) -> None:
-    """Block-AP on this contest's winner: its types rebuilt with our rounding (the undistilled file the final step
-    started from), then every layer matrix's weights and scales trained block by block."""
+    """EfficientQAT on this contest's winner: its types rebuilt with our rounding (the undistilled file the final
+    step started from); Stage 1 (Block-AP); Stage 2 (scales only, end to end, KL to the original instead of the
+    paper's cross-entropy) on that, and on the undistilled file as the control; then all three files tested like
+    the winner, against the winner and the preset."""
+    import torch
     from panther.blockap import train
+    from panther.distill import distill, teacher_tops
     w = json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())["assignment"]
     store(model, sorted(set(w.values())))
-    start, s1, cache = (out(model, "qat", f"{BUDGET}-start.gguf"), out(model, "qat", f"{BUDGET}-stage1.gguf"),
-                        DATA / "cache" / "blockap" / model)
-    if not start.exists():
-        build(model, w, start)
-    if not s1.exists():
-        t = np.load(out(model, "qat", "tokens.npz"))
+    f = {k: out(model, "qat", f"{BUDGET}-{k}.gguf") for k in ("start", "stage1", "stage12", "stage2")}
+    cache, bf16, sm = DATA / "cache" / "blockap" / model, copy_of(model, "BF16"), short(model)
+    if not f["start"].exists():
+        build(model, w, f["start"])
+    t = np.load(out(model, "qat", "tokens.npz"))
+    if not f["stage1"].exists():
         with gpu(64 * GIB, 12 * 3600):  # a block in training ~20 GB; resuming holds every trained block, ~60 GB
-            train(copy_of(model, "BF16"), start, t["block"], t["val"], s1, cache, lambda m: note(f"{short(model)} {m}"))
+            train(bf16, f["start"], t["block"], t["val"], f["stage1"], cache, lambda m: note(f"{sm} {m}"))
         shutil.rmtree(cache, ignore_errors=True)
-    note(f"{short(model)} QAT stage 1 done: {s1}")
+        note(f"{sm} QAT stage 1 done")
+    if not (f["stage12"].exists() and f["stage2"].exists()):
+        ids, tf = torch.from_numpy(t["e2e"].astype(np.int64)), out(model, "qat", "teacher-tops.npz")
+        with gpu(2 * bf16.stat().st_size + 12 * GIB, 12 * 3600):
+            if tf.exists():
+                z = np.load(tf)
+                tops = torch.from_numpy(z["v"]), torch.from_numpy(z["i"])
+            else:
+                tops = teacher_tops(bf16, ids, 1)
+                np.savez(tf, v=tops[0].numpy(), i=tops[1].numpy())
+            for src, dst, k in ((f["stage1"], f["stage12"], "stage 2 after stage 1"), (f["start"], f["stage2"],
+                                                                                       "stage 2 only (control)")):
+                if not dst.exists():
+                    distill(src, bf16, [], dst, lambda m, k=k: note(f"{sm} QAT {k}: {m}"), ids=ids, tops=tops,
+                            steps=None, batch=1, accum=32, lr=E2E_LR, train_norms=False)
+    with lock(f"{model}-refs"):
+        refs(model)  # the original's reference outputs (a finished contest's were cleaned up)
+    qateval(model, {"stage 1 + 2": (f["stage12"], f"qat12:{BUDGET}"), "stage 2 only": (f["stage2"], f"qat2:{BUDGET}"),
+                    "stage 1 only": (f["stage1"], f"qat1:{BUDGET}")})
+
+
+def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
+    """Each file as the final step tests the winner: all selection questions, the guard against the preset, the
+    held-out test; then question by question against the current winner and the preset."""
+    sm, bf16 = short(model), copy_of(model, "BF16")
+    p = json.loads(out(f"budget-{BUDGET}", f"preset-{model}.json").read_text())["preset"]
+    pf, pl = STORE / model / f"preset-{p}.gguf", f"preset:{p}"
+    win = json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())
+    wf, wl = Path(win["file"]), f"{'v2' if win['winner'].endswith('undistilled') else 'v2t'}:{digest(win['assignment'])}"
+    rj = out(f"budget-{BUDGET}", f"qat-{model}.json")
+    res = json.loads(rj.read_text()) if rj.exists() else {}
+    for name, (path, label) in files.items():
+        if name in res:
+            continue
+        sel = score(model, None, label, path=path, full=True)
+        score(model, None, pl, path=pf, full=True)
+        g = stats.compare(correct(model, label), correct(model, pl))
+        with gpu(max(path.stat().st_size, wf.stat().st_size, bf16.stat().st_size) + 12 * GIB, 4 * 3600):
+            ours, theirs, winner, orig = (test(model, path, label), test(model, pf, pl), test(model, wf, wl),
+                                          test(model, bf16, "original"))
+        vw, vp = stats.compare(ours["correct"], winner["correct"]), stats.compare(ours["correct"], theirs["correct"])
+        res[name] = {"file": str(path), "selection": sel, "guard_vs_preset": g,
+                     "held_out": {"accuracy": stats.acc(ours["correct"]), "kl": ours["kl"], "ppl": ours["ppl"],
+                                  "flips": stats.flips(ours["correct"], orig["correct"]),
+                                  "per_task": {k: 100 * float(np.mean(v)) for k, v in ours["correct"].items()}},
+                     "vs_winner": {"diff": vw[0], "ci": vw[1:], "verdict": stats.verdict(*vw[1:]),
+                                   "winner_accuracy": stats.acc(winner["correct"])},
+                     "vs_preset": {"diff": vp[0], "ci": vp[1:], "verdict": stats.verdict(*vp[1:]), "preset": p,
+                                   "preset_accuracy": stats.acc(theirs["correct"])},
+                     "original_accuracy": stats.acc(orig["correct"])}
+        rj.write_text(json.dumps(res, indent=1, default=float))
+        note(f"{sm} QAT {name}: held-out {res[name]['held_out']['accuracy']:.2f} (winner {stats.acc(winner['correct']):.2f}, "
+             f"preset {p} {stats.acc(theirs['correct']):.2f}, original {stats.acc(orig['correct']):.2f}) | vs winner "
+             f"{vw[0]:+.2f} [{vw[1]:+.2f}, {vw[2]:+.2f}] {stats.verdict(*vw[1:])}, vs preset {vp[0]:+.2f} "
+             f"[{vp[1]:+.2f}, {vp[2]:+.2f}] {stats.verdict(*vp[1:])}")
 
 
 STEPS = {"store": store, "error": error, "refs": refs, "preset": preset, "ga": ga, "final": final, "bundle": bundle}

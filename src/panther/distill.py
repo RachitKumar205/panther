@@ -6,6 +6,7 @@ same speed. The new scales are written into a copy of the file."""
 
 from __future__ import annotations
 
+import math
 import shutil
 from pathlib import Path
 
@@ -40,21 +41,36 @@ def same_rows(w, t, n_head: int) -> bool:
     return bool(np.allclose(a, b, atol=1e-2, rtol=1e-2))
 
 
-def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=print) -> Path:
+def teacher_tops(teacher: Path, ids, batch: int = BATCH):
+    """The teacher's top-TOPK next-word log-probabilities at every position: (values fp16, indices int32), on the CPU."""
+    import torch
+    m = _load(teacher).eval()
+    tv = torch.empty(*ids.shape, TOPK, dtype=torch.float16)
+    ti = torch.empty(*ids.shape, TOPK, dtype=torch.int32)
+    with torch.no_grad():
+        for b in range(0, len(ids), batch):
+            t = torch.topk(torch.log_softmax(m(ids[b:b + batch].cuda()).logits.float(), -1), TOPK, -1)
+            tv[b:b + batch], ti[b:b + batch] = t.values.half().cpu(), t.indices.int().cpu()
+    del m
+    torch.cuda.empty_cache()
+    return tv, ti
+
+
+def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=print, *, ids=None, tops=None,
+            steps: int | None = STEPS, batch: int = BATCH, accum: int = 1, lr: float = 2e-3,
+            train_norms: bool = True) -> Path:
+    """The final step's distillation (STEPS random batches of the texts, scales and norms), or with steps=None one
+    epoch over `ids` in a random order, `accum` micro-batches per update, the learning rate falling linearly to 0
+    (EfficientQAT's Stage 2 with KL instead of cross-entropy: scales only, train_norms=False)."""
     import gguf
     import torch
     import torch.nn.utils.parametrize as P
     from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(str(teacher.parent), gguf_file=teacher.name)
-    ids = torch.cat([tok(t.read_text(), return_tensors="pt").input_ids[0] for t in texts])
-    ids = ids[: len(ids) // SEQ * SEQ].view(-1, SEQ)[:256]
-    m = _load(teacher).eval()
-    with torch.no_grad():  # the teacher's top-64 next-word probabilities, kept on the CPU
-        tops = [torch.topk(torch.log_softmax(m(ids[b:b + BATCH].cuda()).logits.float(), -1), TOPK, -1)
-                for b in range(0, len(ids), BATCH)]
-        tv, ti = torch.cat([t.values.cpu() for t in tops]), torch.cat([t.indices.cpu() for t in tops])
-    del m, tops
-    torch.cuda.empty_cache()
+    if ids is None:
+        tok = AutoTokenizer.from_pretrained(str(teacher.parent), gguf_file=teacher.name)
+        ids = torch.cat([tok(t.read_text(), return_tensors="pt").input_ids[0] for t in texts])
+        ids = ids[: len(ids) // SEQ * SEQ].view(-1, SEQ)[:256]
+    tv, ti = tops if tops is not None else teacher_tops(teacher, ids, batch)
     m = _load(student).train()  # checkpointing only applies in training mode: without it every rescaled weight
     m.gradient_checkpointing_enable()  # is kept for the backward pass, a second copy of the model (24B: 95 GB)
     sr = gguf.GGUFReader(student)
@@ -83,22 +99,34 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
         for hf, g in NORM.items():
             norms[f"blk.{i}.{g}.weight"] = mods[hf].weight
     norms["output_norm.weight"] = m.model.norm.weight
+    if not train_norms:
+        norms = {}
     for w in norms.values():
         w.requires_grad_(True)
-    opt = torch.optim.Adam([{"params": list(scales.values()), "lr": 2e-3},
-                            {"params": list(norms.values()), "lr": 1e-4}])
+    opt = torch.optim.Adam([{"params": list(scales.values()), "lr": lr}]
+                           + ([{"params": list(norms.values()), "lr": 1e-4}] if norms else []))
     rng = np.random.default_rng(0)
-    for step in range(STEPS):
-        b = torch.from_numpy(rng.choice(len(ids), BATCH, replace=False))
+    if steps is None:  # one epoch, in a random order
+        perm = rng.permutation(len(ids))
+        micro = [perm[k:k + batch] for k in range(0, len(perm), batch)]
+    else:
+        micro = [rng.choice(len(ids), batch, replace=False) for _ in range(steps)]
+    updates = math.ceil(len(micro) / accum)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda u: 1 - u / updates if steps is None else 1)
+    for k, b in enumerate(micro):
+        b = torch.from_numpy(b)
         logp = torch.log_softmax(m(ids[b].cuda()).logits.float(), -1)
-        t_lp, t_i = tv[b].cuda(), ti[b].cuda()
+        t_lp, t_i = tv[b].cuda().float(), ti[b].cuda().long()
         pt = torch.softmax(t_lp, -1)  # the teacher's top 64, renormalized
         loss = (pt * (torch.log(pt + 1e-12) - torch.gather(logp, -1, t_i))).sum(-1).mean()
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-        if step % 50 == 0 or step == STEPS - 1:
-            log(f"distill step {step}: KL on the teacher's top {TOPK} {loss.item():.4f}")
+        (loss / accum).backward()
+        if (k + 1) % accum == 0 or k == len(micro) - 1:
+            opt.step()
+            sched.step()
+            opt.zero_grad()
+            u = (k + 1) // accum
+            if u % max(1, updates // 12) == 0 or k == len(micro) - 1:
+                log(f"distill update {u}/{updates}: KL on the teacher's top {TOPK} {loss.item():.4f}")
     shutil.copy(student, f"{dst}.part")
     rw = gguf.GGUFReader(f"{dst}.part", "r+")
     out = {t.name: t for t in rw.tensors}

@@ -14,6 +14,7 @@ it works" explains every step. Each step skips work already on disk and writes p
 | `ga` | `rewrite/budget-B/list-<model>-v2.json` (top 3), `ga-<model>-v2.json` (every genome), `ga-<model>-live.json` |
 | `final` | `rewrite/<model>/tuned/` (the distilled top 3), `rewrite/budget-B/winner-<model>-v2.json` (winner, verdict, held-out numbers for ours, preset, original) |
 | `bundle`, `upload` | `data/pi_bundle/budget-B-<size>-v2/` → private Hugging Face repo `panther-<size>-<B>g-v2` |
+| `qatdata`, `qat` (`./panther qat C`, an experiment) | `rewrite/<model>/qat/`: token samples, the rebuilt undistilled winner, Stage 1, Stage 1 + 2, Stage 2 only; `rewrite/budget-B/qat-<model>.json` (held-out results vs the winner and the preset) |
 
 `./panther start` (repo root) runs every contest through these steps; `pipeline.py run B MODEL` runs store → bundle
 in order inside one GPU container. `status.py` rewrites `data/status.md` every 30 s
