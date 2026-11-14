@@ -141,14 +141,13 @@ def stored(model: str) -> bool:
 
 
 def fetch(model: str) -> None:
-    """The type copies saved by an earlier run (public Hugging Face repo), else the weights if they are needed:
-    to convert, or to round InternLM (transformers cannot load it from GGUF)."""
+    """The type copies saved by an earlier run (public Hugging Face repo), else the weights if the 16-bit GGUF
+    is missing (to convert)."""
     if stored(model):
         return
     n = sum(x.rows * x.cols for x in Model(model).matrices)
     have = sum(f.stat().st_size for f in (STORE / model).glob("*.gguf")) if (STORE / model).exists() else 0
-    hf_too = 2 * n if "internlm" in model.lower() and not (DATA / "hf" / model / "config.json").exists() else 0
-    need = max(0, int(n * 8.5) + hf_too - have) + margin()  # 16-bit original + 14 type copies
+    need = max(0, int(n * 8.5) - have) + margin()  # 16-bit original + 14 type copies
     if shutil.disk_usage(DATA).free < need:  # not enough yet: give the turn to another model, try again later
         note(f"{short(model)} fetch: needs {need / GIB:.0f} GB of free disk; letting others go first")
         sys.exit(3)
@@ -157,7 +156,7 @@ def fetch(model: str) -> None:
         note(f"{short(model)} fetch: type copies downloaded from {store_repo(model)}")
         return
     hf = DATA / "hf" / model
-    if (hf / "config.json").exists() or (copy_of(model, "BF16").exists() and "internlm" not in model.lower()):
+    if (hf / "config.json").exists() or copy_of(model, "BF16").exists():
         return
     m = MODELS[model]
     subprocess.run([os.environ["PANTHER_HF"], "download", m["repo"], "--revision", m["revision"], "--local-dir",
@@ -184,13 +183,12 @@ def store(model: str) -> None:
     d, bf16, imat = STORE / model, copy_of(model, "BF16"), STORE / model / f"{model}.imatrix.gguf"
     hf = DATA / "hf" / model
     d.mkdir(parents=True, exist_ok=True)
-    if not bf16.exists():  # InternLM's converter needs a newer protobuf, kept in data/pydeps-convert
-        env = dict(os.environ, PYTHONPATH=f"{DATA}/pydeps-convert:{os.environ.get('PYTHONPATH', '')}")
+    if not bf16.exists():
         subprocess.run([os.environ.get("PANTHER_CONVERT_PY", sys.executable), "/opt/llama.cpp/convert_hf_to_gguf.py",
-                        str(hf), "--outtype", "bf16", "--outfile", f"{bf16}.part"], env=env, check=True)
+                        str(hf), "--outtype", "bf16", "--outfile", f"{bf16}.part"], check=True)
         os.rename(f"{bf16}.part", bf16)
-    if hf.exists() and "internlm" not in model.lower():
-        shutil.rmtree(hf)  # rounding reads the 16-bit GGUF; only InternLM needs the original files
+    if hf.exists():
+        shutil.rmtree(hf)  # rounding reads the 16-bit GGUF
     if not imat.exists():
         po = ["--process-output"] if MODELS[model].get("imatrix_process_output") else []
         subprocess.run([str(BIN / "llama-imatrix"), "-m", str(bf16), "-f", str(DATA / "splits/calibration.txt"),
@@ -211,11 +209,7 @@ def store(model: str) -> None:
             os.rename(part, copy_of(model, t))
     done = d / "rounded.json"  # types whose copy has error-compensated codes (panther.rounding)
     have = json.loads(done.read_text()) if done.exists() else []
-    if "internlm" in model.lower() and (todo := [t for t in CFG["formats"] if t not in have]):
-        note(f"{short(model)} store: InternLM's model code does not run with this transformers version, so its copies "
-             "keep llama.cpp's plain rounding (and its finalists are not distilled)")
-        done.write_text(json.dumps(have + todo))
-    if todo := [t for t in CFG["formats"] if t not in have and "internlm" not in model.lower()]:
+    if todo := [t for t in CFG["formats"] if t not in have]:
         from panther.rounding import round_copies
         h, i = M.matrices[2].cols, max(x.cols for x in M.matrices)
         per_layer = 4 * (3 * h * h + i * i)  # bytes of the four input Hessians of one layer

@@ -27,6 +27,19 @@ def _load(path: Path):
     return AutoModelForCausalLM.from_pretrained(str(path.parent), gguf_file=path.name, dtype=torch.bfloat16).cuda()
 
 
+def reorder(x, n_head: int):
+    """llama.cpp's row order for attention q/k of llama-style models (convert_hf_to_gguf permute)."""
+    return x.reshape(n_head, 2, x.shape[0] // n_head // 2, *x.shape[1:]).swapaxes(1, 2).reshape(x.shape)
+
+
+def same_rows(w, t, n_head: int) -> bool:
+    """True if the PyTorch weight, reordered, matches the file's dequantized tensor row for row."""
+    from gguf.quants import dequantize
+    a = reorder(w.detach().float().cpu().numpy(), n_head)
+    b = dequantize(t.data, t.tensor_type).reshape(a.shape)
+    return bool(np.allclose(a, b, atol=1e-2, rtol=1e-2))
+
+
 def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=print) -> Path:
     import gguf
     import torch
@@ -44,7 +57,11 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
     torch.cuda.empty_cache()
     m = _load(student).train()  # checkpointing only applies in training mode: without it every rescaled weight
     m.gradient_checkpointing_enable()  # is kept for the backward pass, a second copy of the model (24B: 95 GB)
-    arch = gguf.GGUFReader(student).fields["general.architecture"].contents()
+    sr = gguf.GGUFReader(student)
+    arch = sr.fields["general.architecture"].contents()
+    heads = {g: sr.fields[f"{arch}.attention.{k}"].contents() for g, k in (("attn_q", "head_count"),
+                                                                           ("attn_k", "head_count_kv"))
+             if f"{arch}.attention.{k}" in sr.fields}
     rd = {t.name: t for t in gguf.GGUFReader(student).tensors}
     scales, norms = {}, {}
     for p in m.parameters():
@@ -53,8 +70,9 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
         mods = dict(layer.named_modules())
         for hf, g in LINEAR.items():
             name, lin = f"blk.{i}.{g}.weight", mods[hf]
-            if rd[name].tensor_type.name not in D_OFF or (arch == "llama" and g in ("attn_q", "attn_k")):
-                continue  # no block scale to tune (or llama.cpp reordered the rows)
+            if rd[name].tensor_type.name not in D_OFF or (arch == "llama" and g in heads and not same_rows(
+                    lin.weight, rd[name], heads[g])):
+                continue  # no block scale to tune (or rows that cannot be matched to the file's)
             th = torch.zeros(lin.weight.shape[0], lin.weight.shape[1] // 256, device="cuda", requires_grad=True)
 
             class Scale(torch.nn.Module):
@@ -86,6 +104,9 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
     out = {t.name: t for t in rw.tensors}
     for name, th in scales.items():  # the new scale of each block: d (and dmin) x exp(theta)
         t, s = out[name], torch.exp(th).detach().cpu().numpy()
+        g = name.split(".")[2]
+        if arch == "llama" and g in heads:  # into the file's row order (llama.cpp reorders q and k rows)
+            s = reorder(s, heads[g])
         bw, bb = gguf.GGML_QUANT_SIZES[t.tensor_type]
         blocks = t.data.reshape(s.shape[0], -1, bb)
         s = np.repeat(s, 256 // bw, axis=1)

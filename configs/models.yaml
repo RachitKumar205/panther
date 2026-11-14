@@ -28,10 +28,10 @@ models:
     repo: mistralai/Mistral-Small-24B-Instruct-2501
     revision: 9527884be6e5616bdd54de542f9ae13384489724  # resolved 2026-11-12; Apache-2.0
     role: ~20B comparison (7 GiB)
-  - name: InternLM2.5-20B-Chat
-    repo: internlm/internlm2_5-20b-chat
-    revision: 13741228cfb01d3a69c8f83169a105de77286b8a  # resolved 2026-11-12; weights free for research
-    role: ~20B comparison (7 and 5 GiB)
+  - name: Mistral-22B-Instruct
+    repo: mistralai/Mistral-Small-Instruct-2409
+    revision: 4600506f6b13c7ef89e61a54263f4c9bf483de30  # resolved 2026-11-14; Mistral Research License (non-commercial)
+    role: ~20B comparison (5 and 7 GiB); replaced InternLM2.5 20B, whose model code does not run with current transformers
 
 llama_cpp:
   repo: https://github.com/ggml-org/llama.cpp

@@ -1,7 +1,7 @@
 # Panther
 
 A Raspberry Pi 5 has 8 GB of RAM. For each **RAM budget** (1, 3, 5 and 7 GiB) and several open language models
-(Qwen2.5 1.5B, 7B, 14B, 32B; InternLM2.5 20B; Mistral Small 24B), Panther builds a compressed version that should
+(Qwen2.5 1.5B, 7B, 14B, 32B; Mistral Small 22B and 24B), Panther builds a compressed version that should
 **answer better than the best compressed version that already exists** for that budget: llama.cpp's own preset.
 Each model-and-budget pair is a **contest**, written like `7b@3`.
 
@@ -195,10 +195,14 @@ importance_c the mean squared input of column c. Used only to repair genomes and
 - **Written back**: every K and IQ type stores one 16-bit scale **d** per block and a block's values are proportional
   to it, so **d ← d × exp(θ)** at the block's byte position (Q2_K, Q4_K, Q5_K also scale their minimum, dmin; Q8_0's
   8 small blocks per 256 weights all take the factor). Norms are overwritten.
-- **Not tuned**: IQ1_M blocks (no single scale); Mistral's attention q/k matrices (llama.cpp reorders their rows).
-- **InternLM 20B gets neither smarter rounding nor distillation**: its model code was written for an older
-  transformers library and does not run with the current one, and both levers need the model running in PyTorch.
-  Its contests use llama.cpp's plain type copies with the new search score.
+- **Llama-style models** (Mistral): llama.cpp reorders the rows of the attention q/k matrices when converting, so
+  their learned multipliers are put into the file's row order; a check first confirms the reordered weights match
+  the file row for row (if not, those two matrices are left as they are).
+- **Not tuned**: IQ1_M blocks (no single scale).
+- **InternLM2.5 20B was dropped** (2026-11-14) for Mistral Small 22B: its model code, written for an older
+  transformers library, does not run with the current one, so it could get neither smarter rounding nor
+  distillation. Its two contests (search only) ended in TIEs, +0.46 at 5 GiB and +0.89 at 7 GiB; their logs and
+  results are kept.
 
 ### The final step and the verdict
 
