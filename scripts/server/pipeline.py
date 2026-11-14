@@ -213,9 +213,10 @@ def store(model: str) -> None:
         from panther.rounding import round_copies
         h, i = M.matrices[2].cols, max(x.cols for x in M.matrices)
         per_layer = 4 * (3 * h * h + i * i)  # bytes of the four input Hessians of one layer
-        with gpu(bf16.stat().st_size + 24 * GIB + 2 * per_layer, 6 * 3600):
+        book = bf16.stat().st_size + 44 * GIB  # the model, 20 GiB of Hessians, several types rounded at once
+        with gpu(book, 6 * 3600):
             round_copies(hf if hf.exists() else None, bf16, {t: copy_of(model, t) for t in todo},
-                         DATA / "splits/calibration.txt", max(1, int(20 * GIB // per_layer)))
+                         DATA / "splits/calibration.txt", max(1, int(20 * GIB // per_layer)), book)
         done.write_text(json.dumps(have + todo))
     if (DATA / "hf" / model).exists():
         shutil.rmtree(DATA / "hf" / model)  # the 16-bit GGUF is the original from here on

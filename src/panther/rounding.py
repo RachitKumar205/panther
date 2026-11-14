@@ -119,7 +119,8 @@ def gptq(w, h, qtype, threads: int = THREADS) -> np.ndarray:
     return np.concatenate(codes, axis=1)
 
 
-def round_copies(hf_dir: Path | None, bf16: Path, copies: dict[str, Path], calib: Path, layers_per_pass: int) -> None:
+def round_copies(hf_dir: Path | None, bf16: Path, copies: dict[str, Path], calib: Path, layers_per_pass: int,
+                 booked: int) -> None:
     """Rewrites every matrix of every copy {type: path} with error-compensated codes. Inputs come from the HF
     model on calibration text; weights from the 16-bit GGUF (llama.cpp may reorder rows, never input columns)."""
     import gguf
@@ -159,8 +160,9 @@ def round_copies(hf_dir: Path | None, bf16: Path, copies: dict[str, Path], calib
                 w = torch.from_numpy((np.asarray(src[name].data).view(np.uint16).astype(np.uint32) << 16)
                                      .view(np.float32).reshape(src[name].shape[::-1].tolist())).cuda()
                 hm = h / (SEQS // 8)
-                torch.cuda.empty_cache()  # types rounded at once: as many as the free GPU memory holds (each ~24 n^2)
-                par = int(max(1, min(6, (torch.cuda.mem_get_info()[0] - 4 * 2**30) // (24 * widest**2))))
+                torch.cuda.empty_cache()  # types rounded at once: as many as the free GPU memory holds (each ~24 n^2), inside this job's GPU booking
+                room = min(torch.cuda.mem_get_info()[0], booked - torch.cuda.memory_reserved()) - 4 * 2**30  # own booking
+                par = int(max(1, min(6, room // (24 * widest**2))))
 
                 def one(ts, w=w, hm=hm, name=name):  # several types at once: most of each call runs on one thread
                     ts[name].data.reshape(-1)[:] = gptq(w, hm, ts[name].tensor_type, max(2, THREADS // par)).reshape(-1)

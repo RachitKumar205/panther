@@ -65,11 +65,11 @@ contest() {  # contest SIZE B MODEL. Downloading and building type copies (the d
     while :; do  # a model without enough disk yet gives the turn back and retries in 10 minutes
       exec {fd}> "$DATA/locks/store-turn"; flock "$fd"
       log "$id: started"
-      turn "$3"
       job cpu "$id-fetch" "${R[@]}" fetch "$2" "$3"; rc=$?
       [ "$rc" = 3 ] || break
       exec {fd}>&-; log "$id: waiting for disk; other models go first"; sleep 600
     done
+    [ "$rc" = 0 ] && turn "$3"
     [ "$rc" = 0 ] && job gpu "$id-store" "${R[@]}" store "$2" "$3" || ok=0
     exec {fd}>&-
     [ "$ok" = 1 ] && { job cpu "$id-save" "${R[@]}" save "$2" "$3" & sp=$!; }  # to Hugging Face, alongside
