@@ -156,11 +156,11 @@ def fetch(model: str) -> None:
         note(f"{short(model)} fetch: type copies downloaded from {store_repo(model)}")
         return
     hf = DATA / "hf" / model
-    if (hf / "config.json").exists() or copy_of(model, "BF16").exists():
+    if copy_of(model, "BF16").exists():
         return
     m = MODELS[model]
     subprocess.run([os.environ["PANTHER_HF"], "download", m["repo"], "--revision", m["revision"], "--local-dir",
-                    str(hf)], check=True)
+                    str(hf)], check=True)  # resumes a cut-off download, skips files already there
 
 
 def save(model: str) -> None:
