@@ -158,9 +158,10 @@ def encode(t: str, W: torch.Tensor, st: dict) -> dict:
         return {"idx": idx.view(*w.shape[:3]), "neg": neg}
 
 
-def fake(t: str, W: torch.Tensor, st: dict) -> torch.Tensor:
-    """W's quantized value (forward: exactly decode(encode(W))), with gradients to W and to st's float scales."""
-    c = encode(t, W, st)
+def fake(t: str, W: torch.Tensor, st: dict, codes: dict | None = None) -> torch.Tensor:
+    """W's quantized value (forward: exactly decode(encode(W)), or decode(codes) for codes chosen earlier), with
+    gradients to W and to st's float scales."""
+    c = codes or encode(t, W, st)
     wq = decode(t, {**st, **c})
     snapped = lambda x, lo=None: x + ((x.round().clamp(0, 15) if lo else x.half().float()) - x).detach()  # noqa: E731
     w = W.view(*st["d"].shape, -1)

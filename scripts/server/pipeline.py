@@ -180,8 +180,9 @@ def save(model: str) -> None:
     note(f"{short(model)} type copies saved to {repo}")
 
 
-def store(model: str) -> None:
-    """The 16-bit original, its importance matrix, and the whole model once in every type."""
+def store(model: str, types: list[str] | None = None) -> None:
+    """The 16-bit original, its importance matrix, and the whole model once in every type (or only `types`)."""
+    types = types or CFG["formats"]
     d, bf16, imat = STORE / model, copy_of(model, "BF16"), STORE / model / f"{model}.imatrix.gguf"
     hf = DATA / "hf" / model
     d.mkdir(parents=True, exist_ok=True)
@@ -199,7 +200,7 @@ def store(model: str) -> None:
         os.rename(f"{imat}.part.gguf", imat)
     M = Model(model)
     al, n = M.allowed(), sum(m.rows * m.cols for m in M.matrices)
-    for t in CFG["formats"]:
+    for t in types:
         if not copy_of(model, t).exists():
             wait_disk(int(n * bpw(t) / 8), f"{short(model)} store, {t} copy")
         if not copy_of(model, t).exists():  # embedding / head take Q8_0 where the type needs imatrix data they lack
@@ -209,7 +210,7 @@ def store(model: str) -> None:
             blank(bf16, imat, t, FTYPE.get(t, t), emb, head, copy_of(model, t))
     done = d / "rounded.json"  # types whose copy has error-compensated codes (panther.rounding)
     have = json.loads(done.read_text()) if done.exists() else []
-    if todo := [t for t in CFG["formats"] if t not in have]:
+    if todo := [t for t in types if t not in have]:
         from panther.rounding import round_copies
         h, i = M.matrices[2].cols, max(x.cols for x in M.matrices)
         per_layer = 4 * (3 * h * h + i * i)  # bytes of the four input Hessians of one layer
@@ -697,6 +698,81 @@ def prep(model: str) -> None:
             STEPS[s](model)
 
 
+# --- EfficientQAT's Stage 1 (Block-AP) on a contest's winner: an experiment -------------------------------------
+
+QAT_SIZES = {"block": (4096, 2048), "e2e": (4096, 4096), "val": (64, 2048)}  # EfficientQAT's samples x tokens
+
+
+def corpus(model: str) -> None:
+    """RedPajama-1T-Sample (EfficientQAT's text) without its book slice, tokenized for this model and drawn as
+    EfficientQAT draws it: documents shuffled with seed 0, the first 90 % for training and the rest for validation;
+    each sample a random window in a random document longer than the window."""
+    d, dst = DATA / "corpus" / "redpajama", out(model, "qat", "tokens.npz")
+    if dst.exists():
+        return
+    c = CFG["qat_corpus"]
+    if not (d / "manifest.json").exists():
+        subprocess.run([os.environ["PANTHER_HF"], "download", c["repo"], "--repo-type", "dataset", "--revision",
+                        c["revision"], "--local-dir", str(d), "--include", "*.jsonl", "--exclude", "*book*"], check=True)
+        files = {f.name: digest_file(f) for f in sorted(d.glob("*.jsonl"))}
+        (d / "manifest.json").write_text(json.dumps({**c, "files": files}, indent=1))
+        note(f"QAT corpus: {len(files)} RedPajama files at revision {c['revision']}")
+    from transformers import AutoTokenizer
+    hf, bf16 = DATA / "hf" / model, copy_of(model, "BF16")
+    tok = (AutoTokenizer.from_pretrained(str(hf)) if (hf / "config.json").exists() else
+           AutoTokenizer.from_pretrained(str(bf16.parent), gguf_file=bf16.name))
+    docs = [json.loads(x)["text"] for f in sorted(d.glob("*.jsonl")) for x in open(f, encoding="utf-8")]
+    rng = random.Random(0)
+    order = list(range(len(docs)))
+    rng.shuffle(order)
+    cut = int(0.9 * len(order))
+
+    def draw(pool: list[int], n: int, length: int) -> np.ndarray:
+        a, k = np.empty((n, length), np.int32), 0
+        while k < n:
+            ids = tok(docs[rng.choice(pool)]).input_ids
+            if len(ids) > length:
+                i = rng.randint(0, len(ids) - length - 1)
+                a[k], k = ids[i:i + length], k + 1
+        return a
+    np.savez(f"{dst}.part.npz", **{k: draw(order[:cut] if k != "val" else order[cut:], *v) for k, v in QAT_SIZES.items()})
+    os.rename(f"{dst}.part.npz", dst)
+    note(f"{short(model)} QAT corpus: {len(docs)} documents; samples drawn")
+
+
+def digest_file(f: Path) -> str:
+    h = sha256()
+    with open(f, "rb") as fh:
+        while b := fh.read(1 << 24):
+            h.update(b)
+    return h.hexdigest()
+
+
+def qatdata(model: str) -> None:
+    """CPU, with internet: the original (if its 16-bit file is gone) and the token samples."""
+    if not copy_of(model, "BF16").exists():
+        fetch(model)
+    corpus(model)
+
+
+def qat(model: str) -> None:
+    """Block-AP on this contest's winner: its types rebuilt with our rounding (the undistilled file the final step
+    started from), then every layer matrix's weights and scales trained block by block."""
+    from panther.blockap import train
+    w = json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())["assignment"]
+    store(model, sorted(set(w.values())))
+    start, s1, cache = (out(model, "qat", f"{BUDGET}-start.gguf"), out(model, "qat", f"{BUDGET}-stage1.gguf"),
+                        DATA / "cache" / "blockap" / model)
+    if not start.exists():
+        build(model, w, start)
+    if not s1.exists():
+        t = np.load(out(model, "qat", "tokens.npz"))
+        with gpu(32 * GIB, 12 * 3600):
+            train(copy_of(model, "BF16"), start, t["block"], t["val"], s1, cache, lambda m: note(f"{short(model)} {m}"))
+        shutil.rmtree(cache, ignore_errors=True)
+    note(f"{short(model)} QAT stage 1 done: {s1}")
+
+
 STEPS = {"store": store, "error": error, "refs": refs, "preset": preset, "ga": ga, "final": final, "bundle": bundle}
 
 
@@ -704,8 +780,8 @@ def main() -> int:
     global BUDGET
     cmd, b, model = sys.argv[1:4]
     BUDGET = int(b)
-    if cmd in ("fetch", "upload", "save"):
-        {"fetch": fetch, "upload": upload, "save": save}[cmd](model)
+    if cmd in ("fetch", "upload", "save", "qatdata", "qat"):
+        {"fetch": fetch, "upload": upload, "save": save, "qatdata": qatdata, "qat": qat}[cmd](model)
         return 0
     if cmd == "prep":
         prep(model)

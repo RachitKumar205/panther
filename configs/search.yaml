@@ -17,3 +17,6 @@ contests:
 # output layer unless configs/models.yaml sets imatrix_process_output).
 formats: [IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, Q2_K, IQ3_XXS, Q3_K, IQ3_S, IQ4_XS, Q4_K, Q5_K, Q6_K, Q8_0]
 requires_imatrix: [IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS]
+
+# EfficientQAT experiment (./panther qat): its text, RedPajama's 1B-token sample, without the book slice
+qat_corpus: {repo: togethercomputer/RedPajama-Data-1T-Sample, revision: main}  # pinned to a commit after the first download
