@@ -42,8 +42,8 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
         tv, ti = torch.cat([t.values.cpu() for t in tops]), torch.cat([t.indices.cpu() for t in tops])
     del m, tops
     torch.cuda.empty_cache()
-    m = _load(student)
-    m.gradient_checkpointing_enable()
+    m = _load(student).train()  # checkpointing only applies in training mode: without it every rescaled weight
+    m.gradient_checkpointing_enable()  # is kept for the backward pass, a second copy of the model (24B: 95 GB)
     arch = gguf.GGUFReader(student).fields["general.architecture"].contents()
     rd = {t.name: t for t in gguf.GGUFReader(student).tensors}
     scales, norms = {}, {}
