@@ -137,7 +137,6 @@ def round_copies(hf_dir: Path | None, bf16: Path, copies: dict[str, Path], calib
     dst = {t: {x.name: x for x in r.tensors} for t, r in out.items()}
     n_layers = len(m.model.layers)
     widest = max(t.shape[0] for t in src.values() if len(t.shape) == 2)  # input width of the widest matrix
-    par = int(max(1, min(6, (90 * 2**30 - bf16.stat().st_size - 20 * 2**30) // (12 * widest**2 + 1))))
     for start in range(0, n_layers, layers_per_pass):
         H, hooks = {}, []
         for i in range(start, min(start + layers_per_pass, n_layers)):
@@ -160,6 +159,8 @@ def round_copies(hf_dir: Path | None, bf16: Path, copies: dict[str, Path], calib
                 w = torch.from_numpy((np.asarray(src[name].data).view(np.uint16).astype(np.uint32) << 16)
                                      .view(np.float32).reshape(src[name].shape[::-1].tolist())).cuda()
                 hm = h / (SEQS // 8)
+                torch.cuda.empty_cache()  # types rounded at once: as many as the free GPU memory holds (each ~24 n^2)
+                par = int(max(1, min(6, (torch.cuda.mem_get_info()[0] - 4 * 2**30) // (24 * widest**2))))
 
                 def one(ts, w=w, hm=hm, name=name):  # several types at once: most of each call runs on one thread
                     ts[name].data.reshape(-1)[:] = gptq(w, hm, ts[name].tensor_type, max(2, THREADS // par)).reshape(-1)
