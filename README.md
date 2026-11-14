@@ -290,8 +290,8 @@ About 1,430 lines (blank and comment lines excluded):
   against the whole model's KL); **GuidedQuant** (ICML 2025). The strongest 2-bit methods (QTIP, PV-Tuning, AQLM) need
   their own formats.
 - Distillation of quantized models: **EfficientQAT** (training only the quantization scales end to end). Its first stage
-  (training the codes block by block) is being added as an experiment, starting with fake quantizers for llama.cpp's
-  Q2_K, IQ2_XS and IQ2_S that match llama.cpp's decoding bit for bit (`src/panther/fakequant.py`). `./panther qat 14b@5` runs, on a finished
+  (training the codes block by block) is being added as an experiment, with fake quantizers for all 14 of
+  llama.cpp's types used here, matching llama.cpp's decoding bit for bit (`src/panther/fakequant.py`). `./panther qat 14b@5` runs, on a finished
   contest's winner rebuilt undistilled: Stage 1 (`src/panther/blockap.py`, the paper's size: 4,096 samples x 2,048
   tokens, 2 epochs); Stage 2 (scales only, end to end, 4,096 x 4,096 tokens, batches of 32, KL to the original instead
   of the paper's cross-entropy); Stage 2 alone on the undistilled file as a control; then each file through the
