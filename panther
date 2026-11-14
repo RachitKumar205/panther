@@ -49,8 +49,9 @@ job() {  # job cpu|gpu NAME CMD...: one container, waited for; returns its exit 
 
 contest() {  # contest SIZE B MODEL. Downloading and building type copies (the disk-heavy part) take turns, one
   # model at a time; everything after runs in parallel with the other contests, sharing the GPU through its ledger.
-  local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) fd ok=1 sp="" rc
+  local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) fd ok=1 sp="" pp="" rc
   mkdir -p "$DATA/locks"; log "$id: queued (waiting its turn to download and build the type copies)"
+  job gpu "$id-prep" "${R[@]}" prep "$2" "$3" & pp=$!  # refs + preset as soon as the original exists, beside the copies
   local types; types="$(grep '^formats:' "$W/repo/configs/search.yaml" | tr ',' '\n' | wc -l)"
   if [ "$(grep -o '"[A-Z0-9_]*"' "$DATA/store/$3/rounded.json" 2>/dev/null | wc -l)" -ge "$types" ]; then
     log "$id: started (type copies already built)"
@@ -70,6 +71,7 @@ contest() {  # contest SIZE B MODEL. Downloading and building type copies (the d
     exec {fd}>&-
     [ "$ok" = 1 ] && { job cpu "$id-save" "${R[@]}" save "$2" "$3" & sp=$!; }  # to Hugging Face, alongside
   fi
+  [ -n "${pp:-}" ] && wait "$pp"
   if [ "$ok" = 1 ] && job gpu "$id-run" "${R[@]}" run "$2" "$3" && job cpu "$id-upload" "${R[@]}" upload "$2" "$3"
   then log "$id: done"; else log "$id: FAILED or stopped (its files are kept, to resume)"; return; fi
   [ -n "$sp" ] && wait "$sp"

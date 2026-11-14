@@ -652,6 +652,16 @@ def upload(model: str) -> None:
     note(f"{short(model)} Pi bundle uploaded")
 
 
+def prep(model: str) -> None:
+    """refs and preset as soon as the 16-bit original and the importance matrix exist: they run on the GPU while the
+    type copies are built on the CPU."""
+    while not (copy_of(model, "BF16").exists() and (STORE / model / f"{model}.imatrix.gguf").exists()):
+        time.sleep(60)
+    for s in ("refs", "preset"):
+        with lock(f"{model}-{s}" if s == "refs" else f"{model}-{BUDGET}-{s}"):
+            STEPS[s](model)
+
+
 STEPS = {"store": store, "error": error, "refs": refs, "preset": preset, "ga": ga, "final": final, "bundle": bundle}
 
 
@@ -661,6 +671,9 @@ def main() -> int:
     BUDGET = int(b)
     if cmd in ("fetch", "upload", "save"):
         {"fetch": fetch, "upload": upload, "save": save}[cmd](model)
+        return 0
+    if cmd == "prep":
+        prep(model)
         return 0
     for s in STEPS if cmd == "run" else [cmd]:
         t0 = time.time()
