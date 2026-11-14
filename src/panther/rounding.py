@@ -20,32 +20,43 @@ INPUTS = {"attn_in": ("self_attn.q_proj", "attention.wqkv"), "o_in": ("self_attn
 ROLE_INPUT = {"attn_q": "attn_in", "attn_k": "attn_in", "attn_v": "attn_in", "attn_output": "o_in",
               "ffn_gate": "mlp_in", "ffn_up": "mlp_in", "ffn_down": "down_in"}
 _LIB = None
+_TO_FLOAT = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64)  # releases the GIL
+
+
+class _Traits(ctypes.Structure):  # struct ggml_type_traits (ggml.h)
+    _fields_ = [("type_name", ctypes.c_char_p), ("blck_size", ctypes.c_int64), ("blck_size_interleave", ctypes.c_int64),
+                ("type_size", ctypes.c_size_t), ("is_quantized", ctypes.c_bool), ("to_float", ctypes.c_void_p),
+                ("from_float_ref", ctypes.c_void_p)]
 
 
 def quant(w: np.ndarray, imp: np.ndarray | None, qtype, threads: int = THREADS, deq: bool = True):
     """(codes, dequantized values or None) of the rows of w in qtype, by llama.cpp's quantizer on every thread.
     imp None: llama.cpp's own weighting, as llama-quantize uses for a tensor the importance matrix lacks."""
     global _LIB
-    from gguf.quants import dequantize
     if _LIB is None:
         _LIB = ctypes.CDLL("/opt/llama.cpp/build-cuda/bin/libggml-base.so")
         _LIB.ggml_quantize_chunk.restype, _LIB.ggml_row_size.restype = ctypes.c_size_t, ctypes.c_size_t
         _LIB.ggml_quantize_chunk.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p] + [ctypes.c_int64] * 3 \
             + [ctypes.c_void_p]
         _LIB.ggml_row_size.argtypes = [ctypes.c_int, ctypes.c_int64]
+        _LIB.ggml_get_type_traits.restype, _LIB.ggml_get_type_traits.argtypes = ctypes.POINTER(_Traits), [ctypes.c_int]
     t, (rows, n) = int(qtype.value), w.shape
     _LIB.ggml_quantize_init(t)
     w = np.ascontiguousarray(w, np.float32)
     imp = None if imp is None else np.ascontiguousarray(imp, np.float32)
     dst = np.empty((rows, _LIB.ggml_row_size(t, n)), np.uint8)
+    back = np.empty((rows, n), np.float32) if deq else None
+    to_float = _TO_FLOAT(_LIB.ggml_get_type_traits(t).contents.to_float)
 
-    def part(idx):
+    def part(idx):  # quantize, then llama.cpp's own dequantize: in C, so the parallel types never wait on Python
         a, b = int(idx[0]), int(idx[-1]) + 1
         _LIB.ggml_quantize_chunk(t, w[a:b].ctypes.data, dst[a:b].ctypes.data, 0, b - a, n,
                                  None if imp is None else imp.ctypes.data)
+        if deq:
+            to_float(dst[a:b].ctypes.data, back[a:b].ctypes.data, (b - a) * n)
     with ThreadPoolExecutor(threads) as ex:
         list(ex.map(part, [i for i in np.array_split(np.arange(rows), threads) if len(i)]))
-    return dst, dequantize(dst, qtype).reshape(rows, n) if deq else None
+    return dst, back
 
 
 def f32(t) -> np.ndarray:
