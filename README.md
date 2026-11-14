@@ -195,9 +195,10 @@ importance_c the mean squared input of column c. Used only to repair genomes and
 - **Written back**: every K and IQ type stores one 16-bit scale **d** per block and a block's values are proportional
   to it, so **d ← d × exp(θ)** at the block's byte position (Q2_K, Q4_K, Q5_K also scale their minimum, dmin; Q8_0's
   8 small blocks per 256 weights all take the factor). Norms are overwritten.
-- **Not tuned**: IQ1_M blocks (no single scale); Mistral's attention q/k matrices (llama.cpp reorders their rows);
-  InternLM cannot be loaded from GGUF by the transformers library, so its finalists are scored as built (the page
-  says so).
+- **Not tuned**: IQ1_M blocks (no single scale); Mistral's attention q/k matrices (llama.cpp reorders their rows).
+- **InternLM 20B gets neither smarter rounding nor distillation**: its model code was written for an older
+  transformers library and does not run with the current one, and both levers need the model running in PyTorch.
+  Its contests use llama.cpp's plain type copies with the new search score.
 
 ### The final step and the verdict
 

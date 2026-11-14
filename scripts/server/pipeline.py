@@ -211,7 +211,11 @@ def store(model: str) -> None:
             os.rename(part, copy_of(model, t))
     done = d / "rounded.json"  # types whose copy has error-compensated codes (panther.rounding)
     have = json.loads(done.read_text()) if done.exists() else []
-    if todo := [t for t in CFG["formats"] if t not in have]:
+    if "internlm" in model.lower() and (todo := [t for t in CFG["formats"] if t not in have]):
+        note(f"{short(model)} store: InternLM's model code does not run with this transformers version, so its copies "
+             "keep llama.cpp's plain rounding (and its finalists are not distilled)")
+        done.write_text(json.dumps(have + todo))
+    if todo := [t for t in CFG["formats"] if t not in have and "internlm" not in model.lower()]:
         from panther.rounding import round_copies
         h, i = M.matrices[2].cols, max(x.cols for x in M.matrices)
         per_layer = 4 * (3 * h * h + i * i)  # bytes of the four input Hessians of one layer
