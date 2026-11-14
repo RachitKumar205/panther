@@ -1,7 +1,7 @@
 # Panther
 
 A Raspberry Pi 5 has 8 GB of RAM. For each **RAM budget** (1, 3, 5 and 7 GiB) and several open language models
-(Qwen2.5 1.5B, 7B, 14B, 32B; Mistral Small 22B and 24B), Panther builds a compressed version that should
+(Qwen2.5 1.5B, 7B, 14B; Mistral Small 22B and 24B), Panther builds a compressed version that should
 **answer better than the best compressed version that already exists** for that budget: llama.cpp's own preset.
 Each model-and-budget pair is a **contest**, written like `7b@3`.
 
@@ -210,6 +210,9 @@ importance_c the mean squared input of column c. Used only to repair genomes and
   transformers library, does not run with the current one, so it could get neither smarter rounding nor
   distillation. Its two contests (search only) ended in TIEs, +0.46 at 5 GiB and +0.89 at 7 GiB; their logs and
   results are kept.
+- **Qwen2.5 32B was dropped** (2026-11-15): loading its 16-bit weights (65.5 GB) for the rounding needs more RAM
+  than a container gets (64 GB). Its contest (32b@7) has no result; its competitor would have been IQ1_S (54.43 %
+  held-out, 7.70 GiB).
 
 ### The final step and the verdict
 
