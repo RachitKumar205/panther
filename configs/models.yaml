@@ -18,12 +18,6 @@ models:
     repo: Qwen/Qwen2.5-14B-Instruct
     revision: cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8
     role: main
-  - name: Qwen2.5-32B-Instruct
-    repo: Qwen/Qwen2.5-32B-Instruct
-    revision: 5ede1c97bbab6ce5cda5812749b4c0bdf79b18dd  # resolved 2026-11-11
-    role: candidate (7 GiB only)
-    imatrix_process_output: true  # head may use imatrix-only formats
-
   - name: Mistral-24B-Instruct
     repo: mistralai/Mistral-Small-24B-Instruct-2501
     revision: 9527884be6e5616bdd54de542f9ae13384489724  # resolved 2026-11-12; Apache-2.0

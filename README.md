@@ -211,8 +211,8 @@ importance_c the mean squared input of column c. Used only to repair genomes and
   distillation. Its two contests (search only) ended in TIEs, +0.46 at 5 GiB and +0.89 at 7 GiB; their logs and
   results are kept.
 - **Qwen2.5 32B was dropped** (2026-11-15): loading its 16-bit weights (65.5 GB) for the rounding needs more RAM
-  than a container gets (64 GB). Its contest (32b@7) has no result; its competitor would have been IQ1_S (54.43 %
-  held-out, 7.70 GiB).
+  than a container gets (64 GB). Its contest (32b@7) has no result (its competitor would have been IQ1_S, 54.43 %
+  held-out, 7.70 GiB); the model and all its files were removed.
 
 ### The final step and the verdict
 
