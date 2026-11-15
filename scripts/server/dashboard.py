@@ -149,6 +149,63 @@ def contests(log: list[str], ln) -> list[dict]:
     return sorted(out, key=lambda c: (order[c["state"]], c["budget"], float(re.sub(r"[^0-9.]", "", c["size"]) or 0)))
 
 
+def tests(notes: list[str]) -> list[dict]:
+    """The block-0 tests that chose Stage 1's settings, as rows: what was trained, for how many steps, the block's
+    validation error before and after, and what we read from it. Notes without a result (plans) are left out."""
+    out = []
+    for t in notes:
+        m = re.search(r"validation ([\d.]+) -> ([\d.]+)", t) or re.search(r": ([\d.]+) -> ([\d.]+)", t)
+        if not m:
+            continue
+        label = re.sub(r"^\([A-Z]\)\s*", "", t.split(":")[0]).strip()
+        note = re.sub(r"^\s*\([^)]*%\)", "", t[m.end():])
+        note = re.sub(r"^[\s:,.)]+", "", note).split("; (")[0].strip()
+        steps = re.search(r"([\d,]+) steps", label)
+        out.append({"trains": label.split(",")[0].strip(), "steps": int(steps.group(1).replace(",", "")) if steps else None,
+                    "first": "first" in label, "before": float(m.group(1)), "after": float(m.group(2)), "note": note})
+    return out
+
+
+def constants(f: Path, names: str) -> dict[str, str]:
+    """A tuple assignment of constants in a source file (`A, B = 1, 2`), read as text (the dashboard imports no torch)."""
+    m = re.search(rf"^{re.escape(names)} = (.+?)(?:\s+#.*)?$", f.read_text(), re.M) if f.exists() else None
+    return dict(zip(names.split(", "), (v.strip() for v in m.group(1).split(",")))) if m else {}
+
+
+def config() -> list[dict]:
+    """Stage 1 and Stage 2's settings, from the code that runs them."""
+    root = Path(__file__).resolve().parents[2]
+    b = constants(root / "src/panther/blockap.py", "BATCH, EPOCHS, LR_W, LR_S, MIN_LR, RECODE, PATIENCE")
+    d = constants(root / "src/panther/distill.py", "SEQ, BATCH, TOPK, STEPS")
+    pipe = (root / "scripts/server/pipeline.py").read_text() if (root / "scripts/server/pipeline.py").exists() else ""
+    sizes = {k: (int(n), int(t)) for k, n, t in re.findall(r'"(\w+)": \((\d+), (\d+)\)', pipe.split("QAT_SIZES", 1)[-1].split("\n")[0])}
+    e2e_lr = re.search(r"^E2E_LR = (\S+)", pipe, re.M)
+    accum = re.search(r"accum=(\d+),\s*\n?\s*lr=E2E_LR", pipe)
+    out = []
+    if b:
+        n, t = sizes.get("block", (0, 0))
+        vn, vt = sizes.get("val", (0, 0))
+        steps = n * int(b["EPOCHS"]) // int(b["BATCH"]) if n else None
+        out.append({"stage": "Stage 1 · Block-AP", "rows": [
+            ["Trains", "weights only (block scales frozen)" if float(eval(b["LR_S"])) == 0 else "weights and block scales"],
+            ["Loss", "MSE to the original block's output, fed the quantized blocks before it"],
+            ["Learning rate", f"{b['LR_W']}, cosine to {b['MIN_LR'].replace(' ', '')} of it" + ("" if float(eval(b["LR_S"])) == 0 else f"; scales {b['LR_S']} relative")],
+            ["Data", f"{n:,} samples × {t:,} tokens, {b['EPOCHS']} epochs, batch {b['BATCH']} = {steps:,} steps a block" if steps else "–"],
+            ["Validation", f"{vn} × {vt:,} tokens, every 512 steps; the best point is kept"],
+            ["Early stop", f"no better point for {b['PATIENCE']} checks ({int(b['PATIENCE']) * 512:,} steps)"],
+            ["Codes re-chosen", f"every {b['RECODE']} steps"]]})
+    if d:
+        n, t = sizes.get("e2e", (0, 0))
+        a = int(accum.group(1)) if accum else 1
+        out.append({"stage": "Stage 2 · end to end", "rows": [
+            ["Trains", "block scales only (weights and norms frozen)"],
+            ["Loss", f"KL to the original's top {d['TOPK']} next-word probabilities"],
+            ["Learning rate", f"{e2e_lr.group(1) if e2e_lr else '–'} relative, falling linearly to 0"],
+            ["Data", f"{n:,} samples × {t:,} tokens, one epoch, {a} per update = {n // a:,} updates" if n else "–"],
+            ["Control", "the same Stage 2 on the file before Stage 1, to tell what Stage 1 adds"]]})
+    return out
+
+
 def qat(log: list[str], ln) -> dict | None:
     """The EfficientQAT experiment, from the progress lines and its results file."""
     lines = [x for _, _, ls in ln for x in ls if "block-ap" in x or "QAT" in x]
@@ -188,10 +245,11 @@ def qat(log: list[str], ln) -> dict | None:
         e = t.tm_hour * 60 + t.tm_min + per * left
         eta = f"{int(e // 60) % 24:02d}:{int(e % 60):02d}"
     strategy = lines[[i for i, x in enumerate(lines) if "block-ap strategy:" in x][-1]].split("strategy: ", 1)[1] if cur else None
-    notes = [x[6:].replace("note: ", "") for x in log if "note:" in x and ("QAT" in x or "Stage" in x or "block-0" in x)]
+    notes = [x for x in log if "note:" in x and ("QAT" in x or "Stage" in x or "block-0" in x) and "block-0 test" not in x]
     return {"strategy": strategy, "blocks": [blocks[b] for b in sorted(blocks)], "total": total,
-            "minutes_per_block": per, "stage1_eta": eta, "now": notes[-1] if notes else None,
-            "tests": [x[6:].split("block-0 test: ", 1)[1] for x in log if "note: block-0 test" in x],
+            "minutes_per_block": per, "stage1_eta": eta, "now": notes[-1][6:].replace("note: ", "") if notes else None, "now_at": notes[-1][:5] if notes else None,
+            "tests": tests([x[6:].split("block-0 test: ", 1)[1] for x in log if "note: block-0 test" in x]),
+            "config": config(),
             "control": updates("stage 2 only"), "stage2": updates("stage 2 after stage 1"),
             "results": {name: r for _, rs in res.items() for name, r in rs.items()}}
 

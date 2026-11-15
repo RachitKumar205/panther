@@ -259,6 +259,28 @@ function strip(q) {
     return `<i class="${cls}" style="${style}" title="${esc(title)}" data-b="${i}"></i>`;
   }).join("")}</div>`;
 }
+// Why Stage 1 trains what it trains: the block-0 tests side by side, each as the change in the block's validation
+// error (a bar left of zero is better), the full-length runs last, the one in use marked.
+function choice(q) {
+  const ts = q.tests || [];
+  if (!ts.length) return "";
+  const ch = (t) => (t.after - t.before) / t.before, m = Math.max(0.1, ...ts.map((t) => Math.abs(ch(t))));
+  const X = (v) => (50 + (50 * v) / m).toFixed(2) + "%";
+  const using = (q.strategy || "").startsWith("weights only") ? "weights only" : "weights + scales";
+  const full = (w) => ts.filter((t) => t.trains === w && t.steps === Math.max(...ts.map((x) => x.steps || 0))).at(-1);
+  const a = full("weights + scales"), b = full("weights only");
+  const head = a && b ? `Over the full ${b.steps.toLocaleString()} steps, training the block scales as well raised block 0's error by <b class="bad">${Math.round(Math.abs(ch(a)) * 100)}%</b>; training the weights alone cut it by <b class="good">${Math.round(Math.abs(ch(b)) * 100)}%</b>. Stage 1 trains ${esc(using)}.` : "";
+  const order = [...ts.map((t, i) => ({ ...t, i }))].sort((x, y) => (x.steps || 0) - (y.steps || 0) || x.i - y.i);
+  return `<div class="card"><h2>Why ${esc(using)} <span class="muted">tests on block 0: change in its validation error</span></h2>
+    <div class="body">${head ? `<p class="lead">${head}</p>` : ""}
+    <div class="cmp"><div class="cr ch"><span></span><div class="ax"><span style="left:${X(-m)}">${sgn(-m * 100, 0)}%</span><span style="left:50%">0</span><span style="left:${X(m)}">${sgn(m * 100, 0)}%</span></div><span></span></div>
+    ${order.map((t) => {
+      const v = ch(t), use = t.i === ts.indexOf(using === "weights only" ? b : a);
+      return `<div class="cr${use ? " use" : ""}"><div class="lb"><b>${esc(t.trains)}</b><span class="muted">${t.steps ? t.steps.toLocaleString() + " steps" : ""}${t.first ? " · first run" : ""}</span>${use ? ' <span class="badge done">in use</span>' : ""}</div>
+        <div class="tr"><i class="z"></i><i class="b ${v < 0 ? "good" : "bad"}" style="left:${X(Math.min(0, v))};right:calc(100% - ${X(Math.max(0, v))})"></i></div>
+        <div class="nm"><span class="mono">${t.before.toFixed(4)} → ${t.after.toFixed(4)}</span> <b class="${v < 0 ? "good" : "bad"} mono">${pct(t.after, t.before)}</b>${t.note ? `<div class="muted small">${esc(t.note)}</div>` : ""}</div></div>`;
+    }).join("")}</div></div></div>`;
+}
 function resultsTable(res) {
   return `<table><thead><tr><th>Run</th><th class="n">Held-out</th><th>vs current winner</th><th class="hide-s">vs preset</th></tr></thead><tbody>${Object.entries(res).map(([n, r]) =>
     `<tr><td>${esc(RUNS[n] || n)}</td><td class="n">${r.held_out.accuracy.toFixed(2)}</td><td class="num">${verdict(r.vs_winner.verdict)} ${sgn(r.vs_winner.diff)} <span class="muted hide-s">[${sgn(r.vs_winner.ci[0])}, ${sgn(r.vs_winner.ci[1])}]</span></td><td class="num hide-s">${verdict(r.vs_preset.verdict)} ${sgn(r.vs_preset.diff)}</td></tr>`).join("")}</tbody></table>`;
@@ -288,9 +310,10 @@ pages.qat = (st, el, [tab = ""]) => {
       </div>
       <div class="card pad section"><h2>KL to the original <span class="muted">teacher's top 64, smoothed</span></h2><div class="chart" id="c-s2"></div>
         <div class="legend"><span><i style="background:var(--s1)"></i>after Stage 1</span><span><i style="background:var(--s2)"></i>control</span></div></div>`;
-  } else if (tab === "settings") {
-    body = `<div class="grid cols-2"><div class="card pad prose"><h2>Strategy</h2><p>${esc(q.strategy || "–")}</p>${q.now ? `<h2>Latest note</h2><p>${esc(q.now)}</p>` : ""}</div>
-      <div class="card pad"><h2>How Stage 1's settings were chosen <span class="muted">tests on block 0</span></h2>${q.tests.length ? `<ul class="plain">${q.tests.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : '<div class="muted">none</div>'}</div></div>`;
+  } else if (tab === "setup") {
+    body = `${choice(q)}
+      <div class="grid cols-2 section">${(q.config || []).map((c) => `<div class="card"><h2>${esc(c.stage)}</h2>
+        <dl class="kv">${c.rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl></div>`).join("")}</div>`;
   } else {
     body = `<div class="grid cols-4">
         ${kpi("Stage 1 · blocks", `${done.length}<small>/ ${q.total}</small>`, qs.state === "running" && q.stage1_eta && done.length < q.total ? `ends ~${esc(q.stage1_eta)} · ${q.minutes_per_block ? Math.round(q.minutes_per_block) + " min a block" : ""}` : "finished", prog(done.length / q.total))}
@@ -300,11 +323,11 @@ pages.qat = (st, el, [tab = ""]) => {
       </div>
       <div class="card pad section"><h2>Stage 1 blocks <a class="more" href="#/experiments/qat/stage1">details →</a></h2>${strip(q)}</div>
       <div class="card tw section"><h2>Results <span class="muted">held-out test; bootstrap 95% intervals</span></h2>${Object.keys(res).length ? resultsTable(res) : '<div class="empty">No results yet.</div>'}</div>
-      ${q.now ? `<div class="card pad section prose"><h2>Latest note</h2><p>${esc(q.now)}</p></div>` : ""}`;
+      ${q.now ? `<div class="card pad section prose"><h2>Latest note <span class="muted">${esc(q.now_at || "")}</span></h2><p>${esc(q.now)}</p></div>` : ""}`;
   }
   el.innerHTML = `
     <div class="ph"><h1>${QAT_NAME}</h1>${badge(qs.state)}<div class="sub">${esc((q.strategy || "").split(",")[0])}${qs.state === "running" ? ` · ${esc(qs.step)}` : ""}</div></div>
-    ${tabs("#/experiments/qat", [["", "Overview"], ["stage1", "Stage 1 · blocks"], ["stage2", "Stage 2 · scales"], ["settings", "Settings"]], tab)}
+    ${tabs("#/experiments/qat", [["", "Overview"], ["stage1", "Stage 1 · blocks"], ["stage2", "Stage 2 · scales"], ["setup", "Setup"]], tab)}
     ${body}`;
   const s = el.querySelector("#strip");
   if (s) s.onclick = (e) => { const c = e.target.closest(".cell"); if (!c) return; ui.block = +c.dataset.b; ui.picked = true; if (tab !== "stage1") location.hash = "#/experiments/qat/stage1"; else draw(); };

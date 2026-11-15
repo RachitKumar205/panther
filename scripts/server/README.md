@@ -37,7 +37,7 @@ that lead to detail pages, tabs on a detail page, and links that can be shared (
 | Contests | every contest, filterable (won, tied, running, dropped) and sortable; one row each |
 | Contest | Results (ours − preset, held-out table by task, the Pi's RAM and speed, our mix of types), Steps (a timeline of the pipeline's steps with start times and durations), Events |
 | Experiments | the EfficientQAT runs and the control, with status and results |
-| Experiment | Overview, Stage 1 (a strip of every block, the chosen block's validation curve over all 4,096 steps, a table of blocks), Stage 2 (KL against the control), Settings (strategy, how it was chosen) |
+| Experiment | Overview, Stage 1 (a strip of every block, the chosen block's validation curve over all 4,096 steps, a table of blocks), Stage 2 (KL against the control), Setup (the block-0 tests side by side as changes in validation error, the one in use marked; every Stage 1 and Stage 2 setting, read from the code that runs them) |
 | System | GPU memory, the booking ledger, disk, the Pi's measurements |
 | Logs | a live tail of every log (the last 3,000 lines, then each new line about a second after it is written, pushed by the server as server-sent events): search, level (key, notes, errors), which log, wrap, follow; scroll up and it holds still and counts new lines |
 

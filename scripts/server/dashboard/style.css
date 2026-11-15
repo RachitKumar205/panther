@@ -101,6 +101,25 @@ h2 .muted { font-weight: 500; font-size: 12.5px; }
 .prose { font-size: 13.5px; color: var(--ink-2); } .prose p { margin: 0 0 10px; }
 .plain { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; color: var(--ink-2); }
 
+/* the Setup tab: block-0 tests compared, and the settings */
+.lead { margin: 4px 0 16px; font-size: 14px; color: var(--ink-2); max-width: 70ch; }
+.good { color: var(--win); } .bad { color: var(--lose); }
+.cmp { display: grid; gap: 2px; }
+.cr { display: grid; grid-template-columns: 240px minmax(0, 1fr) 280px; gap: 18px; align-items: center; padding: 9px 10px; border-radius: 8px; }
+.cr.use { background: var(--win-soft); }
+.cr.ch { padding-top: 0; padding-bottom: 0; font-size: 11px; color: var(--muted); }
+.cr .lb { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 13px; } .cr .lb b { font-weight: 620; }
+.cr .tr { position: relative; height: 16px; } .cr .tr i { position: absolute; display: block; }
+.cr .tr .z { left: 50%; top: -6px; bottom: -6px; width: 1px; background: var(--muted); opacity: .6; }
+.cr .tr .b { top: 2px; height: 12px; border-radius: 3px; } .cr .tr .b.good { background: var(--win); } .cr .tr .b.bad { background: var(--lose); }
+.cr .ax { position: relative; height: 14px; } .cr .ax span { position: absolute; transform: translateX(-50%); font-variation-settings: "MONO" 1; }
+.cr .ax span:first-child { transform: none; } .cr .ax span:last-child { transform: translateX(-100%); }
+.cr .nm { font-size: 13px; }
+.kv { display: grid; grid-template-columns: 140px minmax(0, 1fr); margin: 0; padding: 4px 16px 12px; font-size: 13px; }
+.kv dt { color: var(--muted); padding: 8px 0; border-top: 1px solid var(--rule); }
+.kv dd { margin: 0; padding: 8px 0; border-top: 1px solid var(--rule); }
+.kv dt:first-of-type, .kv dd:first-of-type { border-top: 0; }
+
 /* jobs (what is running) */
 .job { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 220px) 92px; gap: 18px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--rule); }
 .job:hover { background: var(--hover); }
@@ -232,6 +251,8 @@ mark { background: var(--accent-soft); color: inherit; border-radius: 2px; }
   .tl .r, .tl .axis { grid-template-columns: 84px minmax(0, 1fr); } .tl .r > :last-child, .tl .axis > :last-child { display: none; }
   .ln { grid-template-columns: 0 42px 44px minmax(0, 1fr); gap: 0 8px; } .ln .no { visibility: hidden; }
   .lbar .search { min-width: 0; flex-basis: 100%; } .lbar .grow, #lcount { display: none; }
+  .cr { grid-template-columns: 1fr; gap: 6px; } .cr.ch { display: none; }
+  .kv { grid-template-columns: 1fr; } .kv dd { border-top: 0; padding-top: 0; }
   .kpi .v { font-size: 22px; } .ph h1 { font-size: 20px; }
   td, th { padding-left: 8px; padding-right: 8px; }
 }
