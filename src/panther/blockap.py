@@ -4,12 +4,15 @@ written into a copy of the file (same types, same size). As the paper (arXiv 240
   - target: the original block's output on the original model's own hidden states; input: the outputs of the blocks
     already quantized, so each block also corrects the error before it; loss: mean squared error
   - trained: the latent weights (starting at the original's) and the scales (starting at the file's); norms and
-    biases frozen; AdamW, weights 2e-5 (2-bit), cosine to 1/20 per batch, batch 2, 2 epochs. Scales: relative
-    multipliers at 1e-3, about the paper's 1e-4 on its ~0.05 step sizes (tested on the 1.5B: 1e-2 hurts)
+    biases frozen; AdamW, weights 2e-5 (2-bit), cosine to 1/20 per batch, batch 2, 2 epochs. Unlike the paper, the
+    block scales stay frozen here (LR_S): llama.cpp's d covers 256 weights over fixed integer sub-scales, and
+    training it drifted (see LR_S); they are trained in Stage 2
 Ours: llama.cpp's own types (panther.fakequant) instead of uniform quantization; bf16 instead of fp16 (Qwen2.5
 overflows fp16); a matrix's codes are re-chosen every RECODE steps (the IQ pattern search is the slow part; the
-weights move by ~1e-5 a step). The hidden states of every sample (two copies, original and quantized) do not fit in
-memory at the paper's size (14B: 2 x 86 GB), so they are streamed from disk (bf16), as the paper's code does for large models (fp16 there).
+weights move by ~1e-5 a step). Every 512 steps the block's validation error is measured and the best point is kept
+(training can drift late: on the 14B, block 0's error halved by step 512, then doubled by step 4,096). The hidden
+states of every sample (two copies, original and quantized) do not fit in memory at the paper's size (14B: 2 x 86
+GB), so they are streamed from disk (bf16), as the paper's code does for large models (fp16 there).
 """
 
 from __future__ import annotations
@@ -29,7 +32,10 @@ import torch
 from panther import fakequant as fq
 from panther.distill import LINEAR
 
-BATCH, EPOCHS, LR_W, LR_S, MIN_LR, RECODE = 2, 2, 2e-5, 1e-3, 1 / 20, 16  # LR_S: relative (per unit of log d)
+BATCH, EPOCHS, LR_W, LR_S, MIN_LR, RECODE = 2, 2, 2e-5, 0, 1 / 20, 16
+# LR_S (relative, per unit of log d) is 0: weights only. On the 14B's block 0 at 4,096 steps, weights + scales (1e-3)
+# went 0.0098 -> 0.0181 (the error halved, then doubled: the scales drift); weights only 0.0098 -> 0.0040. Scales are
+# trained in Stage 2 instead, end to end, with the codes frozen.
 
 
 class QLinear(torch.nn.Module):
@@ -185,7 +191,10 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
                 return sum(torch.nn.functional.mse_loss(_run(ql, vq[i:i + BATCH].cuda(), rope).float(),
                                                         _run(orig, vfp[i:i + BATCH].cuda(), rope).float()).item()
                            for i in range(0, len(vq), BATCH)) / math.ceil(len(vq) / BATCH)
+        def snap():
+            return [p.detach().cpu().clone() for p in ws + ss]
         before, total, mark = val_loss(), 0.0, 0.0
+        best = (before, 0, snap())  # (validation error, step, weights and scales): never end worse than the start
         for ep in range(EPOCHS):
             nxt = (get(fp, 0), get(qn, 0))
             for i in range(0, n, BATCH):
@@ -204,10 +213,17 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
                 sched.step()
                 total += loss.item()
                 k = ep * (n // BATCH) + i // BATCH + 1
-                if k % 512 == 0:  # the training error so far in this stretch: shows if a block drifts late
-                    log(f"block-ap block {b}: step {k}/{steps}, train MSE {(total - mark) / 512:.5f}")
+                if k % 512 == 0:  # every 512 steps: the training error of the stretch, and the best point so far
+                    v = val_loss()
+                    if v < best[0]:
+                        best = (v, k, snap())
+                    log(f"block-ap block {b}: step {k}/{steps}, train MSE {(total - mark) / 512:.5f}, "
+                        f"validation {v:.5f}")
                     mark = total
             flush()  # epoch 2 reads what epoch 1 wrote
+        with torch.no_grad():  # back to the best point (the paper's code stops early on the validation error)
+            for p, v in zip(ws + ss, best[2]):
+                p.copy_(v.to(p.device))
         for q in qlin.values():
             q.frozen, q.codes = True, fq.encode(q.t, q.W, q.scales())  # the final codes, used from here on
         after = val_loss()
@@ -220,7 +236,8 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
         np.savez(f"{saved(b)}.part.npz", **{k: q.final() for k, q in qlin.items()})
         os.rename(f"{saved(b)}.part.npz", saved(b))
         (cache / "state.json").write_text(json.dumps({"done": b + 1, "clean": True, "n": n}))
-        log(f"block-ap block {b}: validation MSE {before:.5f} -> {after:.5f} (train {total / steps:.5f})")
+        log(f"block-ap block {b}: validation MSE {before:.5f} -> {after:.5f} (best at step {best[1]}; "
+            f"train {total / steps:.5f})")
         m.model.layers[b] = orig.cpu()
         del ql, qlin, opt, ws, ss
         torch.cuda.empty_cache()
