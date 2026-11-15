@@ -91,7 +91,10 @@ sh_ "$RELOAD"
 # --- post-checks ---
 if [ "$DRY" != 1 ]; then
   sleep 2
-  [ "$(code "https://$DOMAIN/")" = 200 ] || { echo "proxy-setup: https://$DOMAIN/ is not 200" >&2; false; }
+  # Through the proxy on this host, with the real name and certificate: the server can't reach its own public
+  # address (no hairpin NAT), so a plain request for the domain from here fails even when the site works.
+  local_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/" || true)"
+  [ "$local_code" = 200 ] || { echo "proxy-setup: https://$DOMAIN/ via this host's proxy is $local_code, not 200" >&2; false; }
   [ "$(code "$GITLAB")" = 200 ] || { echo "proxy-setup: GitLab not 200 after changes" >&2; false; }
 fi
 
