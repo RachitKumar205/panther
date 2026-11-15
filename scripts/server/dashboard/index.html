@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panther pipeline</title>
+<link rel="preload" href="recursive.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%23c2410c'/%3E%3Cpath d='M4 12V4h5a2.5 2.5 0 0 1 0 5H4' stroke='white' stroke-width='1.8' fill='none'/%3E%3C/svg%3E">
+<script>try { const t = localStorage.getItem("panther-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
+</head>
+<body>
+<div class="top">
+  <div class="mark"><b>PANTHER</b><span>quantization contests · Raspberry Pi 5</span></div>
+  <div class="live">
+    <span id="running" class="chip run" hidden></span>
+    <span><span id="dot" class="dot"></span> <span id="age" class="mono">connecting…</span></span>
+    <span id="clock" class="mono"></span>
+    <button class="btn" id="theme" title="Light / dark">◐ theme</button>
+  </div>
+</div>
+<div id="banner" class="banner" hidden></div>
+<main class="wrap">
+  <div class="col">
+    <section class="gauges" id="gauges"></section>
+    <section class="card exp reveal" id="exp" hidden></section>
+    <section class="card reveal" style="animation-delay:.12s">
+      <header><h2>Contests</h2><span class="sub">ours − llama.cpp's preset on the held-out test, points, 95% interval · click a row for details</span></header>
+      <div class="body forest" id="forest"></div>
+    </section>
+  </div>
+  <aside class="col">
+    <section class="card reveal" style="animation-delay:.08s">
+      <header><h2>On the Pi 5</h2><span class="sub">peak RAM of our winners vs the budget · tokens/s</span></header>
+      <div class="body pis" id="pis"></div>
+    </section>
+    <section class="card reveal" style="animation-delay:.16s">
+      <header><h2>Log</h2>
+        <div class="filters" id="filters">
+          <button data-f="key" class="on">key</button><button data-f="notes">notes</button><button data-f="all">all</button>
+        </div>
+      </header>
+      <div class="body"><ul class="feed" id="feed"></ul></div>
+    </section>
+  </aside>
+  <footer class="f">self-hosted · read from data/ · read-only (control with ./panther) · refreshes every 10 s</footer>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

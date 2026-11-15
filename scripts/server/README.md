@@ -24,3 +24,19 @@ in order inside one GPU container. `status.py` rewrites `data/status.md` every 3
 
 Every formula and number (RAM model, rounding, score, search, distillation, verdict): the project README,
 [section 6](../../README.md#6-in-depth-every-number-and-formula).
+
+## The dashboard
+
+`dashboard.py` serves a self-hosted, read-only web page of the whole pipeline, from `data/` only (no outside
+service, no fonts or scripts from the internet): every contest (state, steps and ETA, the verdict as a forest plot
+of ours − preset with its 95% interval, the full held-out table, our mix of types, the Pi's RAM and speed), the
+EfficientQAT experiment (Stage 1's strategy, every block's validation error before and after, each block's training
+curve, Stage 2's KL with a trend line, the held-out results against the winner and the preset), GPU memory and
+bookings, disk, and the log. It refreshes every 10 s; jobs are still controlled with `./panther`.
+
+```bash
+uv run python scripts/server/dashboard.py --data /path/to/data --port 43800   # then open http://localhost:43800
+```
+
+`dashboard/` holds the page (HTML, CSS, JS with hand-drawn SVG charts) and its font, Recursive (SIL Open Font
+License, `dashboard/OFL.txt`). The Pi's results reach `data/pi/` through `status.py`.

@@ -8,3 +8,4 @@ results/
 /data/
 /third_party/
 /deploy/server/local.env
+/.claude/

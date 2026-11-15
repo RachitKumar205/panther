@@ -258,6 +258,8 @@ def main() -> None:
                 for f in api.list_repo_files(repo):
                     if f.startswith("pi/"):
                         PI[f[3:-4]] = Path(hf_hub_download(repo, f, force_download=True)).read_text().strip()
+                        (DATA / "pi").mkdir(exist_ok=True)  # for the dashboard, which reads data/ only
+                        (DATA / "pi" / f[3:]).write_text(PI[f[3:-4]] + "\n")
                 api.upload_file(path_or_fileobj=str(DATA / "status.md"), path_in_repo="README.md", repo_id=repo,
                                 commit_message="status")
         except Exception as e:  # noqa: BLE001  (retried next time)
