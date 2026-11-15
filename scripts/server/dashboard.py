@@ -295,7 +295,9 @@ def qat(log: list[str], ln) -> dict | None:
 def pi() -> list[dict]:
     """The Pi's measurements of our winners (data/pi/<contest>.txt, saved by the status job)."""
     out = []
-    for f in sorted(S.DATA.glob("pi/*.txt")):
+    for f in sorted(S.DATA.glob("pi/*@*.txt")):  # <contest>.txt; older files named otherwise are not contests
+        if not re.fullmatch(r"[\w.]+@\d+", f.stem):
+            continue
         x = f.read_text().strip()
         m = {k: re.search(p, x) for k, p in (("decode", r"decode " + NUM), ("prefill", r"prefill " + NUM),
                                               ("ram", r"peak RAM " + NUM), ("predicted", r"predicted " + NUM))}
