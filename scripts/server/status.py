@@ -170,10 +170,13 @@ def qat(ln: list[tuple[int, str, list[str]]], log: list[str]) -> list[str]:
     tests = [x for x in log if "note: block-0 test" in x]
     if tests:
         out += ["Block-0 tests (which settings to use):", ""] + [f"- {x[6:].split('block-0 test: ')[1]}" for x in tests] + [""]
-    blocks = [x for x in lines if re.search(r"block-ap block \d+: validation", x)]
+    run = max((i for i, x in enumerate(lines) if "block-ap strategy:" in x), default=None)  # the current Stage 1 run
+    blocks = [x for x in lines[run:] if re.search(r"block-ap block \d+: validation", x)] if run is not None else []
     if blocks:
-        out += ["Stage 1, latest blocks (validation error of the block's output, before -> after training; lower is "
-                "better):", ""] + [f"- {x[6:]}" for x in blocks[-6:]] + [""]
+        out += [f"Stage 1, this run: {len(blocks)} of 48 blocks done; latest (validation error of the block's output, "
+                "before -> after training; lower is better):", ""] + [f"- {x[6:]}" for x in blocks[-6:]] + [""]
+    elif run is None:
+        out += ["Stage 1: not running (see Now and the block-0 tests).", ""]
     ctl = [x for x in lines if "stage 2 only" in x]
     if ctl:
         out += [f"Control (Stage 2 only): {ctl[-1][6:]}", ""]
