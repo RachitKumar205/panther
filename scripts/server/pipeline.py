@@ -663,27 +663,53 @@ def final(model: str) -> int:
 
 # --- the Pi -----------------------------------------------------------------------------------------------------
 
-def bundle(model: str) -> None:
+def _pack(model: str, src: Path, tag: str, extra: dict | None = None) -> Path:
+    """A Pi bundle: the file and a manifest with its hash, budget and predicted RAM (the winner's: same types)."""
     w = json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())
-    d = DATA / "pi_bundle" / f"budget-{BUDGET}-{short(model).lower()}{SUFFIX}"
+    d = DATA / "pi_bundle" / f"budget-{BUDGET}-{short(model).lower()}{tag}"
     d.mkdir(parents=True, exist_ok=True)
-    f = d / f"{model.lower()}-b{BUDGET}{SUFFIX}.gguf"
-    shutil.copy(w["file"], f)
+    f = d / f"{model.lower()}-b{BUDGET}{tag}.gguf"
+    shutil.copy(src, f)
     h = sha256()
     with open(f, "rb") as fh:
         while c := fh.read(1 << 24):
             h.update(c)
     (d / "manifest.json").write_text(json.dumps({"file": f.name, "sha256": h.hexdigest(), "budget_gib": BUDGET,
                                                  "predicted_ram_gib": w["ram_gib"], "context": CFG["context_tokens"],
-                                                 "kv_cache_type": CFG["kv_cache_type"]}, indent=1))
+                                                 "kv_cache_type": CFG["kv_cache_type"], **(extra or {})}, indent=1))
+    return d
+
+
+def _push(model: str, tag: str, d: Path) -> str:
+    from huggingface_hub import HfApi
+    repo = os.environ["PANTHER_HF_REPO"].format(size=short(model).lower(), budget=BUDGET) + tag
+    HfApi().create_repo(repo, private=False, exist_ok=True)
+    HfApi().upload_folder(repo_id=repo, folder_path=d)
+    return repo
+
+
+def bundle(model: str) -> None:
+    _pack(model, Path(json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())["file"]), SUFFIX)
 
 
 def upload(model: str) -> None:
-    from huggingface_hub import HfApi
-    repo = os.environ["PANTHER_HF_REPO"].format(size=short(model).lower(), budget=BUDGET) + SUFFIX
-    HfApi().create_repo(repo, private=False, exist_ok=True)
-    HfApi().upload_folder(repo_id=repo, folder_path=DATA / "pi_bundle" / f"budget-{BUDGET}-{short(model).lower()}{SUFFIX}")
+    _push(model, SUFFIX, DATA / "pi_bundle" / f"budget-{BUDGET}-{short(model).lower()}{SUFFIX}")
     note(f"{short(model)} Pi bundle uploaded")
+
+
+def qatupload(model: str) -> None:
+    """The EfficientQAT file (Stage 1 + 2) as its own Pi bundle and repo (<winner's repo>-qat); the contest's winner,
+    its bundle and its repo are left as they are."""
+    f = _qatfiles(model)["stage12"]
+    win = Path(json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())["file"])
+    if abs(f.stat().st_size - win.stat().st_size) > 64 * 2**20:
+        raise SystemExit(f"{f.name} is {f.stat().st_size} bytes, the winner {win.stat().st_size}: not the same types")
+    r = json.loads(out(f"budget-{BUDGET}", f"qat-{model}.json").read_text())["stage 1 + 2"]
+    d = _pack(model, f, f"{SUFFIX}-qat", {"method": "EfficientQAT (Block-AP weights only, then scales end to end)",
+                                          "held_out_accuracy": round(r["held_out"]["accuracy"], 2),
+                                          "vs_winner": {k: r["vs_winner"][k] for k in ("diff", "ci", "verdict")}})
+    repo = _push(model, f"{SUFFIX}-qat", d)
+    note(f"{short(model)} QAT file uploaded: {repo} (held-out {r['held_out']['accuracy']:.2f})")
 
 
 def prep(model: str) -> None:
@@ -866,9 +892,9 @@ def main() -> int:
     global BUDGET
     cmd, b, model = sys.argv[1:4]
     BUDGET = int(b)
-    if cmd in ("fetch", "upload", "save", "qatdata", "qat", "qatcontrol"):
+    if cmd in ("fetch", "upload", "save", "qatdata", "qat", "qatcontrol", "qatupload"):
         {"fetch": fetch, "upload": upload, "save": save, "qatdata": qatdata, "qat": qat,
-         "qatcontrol": qatcontrol}[cmd](model)
+         "qatcontrol": qatcontrol, "qatupload": qatupload}[cmd](model)
         return 0
     if cmd == "prep":
         prep(model)
