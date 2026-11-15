@@ -4,7 +4,7 @@ written into a copy of the file (same types, same size). As the paper (arXiv 240
   - target: the original block's output on the original model's own hidden states; input: the outputs of the blocks
     already quantized, so each block also corrects the error before it; loss: mean squared error
   - trained: the latent weights (starting at the original's) and the scales (starting at the file's); norms and
-    biases frozen; AdamW, weights 2e-5 (2-bit), cosine to 1/20 per batch, batch 2, 2 epochs. Unlike the paper, the
+    biases frozen; AdamW, weights at 1e-3 of their size (the paper's 2e-5 on Qwen2.5-14B; see LR_W), cosine to 1/20 per batch, batch 2, 2 epochs. Unlike the paper, the
     block scales stay frozen here (LR_S): llama.cpp's d covers 256 weights over fixed integer sub-scales, and
     training it drifted (see LR_S); they are trained in Stage 2
 Ours: llama.cpp's own types (panther.fakequant) instead of uniform quantization; bf16 instead of fp16 (Qwen2.5
@@ -31,12 +31,39 @@ import numpy as np
 import torch
 
 from panther import fakequant as fq
-from panther.distill import LINEAR
+from panther.distill import LINEAR, reorder
 
-BATCH, EPOCHS, LR_W, LR_S, MIN_LR, RECODE, PATIENCE = 2, 2, 2e-5, 0, 1 / 20, 16, 2
+BATCH, EPOCHS, LR_W, LR_S, MIN_LR, RECODE, PATIENCE = 2, 2, 1e-3, 0, 1 / 20, 16, 2
+# LR_W is relative: a matrix's learning rate is LR_W x the root mean square of its weights. Adam moves every weight
+# by about the learning rate a step, whatever the loss, so an absolute rate suits one weight size only: the paper's
+# 2e-5 is 1e-3 of Qwen2.5-14B's weights (~0.02, where it worked), but 1e-2 of Mistral-22B's (~0.002), whose block 0
+# went 2.9e-6 -> 6.2e-2 in 192 steps at 2e-5 and 2.9e-6 -> 3.8e-7 at 2e-6 (the same 1e-3 of its weights).
+CHECK = 512  # steps between validation checks (a trial on a few samples sets it lower)
+
+
+def _f(v: float) -> str:
+    """An error for the log: 5 decimals, more when it is small (Mistral's first blocks are ~1e-6)."""
+    return f"{v:.5f}" if v >= 0.01 else f"{v:.8f}"
 # LR_S (relative, per unit of log d) is 0: weights only. On the 14B's block 0 at 4,096 steps, weights + scales (1e-3)
 # went 0.0098 -> 0.0181 (the error halved, then doubled: the scales drift); weights only 0.0098 -> 0.0040. Scales are
 # trained in Stage 2 instead, end to end, with the codes frozen.
+
+
+HEADS = {"self_attn.q_proj": "num_attention_heads", "self_attn.k_proj": "num_key_value_heads"}
+
+
+def row_order(hf: str, w: torch.Tensor, deq: np.ndarray, cfg) -> tuple[torch.Tensor | None, float, float]:
+    """Where the file keeps this matrix's rows. llama.cpp's converter reorders the rows of attention q and k for
+    llama-style models (Mistral, Llama), not for Qwen: the order (as it is, or reordered) under which the file's
+    values are nearer the PyTorch weight is the file's. Returns (the index of each file row in PyTorch's order, or
+    None if the same; the mean squared difference as it is; reordered)."""
+    d = torch.from_numpy(deq).to(w.device, torch.float32)
+    same = (w.float() - d).pow(2).mean().item()
+    if hf not in HEADS:
+        return None, same, float("nan")
+    p = torch.from_numpy(reorder(np.arange(w.shape[0]), getattr(cfg, HEADS[hf]))).to(w.device)
+    moved = (w.float()[p] - d).pow(2).mean().item()
+    return (p, same, moved) if moved < same else (None, same, moved)
 
 
 class QLinear(torch.nn.Module):
@@ -44,10 +71,12 @@ class QLinear(torch.nn.Module):
     trained as relative multipliers, d = d0 * exp(theta): the paper's learning rate is for step sizes ~50x larger
     than llama.cpp's d, and in absolute units it wrecks them. The 4-bit sub-scales stay as in the file."""
 
-    def __init__(self, lin: torch.nn.Linear, t: str, raw: np.ndarray):
+    def __init__(self, lin: torch.nn.Linear, t: str, raw: np.ndarray, rows: torch.Tensor | None = None):
         super().__init__()
         self.t, self.n, self.codes, self.frozen = t, 0, None, False
-        self.W = torch.nn.Parameter(lin.weight.detach().float().clone())
+        w = lin.weight.detach().float()
+        self.W = torch.nn.Parameter((w if rows is None else w[rows]).clone())  # kept in the file's row order
+        self.register_buffer("back", None if rows is None else torch.argsort(rows))  # to PyTorch's order
         self.st = fq.unpack(t, raw, self.W.device)
         self.theta = torch.nn.ParameterDict({k: torch.nn.Parameter(torch.zeros_like(self.st[k]))
                                              for k in ("d", "dmin") if k in self.st})
@@ -62,6 +91,8 @@ class QLinear(torch.nn.Module):
             self.codes = fq.encode(self.t, self.W, st)
         self.n += 1
         w = fq.fake(self.t, self.W, st, self.codes)
+        if self.back is not None:
+            w = w[self.back]
         return torch.nn.functional.linear(x, w.to(x.dtype), None if self.bias is None else self.bias.to(x.dtype))
 
     def final(self) -> np.ndarray:
@@ -70,16 +101,18 @@ class QLinear(torch.nn.Module):
         return fq.pack(self.t, {**st, **fq.encode(self.t, self.W, st)})
 
 
-def _restored(layer, b: int, src: dict, saved: dict):
+def _restored(layer, b: int, src: dict, saved: dict, cfg):
     """A trained block, rebuilt from its saved bytes (other matrices at the file's values), on the GPU."""
     from gguf.quants import dequantize
     q = copy.deepcopy(layer).cuda()
     mods = dict(q.named_modules())
     for hf, g in LINEAR.items():
         name = f"blk.{b}.{g}.weight"
-        raw = saved.get(name, np.asarray(src[name].data))
-        mods[hf].weight.data = torch.from_numpy(dequantize(raw, src[name].tensor_type).reshape(
-            mods[hf].weight.shape)).to(mods[hf].weight)
+        w = mods[hf].weight
+        rows = row_order(hf, w, dequantize(np.asarray(src[name].data), src[name].tensor_type).reshape(w.shape), cfg)[0]
+        new = torch.from_numpy(dequantize(saved.get(name, np.asarray(src[name].data)), src[name].tensor_type)
+                               .reshape(w.shape)).to(w)
+        w.data = new if rows is None else new[torch.argsort(rows)]
     return q
 
 
@@ -97,11 +130,9 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
     from transformers import AutoModelForCausalLM
     m = AutoModelForCausalLM.from_pretrained(str(original.parent), gguf_file=original.name, dtype=torch.bfloat16,
                                              attn_implementation="sdpa").eval()
-    if m.config.model_type not in ("qwen2",):  # llama-style models reorder q/k rows in the file (distill.reorder)
-        raise SystemExit(f"Block-AP: {m.config.model_type} not supported yet")
     src = {t.name: t for t in gguf.GGUFReader(start).tensors}
     log(f"block-ap strategy: {'weights only (block scales frozen)' if LR_S == 0 else 'weights and block scales'}, "
-        f"weights lr {LR_W:g}, scales lr {LR_S:g} (relative), {EPOCHS} epochs x {len(tokens)} samples")
+        f"weights lr {LR_W:g} x each matrix's weight size, scales lr {LR_S:g} (relative), {EPOCHS} epochs x {len(tokens)} samples")
     n, L, H = *tokens.shape, m.config.hidden_size
     cache.mkdir(parents=True, exist_ok=True)
     assert n % BATCH == 0 and len(val) % BATCH == 0
@@ -142,7 +173,7 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
         qemb = torch.from_numpy(dequantize(src["token_embd.weight"].data, src["token_embd.weight"].tensor_type)
                                 .reshape(-1, H)).to("cuda", torch.bfloat16)  # what the quantized model really reads
         origs = [m.model.layers[b].cuda() for b in range(done)]
-        quants = [_restored(m.model.layers[b], b, src, dict(np.load(saved(b)))) for b in range(done)]
+        quants = [_restored(m.model.layers[b], b, src, dict(np.load(saved(b))), m.config) for b in range(done)]
 
         def through(ids):
             x, xq = emb(ids), qemb[ids]
@@ -173,12 +204,17 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
         qlin = {}
         for hf, g in LINEAR.items():
             name, t = f"blk.{b}.{g}.weight", src[f"blk.{b}.{g}.weight"].tensor_type.name
+            deq = dequantize(np.asarray(src[name].data), src[name].tensor_type).reshape(mods[hf].weight.shape)
+            rows, same, moved = row_order(hf, mods[hf].weight, deq, m.config)
+            if b == 0 and hf in HEADS:
+                log(f"block-ap rows of {g}: {'reordered in the file (llama-style)' if rows is not None else 'as in PyTorch'}"
+                    f" (difference from the original {min(same, moved):.2e}; the other order {max(same, moved):.2e})")
             if t not in fq.TYPES:  # no fake quantizer for this type: frozen, at the values the file really holds
-                w = dequantize(src[name].data, src[name].tensor_type).reshape(mods[hf].weight.shape)
-                mods[hf].weight.data = torch.from_numpy(w).to(mods[hf].weight)
+                w = torch.from_numpy(deq).to(mods[hf].weight)
+                mods[hf].weight.data = w if rows is None else w[torch.argsort(rows)]
                 continue
             parent, attr = hf.rsplit(".", 1)
-            qlin[name] = QLinear(mods[hf], t, np.asarray(src[name].data))
+            qlin[name] = QLinear(mods[hf], t, np.asarray(src[name].data), rows)
             setattr(mods[parent], attr, qlin[name])
         for p in ql.parameters():
             p.requires_grad_(False)
@@ -187,7 +223,8 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
         for p in ws + ss:
             p.requires_grad_(True)
         steps = EPOCHS * math.ceil(n / BATCH)
-        opt = torch.optim.AdamW([{"params": ws, "lr": LR_W}, {"params": ss, "lr": LR_S}], weight_decay=0)
+        opt = torch.optim.AdamW([{"params": [q.W], "lr": LR_W * q.W.detach().pow(2).mean().sqrt().item()}
+                                 for q in qlin.values()] + [{"params": ss, "lr": LR_S}], weight_decay=0)
         sched = torch.optim.lr_scheduler.LambdaLR(
             opt, lambda s: MIN_LR + (1 - MIN_LR) * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps)))
 
@@ -200,7 +237,7 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
             return [p.detach().cpu().clone() for p in ws + ss]
         before, total, mark = val_loss(), 0.0, 0.0
         best = (before, 0, snap())  # (validation error, step, weights and scales): never end worse than the start
-        log(f"block-ap block {b}: step 0, validation {before:.5f}")  # the starting point, so a curve starts at 0
+        log(f"block-ap block {b}: step 0, validation {_f(before)}")  # the starting point, so a curve starts at 0
         stop, ran = False, 0  # no better point for PATIENCE checks: stop (the paper's early stopping)
         for ep in range(EPOCHS):
             nxt = (get(fp, 0), get(qn, 0))
@@ -224,15 +261,15 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
                 sched.step()
                 total, ran = total + loss.item(), ran + 1
                 k = ep * (n // BATCH) + i // BATCH + 1
-                if k % 512 == 0:  # every 512 steps: the training error of the stretch, and the best point so far
+                if k % CHECK == 0:  # every 512 steps: the training error of the stretch, and the best point so far
                     v = val_loss()
                     if v < best[0]:
                         best = (v, k, snap())
-                    stop = k - best[1] >= PATIENCE * 512
+                    stop = k - best[1] >= PATIENCE * CHECK
                     if stop:
                         log(f"block-ap block {b}: stopping early at step {k} (best at step {best[1]})")
-                    log(f"block-ap block {b}: step {k}/{steps}, train MSE {(total - mark) / 512:.5f}, "
-                        f"validation {v:.5f}")
+                    log(f"block-ap block {b}: step {k}/{steps}, train MSE {_f((total - mark) / CHECK)}, "
+                        f"validation {_f(v)}")
                     mark = total
             flush()  # epoch 2 reads what epoch 1 wrote
         with torch.no_grad():  # back to the best point (the paper's code stops early on the validation error)
@@ -250,8 +287,8 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
         np.savez(f"{saved(b)}.part.npz", **{k: q.final() for k, q in qlin.items()})
         os.rename(f"{saved(b)}.part.npz", saved(b))
         (cache / "state.json").write_text(json.dumps({"done": b + 1, "clean": True, "n": n}))
-        log(f"block-ap block {b}: validation MSE {before:.5f} -> {after:.5f} (best at step {best[1]}; "
-            f"train {total / max(1, ran):.5f})")
+        log(f"block-ap block {b}: validation MSE {_f(before)} -> {_f(after)} (best at step {best[1]}; "
+            f"train {_f(total / max(1, ran))})")
         m.model.layers[b] = orig.cpu()
         del ql, qlin, opt, ws, ss
         torch.cuda.empty_cache()

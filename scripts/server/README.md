@@ -49,3 +49,10 @@ uv run python scripts/server/dashboard.py --data /path/to/data --port 43800   # 
 
 `dashboard/` holds the page (HTML, CSS, JS with hand-drawn SVG charts) and its font, Recursive (SIL Open Font
 License, `dashboard/OFL.txt`). The Pi's results reach `data/pi/` through `status.py`.
+
+## Before a long EfficientQAT run on a new model
+
+| Script | What |
+|---|---|
+| `qat_trial.py` | Block-AP on the model's first blocks with a few short samples, everything in the container's `/tmp` (nothing kept), early stopping off so each block's whole validation curve shows: `./panther exec /opt/venv/bin/python scripts/server/qat_trial.py 7 Mistral-22B-Instruct [samples] [blocks] [tokens] [weights lr]` |
+| `weight_scale.py` | The size of the model's layer weights by block (what the weights' learning rate is relative to): `./panther exec /opt/venv/bin/python scripts/server/weight_scale.py Mistral-22B-Instruct [blocks...]` |

@@ -220,7 +220,7 @@ def config() -> list[dict]:
             ["Trains", "weights" if frozen else "weights, block scales"],
             ["Frozen", "block scales" if frozen else "–"],
             ["Loss", "block output MSE"],
-            ["Learning rate", f"{b['LR_W']} → ×{b['MIN_LR'].replace(' ', '')}, cosine"],
+            ["Learning rate", f"{b['LR_W']} × weight size → ×{b['MIN_LR'].replace(' ', '')}, cosine"],
             ["Data", f"{n:,} × {t:,} tokens" if n else "–"],
             ["Epochs", b["EPOCHS"]], ["Batch", b["BATCH"]],
             ["Steps per block", f"{steps:,}" if steps else "–"],
