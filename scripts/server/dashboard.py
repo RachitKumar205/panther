@@ -61,15 +61,19 @@ def steps(b: int, sm: str, ls: list[str]) -> tuple[list[dict], str]:
     """A contest's steps (state, minutes spent and left), and its ETA (as status.lane works it out)."""
     size, t = float(re.sub(r"[^0-9.]", "", sm) or 7), ist()
     now = t.tm_hour * 60 + t.tm_min
-    seen = {}
+    seen, began, took = {}, {}, {}
     for x in ls:
-        if m := re.search(r"step (\w+): (start|done)", x):
+        if m := re.search(r"step (\w+): (start|done)(?: in (\d+) min)?", x):
             seen[m.group(1)] = (m.group(2), S.clock(x))
+            if m.group(2) == "start":
+                began[m.group(1)] = x[:5]
+            elif m.group(3):
+                took[m.group(1)] = int(m.group(3))
     failed, out, clk = any("FAILED" in x for x in ls[-3:]), [], now
     for s in S.STEPS:
         st, at = seen.get(s, ("waiting", None))
         typ = S.MINUTES[s] * size
-        row = {"name": s, "what": S.WHAT[s], "about": S.DESCRIBE[s]}
+        row = {"name": s, "what": S.WHAT[s], "about": S.DESCRIBE[s], "began": began.get(s), "took": took.get(s)}
         if st == "done":
             out.append({**row, "state": "done"})
             continue
@@ -220,6 +224,11 @@ class Handler(SimpleHTTPRequestHandler):
 
     def __init__(self, *a, **k):
         super().__init__(*a, directory=str(STATIC), **k)
+
+    def end_headers(self):
+        if self.path.split("?")[0] != "/api/state":
+            self.send_header("Cache-Control", "no-cache")  # the browser revalidates, so a new version shows at once
+        super().end_headers()
 
     def do_GET(self):  # noqa: N802
         if self.path.split("?")[0] != "/api/state":

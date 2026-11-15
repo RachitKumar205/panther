@@ -28,11 +28,20 @@ Every formula and number (RAM model, rounding, score, search, distillation, verd
 ## The dashboard
 
 `dashboard.py` serves a self-hosted, read-only web page of the pipeline, from `data/` only (no outside service, no
-fonts or scripts from the internet). It answers three questions, in order: what is running and when it ends (the
-header); how the experiment is going (three numbers, a strip of every block's improvement, the chosen block's
-training curve, results; details on demand); how the contests did (one row each: verdict, ours − preset with its 95%
-interval, accuracies, the Pi's RAM; click for the full held-out table and our mix of types). The log shows the last
-notes and results. It refreshes every 10 s; jobs are still controlled with `./panther`.
+fonts or scripts from the internet). It is laid out like W&B, MLflow or Airflow: a sidebar of sections, list pages
+that lead to detail pages, tabs on a detail page, and links that can be shared (`#/contests/22b@5/steps`).
+
+| Page | Shows |
+|---|---|
+| Overview | contests won, what is running and when it ends, GPU and disk; every verdict; recent activity |
+| Contests | every contest, filterable (won, tied, running, dropped) and sortable; one row each |
+| Contest | Results (ours − preset, held-out table by task, the Pi's RAM and speed, our mix of types), Steps (a timeline of the pipeline's steps with start times and durations), Events |
+| Experiments | the EfficientQAT runs and the control, with status and results |
+| Experiment | Overview, Stage 1 (a strip of every block, the chosen block's validation curve over all 4,096 steps, a table of blocks), Stage 2 (KL against the control), Settings (strategy, how it was chosen) |
+| System | GPU memory, the booking ledger, disk, the Pi's measurements |
+| Logs | every event, newest first, filtered by text and kind (key events, notes, failures) |
+
+It refreshes every 10 s; jobs are still controlled with `./panther`.
 
 ```bash
 uv run python scripts/server/dashboard.py --data /path/to/data --port 43800   # then open http://localhost:43800
