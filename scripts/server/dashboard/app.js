@@ -114,18 +114,18 @@ pages.overview = (st, el) => {
   const booked = (sys.bookings || []).reduce((a, b) => a + b.bytes, 0);
   const X = scale(cs);
   el.innerHTML = `
-    <div class="ph"><h1>Overview</h1><div class="sub">Per-matrix llama.cpp quantization for a Raspberry Pi 5, against llama.cpp's presets on held-out questions.</div></div>
+    <div class="ph"><h1>Overview</h1></div>
     <div class="grid cols-4">
       ${kpi("Contests won", `${n("WIN")}<small>/ ${fin.length}</small>`, `${n("TIE")} tied · ${n("LOSE")} lost · ${cs.filter((c) => c.state === "dropped").length} dropped`)}
       ${kpi("Running", `${js.length}`, js.map((j) => esc(j.name.split(" on ")[0])).join(" · ") || "nothing")}
-      ${kpi("GPU memory", sys.gpu ? `${(sys.gpu.used / GiB).toFixed(0)}<small>/ ${(sys.gpu.total / GiB).toFixed(0)} GiB</small>` : `${(booked / GiB).toFixed(0)}<small>/ 92 GiB booked</small>`, sys.gpu ? `${sys.gpu.util.toFixed(0)}% busy · ${(booked / GiB).toFixed(0)} GiB booked` : "nvidia-smi not readable here", sys.gpu ? prog(sys.gpu.used / sys.gpu.total) : prog(booked / (92 * GiB)))}
+      ${kpi("GPU memory", sys.gpu ? `${(sys.gpu.used / GiB).toFixed(0)}<small>/ ${(sys.gpu.total / GiB).toFixed(0)} GiB</small>` : `${(booked / GiB).toFixed(0)}<small>/ 92 GiB booked</small>`, sys.gpu ? `${sys.gpu.util.toFixed(0)}% busy · ${(booked / GiB).toFixed(0)} GiB booked` : "", sys.gpu ? prog(sys.gpu.used / sys.gpu.total) : prog(booked / (92 * GiB)))}
       ${kpi("Disk free", sys.disk ? `${(sys.disk.free / 1e9).toFixed(0)}<small>GB</small>` : "–", sys.disk ? `of ${(sys.disk.total / 1e12).toFixed(1)} TB` : "", sys.disk ? prog(1 - sys.disk.free / sys.disk.total) : "")}
     </div>
     <div class="card section"><h2>Running now <a class="more" href="#/experiments">all runs →</a></h2>
       ${js.map((j) => `<a class="job" href="${j.href}"><div><b>${esc(j.name)}</b><div class="muted">${esc(j.step)}</div></div>${prog(j.frac) || "<div></div>"}<div class="eta mono">${j.eta ? `~${esc(j.eta)}<small>${esc(j.etaWhat)}</small>` : "–"}</div></a>`).join("") || '<div class="empty">Nothing is running.</div>'}
     </div>
     <div class="grid cols-21 section">
-      <div class="card"><h2>Results <span class="muted">ours − preset, held-out accuracy points</span><a class="more" href="#/contests">all contests →</a></h2>
+      <div class="card"><h2>Results<a class="more" href="#/contests">all contests →</a></h2>
         <div class="tw"><table><tbody>${fin.map((c) => `<tr class="click" data-href="#/contests/${esc(c.id)}"><td><b>${esc(c.size)}</b> @ ${c.budget} GiB</td><td>${verdict(c.verdict.verdict)}</td><td class="n">${sgn(c.verdict.diff)}</td><td class="hide-s" style="width:42%">${forest(c.verdict, X)}</td></tr>`).join("")}</tbody></table></div>
       </div>
       <div class="card"><h2>Recent activity <a class="more" href="#/logs">logs →</a></h2>${feed((st.events || []).filter((x) => kind(x) !== "quiet").slice(0, 9))}</div>
@@ -144,7 +144,7 @@ pages.contests = (st, el) => {
   const th = (k, n, cls = "") => `<th class="sort ${cls}${ui.sort === k ? " on" + (ui.asc ? " asc" : "") : ""}" data-k="${k}">${n}</th>`;
   const pis = Object.fromEntries((st.pi || []).map((p) => [p.contest, p]));
   el.innerHTML = `
-    <div class="ph"><h1>Contests</h1><div class="sub">One model at one RAM budget: our searched mix of types against the best llama.cpp preset that fits.</div></div>
+    <div class="ph"><h1>Contests</h1></div>
     <div class="toolbar"><div class="chips">${groups.map(([k, n, f]) => `<button data-f="${k}" class="${k === g[0] ? "on" : ""}">${n}<em>${all.filter(f).length}</em></button>`).join("")}</div></div>
     <div class="card tw"><table>
       <thead><tr>${th("contest", "Contest")}<th>Status</th><th>Verdict</th>${th("diff", "Ours − preset", "n")}<th class="hide-s">95% interval</th>${th("ours", "Held-out", "n")}<th class="n hide-s">Preset</th>${th("ram", "Pi RAM", "n hide-s")}</tr></thead>
@@ -201,8 +201,8 @@ pages.contest = (st, el, [id, tab]) => {
   let body = "";
   if (tab === "steps") {
     body = `<div class="card pad"><h2>Steps <span class="muted">${c.state === "running" ? `ends ~${esc(c.eta)}` : ""}</span></h2>${timeline(c, st.now || "")}</div>
-      <div class="card tw section"><table><thead><tr><th>Step</th><th>Status</th><th class="hide-s">What it does</th><th class="n">Began</th><th class="n">Took</th></tr></thead><tbody>
-      ${c.steps.map((s) => `<tr><td>${esc(LABEL[s.name] || s.name)}</td><td>${badge(s.state)}</td><td class="hide-s muted small" title="${esc(s.about)}">${esc(s.what)}</td><td class="n">${s.began ?? "–"}</td><td class="n">${s.state === "done" ? dur(s.took) : s.state === "running" ? `${dur(s.spent)} so far` : `~${dur(s.left)}`}</td></tr>`).join("")}
+      <div class="card tw section"><table><thead><tr><th>Step</th><th>Status</th><th class="n">Began</th><th class="n">Took</th></tr></thead><tbody>
+      ${c.steps.map((s) => `<tr><td>${esc(LABEL[s.name] || s.name)}</td><td>${badge(s.state)}</td><td class="n">${s.began ?? "–"}</td><td class="n">${s.state === "done" ? dur(s.took) : s.state === "running" ? `${dur(s.spent)} so far` : `~${dur(s.left)}`}</td></tr>`).join("")}
       </tbody></table></div>`;
   } else if (tab === "events") {
     body = `<div class="card">${feed(evs.slice(0, 60))}</div>`;
@@ -215,7 +215,7 @@ pages.contest = (st, el, [id, tab]) => {
         ${kpi("Pi peak RAM", p ? `${p.ram.toFixed(2)}<small>/ ${c.budget} GiB</small>` : "–", p ? `predicted ${p.predicted.toFixed(2)} GiB` : "not measured", p ? prog(p.ram / c.budget) : "")}
         ${kpi("Pi speed", p ? `${p.decode.toFixed(2)}<small>tokens/s</small>` : "–", p ? `writing · ${p.prefill.toFixed(1)} reading` : "")}
       </div>
-      <div class="card tw section"><h2>Held-out results <span class="muted">accuracy % by task; KL and flips against the original</span></h2><table>
+      <div class="card tw section"><h2>Held-out</h2><table>
         <thead><tr><th></th><th class="n">Accuracy</th>${TASKS.map(([, n]) => `<th class="n hide-s">${n}</th>`).join("")}<th class="n">KL</th><th class="n hide-s">Flips %</th></tr></thead>
         <tbody>${rows.map(([n, r]) => `<tr${n === "Ours" ? ' class="ours"' : ""}><td>${esc(n)}</td><td class="n">${r.accuracy.toFixed(2)}</td>${TASKS.map(([k]) => `<td class="n hide-s">${r.per_task?.[k]?.toFixed(1) ?? "–"}</td>`).join("")}<td class="n">${r.kl != null ? r.kl.toFixed(3) : "–"}</td><td class="n hide-s">${r.flips != null && !n.startsWith("Original") ? r.flips.toFixed(1) : "–"}</td></tr>`).join("")}</tbody></table></div>
       <div class="card pad section"><h2>Our mix of types <span class="muted">${total} matrices</span></h2>
@@ -236,7 +236,7 @@ pages.experiments = (st, el) => {
   const runs = [{ name: RUNS["stage 1 + 2"], r: q.results?.["stage 1 + 2"], state: qs.state, step: qs.step, frac: qs.frac, eta: qs.eta },
     { name: RUNS["stage 2 only"], r: q.results?.["stage 2 only"], state: q.results?.["stage 2 only"] ? "done" : "running", step: q.results?.["stage 2 only"] ? "finished" : "running" }];
   el.innerHTML = `
-    <div class="ph"><h1>Experiments</h1><div class="sub">Runs that try to make a contest's winner better, kept apart from the contests until they win.</div></div>
+    <div class="ph"><h1>Experiments</h1></div>
     <div class="card"><h2>${QAT_NAME} <a class="more" href="#/experiments/qat">open →</a></h2><div class="tw"><table>
       <thead><tr><th>Run</th><th>Status</th><th class="hide-s">Progress</th><th class="n">Held-out</th><th>vs winner</th><th class="hide-s">vs preset</th></tr></thead>
       <tbody>${runs.map((x) => `<tr class="click" data-href="#/experiments/qat"><td><b>${esc(x.name)}</b></td><td>${badge(x.state)}</td>
@@ -269,16 +269,15 @@ function choice(q) {
   const using = (q.strategy || "").startsWith("weights only") ? "weights only" : "weights + scales";
   const full = (w) => ts.filter((t) => t.trains === w && t.steps === Math.max(...ts.map((x) => x.steps || 0))).at(-1);
   const a = full("weights + scales"), b = full("weights only");
-  const head = a && b ? `Over the full ${b.steps.toLocaleString()} steps, training the block scales as well raised block 0's error by <b class="bad">${Math.round(Math.abs(ch(a)) * 100)}%</b>; training the weights alone cut it by <b class="good">${Math.round(Math.abs(ch(b)) * 100)}%</b>. Stage 1 trains ${esc(using)}.` : "";
   const order = [...ts.map((t, i) => ({ ...t, i }))].sort((x, y) => (x.steps || 0) - (y.steps || 0) || x.i - y.i);
-  return `<div class="card"><h2>Why ${esc(using)} <span class="muted">tests on block 0: change in its validation error</span></h2>
-    <div class="body">${head ? `<p class="lead">${head}</p>` : ""}
+  return `<div class="card"><h2>Block 0 tests</h2>
+    <div class="body">
     <div class="cmp"><div class="cr ch"><span></span><div class="ax"><span style="left:${X(-m)}">${sgn(-m * 100, 0)}%</span><span style="left:50%">0</span><span style="left:${X(m)}">${sgn(m * 100, 0)}%</span></div><span></span></div>
     ${order.map((t) => {
       const v = ch(t), use = t.i === ts.indexOf(using === "weights only" ? b : a);
       return `<div class="cr${use ? " use" : ""}"><div class="lb"><b>${esc(t.trains)}</b><span class="muted">${t.steps ? t.steps.toLocaleString() + " steps" : ""}${t.first ? " · first run" : ""}</span>${use ? ' <span class="badge done">in use</span>' : ""}</div>
         <div class="tr"><i class="z"></i><i class="b ${v < 0 ? "good" : "bad"}" style="left:${X(Math.min(0, v))};right:calc(100% - ${X(Math.max(0, v))})"></i></div>
-        <div class="nm"><span class="mono">${t.before.toFixed(4)} → ${t.after.toFixed(4)}</span> <b class="${v < 0 ? "good" : "bad"} mono">${pct(t.after, t.before)}</b>${t.note ? `<div class="muted small">${esc(t.note)}</div>` : ""}</div></div>`;
+        <div class="nm"><span class="mono">${t.before.toFixed(4)} → ${t.after.toFixed(4)}</span> <b class="${v < 0 ? "good" : "bad"} mono">${pct(t.after, t.before)}</b></div></div>`;
     }).join("")}</div></div></div>`;
 }
 function resultsTable(res) {
@@ -296,7 +295,7 @@ pages.qat = (st, el, [tab = ""]) => {
   let body = "";
   if (tab === "stage1") {
     const b = q.blocks.find((x) => x.block === ui.block);
-    body = `<div class="card pad"><h2>Blocks <span class="muted">colour: change in the block's validation error · striped: kept as it was · outlined: training · click one</span></h2>${strip(q)}</div>
+    body = `<div class="card pad"><h2>Blocks</h2>${strip(q)}</div>
       <div class="card pad section"><h2>Block ${ui.block ?? "–"} <span class="muted">${b ? (b.after != null ? `${b.before.toFixed(4)} → ${b.after.toFixed(4)} (${pct(b.after, b.before)})${b.stopped ? `, stopped early at ${b.stopped}` : ""}` : "training") : ""}</span></h2>
         <div class="chart" id="c-block"></div><div class="legend"><span><i style="background:var(--accent)"></i>validation error by step</span><span><i style="background:var(--muted)"></i>before training</span><span><i style="background:var(--win);height:8px;width:8px;border-radius:50%"></i>kept point</span></div></div>
       <div class="card tw section"><table><thead><tr><th>Block</th><th class="n">Before</th><th class="n">After</th><th class="n">Change</th><th class="n hide-s">Kept step</th><th class="hide-s">Stopped early</th><th class="n">Done</th></tr></thead><tbody>
@@ -308,7 +307,7 @@ pages.qat = (st, el, [tab = ""]) => {
         ${kpi("EfficientQAT · Stage 2", m ? `${m.update}<small>/ ${m.of} updates</small>` : `<span class="muted">—</span>`, m ? `KL ${m.kl.toFixed(3)} at ${m.at}` : "starts after Stage 1", m ? prog(m.update / m.of) : "")}
         ${kpi("Control · Stage 2 only", c ? `${c.update}<small>/ ${c.of} updates</small>` : "–", c ? `KL ${c.kl.toFixed(3)} at ${c.at}` : "", c ? prog(c.update / c.of) : "")}
       </div>
-      <div class="card pad section"><h2>KL to the original <span class="muted">teacher's top 64, smoothed</span></h2><div class="chart" id="c-s2"></div>
+      <div class="card pad section"><h2>KL</h2><div class="chart" id="c-s2"></div>
         <div class="legend"><span><i style="background:var(--s1)"></i>after Stage 1</span><span><i style="background:var(--s2)"></i>control</span></div></div>`;
   } else if (tab === "setup") {
     body = `${choice(q)}
@@ -322,7 +321,7 @@ pages.qat = (st, el, [tab = ""]) => {
         ${kpi("Result vs winner", main ? `${verdict(main.vs_winner.verdict)} ${sgn(main.vs_winner.diff)}` : `<span class="muted">pending</span>`, ctl ? `control: ${ctl.vs_winner.verdict} ${sgn(ctl.vs_winner.diff)}` : "")}
       </div>
       <div class="card pad section"><h2>Stage 1 blocks <a class="more" href="#/experiments/qat/stage1">details →</a></h2>${strip(q)}</div>
-      <div class="card tw section"><h2>Results <span class="muted">held-out test; bootstrap 95% intervals</span></h2>${Object.keys(res).length ? resultsTable(res) : '<div class="empty">No results yet.</div>'}</div>
+      <div class="card tw section"><h2>Results</h2>${Object.keys(res).length ? resultsTable(res) : '<div class="empty">No results yet.</div>'}</div>
       ${q.now ? `<div class="card pad section prose"><h2>Latest note <span class="muted">${esc(q.now_at || "")}</span></h2><p>${esc(q.now)}</p></div>` : ""}`;
   }
   el.innerHTML = `
@@ -334,10 +333,10 @@ pages.qat = (st, el, [tab = ""]) => {
   el.querySelectorAll("tr[data-block]").forEach((r) => (r.onclick = () => { ui.block = +r.dataset.block; ui.picked = true; draw(); scrollTo({ top: 0, behavior: "smooth" }); }));
   const b = q.blocks.find((x) => x.block === ui.block);
   chart(el.querySelector("#c-block"), {
-    series: b ? [{ color: css("--accent"), pts: [...(b.before != null ? [[0, b.before]] : []), ...b.checks.filter((c) => c.val != null).map((c) => [c.step, c.val])] }] : [],
+    series: b ? [{ color: css("--accent"), pts: [...(b.before != null && !b.checks.some((c) => c.step === 0) ? [[0, b.before]] : []), ...b.checks.filter((c) => c.val != null).map((c) => [c.step, c.val])] }] : [],
     xdomain: [0, (b && b.of) || (b && b.checks[0]?.of) || 4096], dots: true,
     vlines: b && b.stopped ? [{ x: b.stopped, label: "stopped early", color: css("--muted") }] : [],
-    refs: b && b.before != null ? [{ y: b.before, label: "before", color: css("--muted") }] : [],
+    refs: b && (b.before ?? b.start) != null ? [{ y: b.before ?? b.start, label: "before", color: css("--muted") }] : [],
     marks: b && b.best && b.checks.find((c) => c.step === b.best) ? [{ x: b.best, y: b.checks.find((c) => c.step === b.best).val, color: css("--win") }] : [],
     yfmt: (y) => (+y).toPrecision(3), empty: "first check after 512 steps",
   });
@@ -350,18 +349,18 @@ pages.qat = (st, el, [tab = ""]) => {
 pages.system = (st, el) => {
   const sys = st.system || {}, bk = sys.bookings || [], booked = bk.reduce((a, b) => a + b.bytes, 0), pis = st.pi || [];
   el.innerHTML = `
-    <div class="ph"><h1>System</h1><div class="sub">anton's GPU and disk, the GPU memory ledger every job books from, and the Raspberry Pi's measurements.</div></div>
+    <div class="ph"><h1>System</h1></div>
     <div class="grid cols-4">
-      ${kpi("GPU memory in use", sys.gpu ? `${(sys.gpu.used / GiB).toFixed(1)}<small>/ ${(sys.gpu.total / GiB).toFixed(0)} GiB</small>` : "–", sys.gpu ? "" : "nvidia-smi not readable here", sys.gpu ? prog(sys.gpu.used / sys.gpu.total) : "")}
+      ${kpi("GPU memory in use", sys.gpu ? `${(sys.gpu.used / GiB).toFixed(1)}<small>/ ${(sys.gpu.total / GiB).toFixed(0)} GiB</small>` : "–", sys.gpu ? "" : "", sys.gpu ? prog(sys.gpu.used / sys.gpu.total) : "")}
       ${kpi("GPU busy", sys.gpu ? `${sys.gpu.util.toFixed(0)}<small>%</small>` : "–")}
       ${kpi("Booked", `${(booked / GiB).toFixed(0)}<small>/ 92 GiB</small>`, `${bk.length} booking${bk.length === 1 ? "" : "s"}`, prog(booked / (92 * GiB)))}
       ${kpi("Disk free", sys.disk ? `${(sys.disk.free / 1e9).toFixed(0)}<small>GB</small>` : "–", sys.disk ? `${((sys.disk.total - sys.disk.free) / 1e12).toFixed(2)} of ${(sys.disk.total / 1e12).toFixed(2)} TB used` : "", sys.disk ? prog(1 - sys.disk.free / sys.disk.total) : "")}
     </div>
     ${(sys.paused || []).length ? `<div class="banner" style="margin:18px 0 0">Paused ${esc(sys.paused.join(", "))}</div>` : ""}
     <div class="grid cols-2 section">
-      <div class="card tw"><h2>GPU bookings <span class="muted">each job books memory before it starts</span></h2><table><thead><tr><th>#</th><th class="n">Booked</th><th class="n">Lapses in</th></tr></thead>
+      <div class="card tw"><h2>GPU bookings</h2><table><thead><tr><th>#</th><th class="n">Booked</th><th class="n">Lapses in</th></tr></thead>
         <tbody>${bk.map((b, i) => `<tr><td>${i + 1}</td><td class="n">${(b.bytes / GiB).toFixed(0)} GiB</td><td class="n">${dur(b.lapses_in / 60)}</td></tr>`).join("") || '<tr><td colspan="3" class="empty">No bookings.</td></tr>'}</tbody></table></div>
-      <div class="card tw"><h2>Raspberry Pi 5 <span class="muted">our winners, measured on the device</span></h2><table><thead><tr><th>Contest</th><th class="n">Peak RAM</th><th class="n hide-s">Predicted</th><th class="n">Writing</th><th class="n hide-s">Reading</th></tr></thead>
+      <div class="card tw"><h2>Raspberry Pi 5</h2><table><thead><tr><th>Contest</th><th class="n">Peak RAM</th><th class="n hide-s">Predicted</th><th class="n">Writing</th><th class="n hide-s">Reading</th></tr></thead>
         <tbody>${pis.map((p) => `<tr class="click" data-href="#/contests/${esc(p.contest)}"><td>${esc(p.contest)}</td><td class="n">${p.ram.toFixed(2)}<span class="muted"> / ${p.budget}</span></td><td class="n hide-s">${p.predicted.toFixed(2)}</td><td class="n">${p.decode.toFixed(2)} <span class="muted small">t/s</span></td><td class="n hide-s">${p.prefill.toFixed(1)} <span class="muted small">t/s</span></td></tr>`).join("") || '<tr><td colspan="5" class="empty">No measurements.</td></tr>'}</tbody></table></div>
     </div>`;
 };
@@ -427,7 +426,7 @@ async function logOpen() {
 pages.logs = (st, el, _, fresh) => {
   if (!fresh && el.querySelector("#logbox")) return;  // the stream keeps it current; polls leave it alone
   el.innerHTML = `
-    <div class="ph"><h1>Logs</h1><span class="live" id="llive"></span><div class="sub">Every log on anton, live. Times IST.</div></div>
+    <div class="ph"><h1>Logs</h1><span class="live" id="llive"></span></div>
     <div class="logv">
       <div class="lbar">
         <input class="search" id="q" placeholder="Search lines" value="${esc(ui.logq)}" spellcheck="false">

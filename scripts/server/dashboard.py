@@ -186,23 +186,28 @@ def config() -> list[dict]:
         n, t = sizes.get("block", (0, 0))
         vn, vt = sizes.get("val", (0, 0))
         steps = n * int(b["EPOCHS"]) // int(b["BATCH"]) if n else None
+        frozen = float(eval(b["LR_S"])) == 0
         out.append({"stage": "Stage 1 · Block-AP", "rows": [
-            ["Trains", "weights only (block scales frozen)" if float(eval(b["LR_S"])) == 0 else "weights and block scales"],
-            ["Loss", "MSE to the original block's output, fed the quantized blocks before it"],
-            ["Learning rate", f"{b['LR_W']}, cosine to {b['MIN_LR'].replace(' ', '')} of it" + ("" if float(eval(b["LR_S"])) == 0 else f"; scales {b['LR_S']} relative")],
-            ["Data", f"{n:,} samples × {t:,} tokens, {b['EPOCHS']} epochs, batch {b['BATCH']} = {steps:,} steps a block" if steps else "–"],
-            ["Validation", f"{vn} × {vt:,} tokens, every 512 steps; the best point is kept"],
-            ["Early stop", f"no better point for {b['PATIENCE']} checks ({int(b['PATIENCE']) * 512:,} steps)"],
-            ["Codes re-chosen", f"every {b['RECODE']} steps"]]})
+            ["Trains", "weights" if frozen else "weights, block scales"],
+            ["Frozen", "block scales" if frozen else "–"],
+            ["Loss", "block output MSE"],
+            ["Learning rate", f"{b['LR_W']} → ×{b['MIN_LR'].replace(' ', '')}, cosine"],
+            ["Data", f"{n:,} × {t:,} tokens" if n else "–"],
+            ["Epochs", b["EPOCHS"]], ["Batch", b["BATCH"]],
+            ["Steps per block", f"{steps:,}" if steps else "–"],
+            ["Validation", f"{vn} × {vt:,} tokens, every 512 steps"],
+            ["Early stop", f"patience {b['PATIENCE']}"],
+            ["Re-encode", f"every {b['RECODE']} steps"]]})
     if d:
         n, t = sizes.get("e2e", (0, 0))
         a = int(accum.group(1)) if accum else 1
         out.append({"stage": "Stage 2 · end to end", "rows": [
-            ["Trains", "block scales only (weights and norms frozen)"],
-            ["Loss", f"KL to the original's top {d['TOPK']} next-word probabilities"],
-            ["Learning rate", f"{e2e_lr.group(1) if e2e_lr else '–'} relative, falling linearly to 0"],
-            ["Data", f"{n:,} samples × {t:,} tokens, one epoch, {a} per update = {n // a:,} updates" if n else "–"],
-            ["Control", "the same Stage 2 on the file before Stage 1, to tell what Stage 1 adds"]]})
+            ["Trains", "block scales"], ["Frozen", "weights, norms"],
+            ["Loss", f"KL, top {d['TOPK']}"],
+            ["Learning rate", f"{e2e_lr.group(1) if e2e_lr else '–'} relative → 0, linear"],
+            ["Data", f"{n:,} × {t:,} tokens" if n else "–"],
+            ["Epochs", "1"], ["Accumulation", str(a)],
+            ["Updates", f"{n // a:,}" if n else "–"]]})
     return out
 
 
@@ -219,10 +224,14 @@ def qat(log: list[str], ln) -> dict | None:
     cur = lines[runs[-1]:] if runs else []
     blocks: dict[int, dict] = {}
     for x in cur:
-        if m := re.search(r"block-ap block (\d+): step (\d+)/(\d+), train MSE " + NUM + r"(?:, validation " + NUM + ")?", x):
-            b = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": [], "of": int(m.group(3))})
-            if int(m.group(2)) == 512:  # retrained after a resume: its checks start again
-                b["checks"], b["stopped"] = [], None
+        if m := re.search(r"block-ap block (\d+): step 0, validation " + NUM, x):  # where training starts
+            b = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})
+            b["checks"], b["stopped"], b["start"] = [{"step": 0, "train": None, "val": float(m.group(2)), "at": x[:5]}], None, float(m.group(2))
+        elif m := re.search(r"block-ap block (\d+): step (\d+)/(\d+), train MSE " + NUM + r"(?:, validation " + NUM + ")?", x):
+            b = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})
+            b["of"] = int(m.group(3))
+            if int(m.group(2)) == 512 and not (b["checks"] and b["checks"][-1]["step"] == 0):
+                b["checks"], b["stopped"] = [], None  # retrained after a resume (logs before step 0 was logged)
             b["checks"].append({"step": int(m.group(2)), "train": float(m.group(4)),
                                 "val": float(m.group(5)) if m.group(5) else None, "at": x[:5]})
         elif m := re.search(r"block-ap block (\d+): validation MSE " + NUM + " -> " + NUM + r" \(best at step (\d+)", x):

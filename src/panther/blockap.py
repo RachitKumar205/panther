@@ -200,6 +200,7 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
             return [p.detach().cpu().clone() for p in ws + ss]
         before, total, mark = val_loss(), 0.0, 0.0
         best = (before, 0, snap())  # (validation error, step, weights and scales): never end worse than the start
+        log(f"block-ap block {b}: step 0, validation {before:.5f}")  # the starting point, so a curve starts at 0
         stop, ran = False, 0  # no better point for PATIENCE checks: stop (the paper's early stopping)
         for ep in range(EPOCHS):
             nxt = (get(fp, 0), get(qn, 0))
