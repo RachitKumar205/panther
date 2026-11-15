@@ -41,7 +41,7 @@ that lead to detail pages, tabs on a detail page, and links that can be shared (
 | System | GPU memory, the booking ledger, disk, the Pi's measurements |
 | Logs | a live tail of every log (the last 3,000 lines, then each new line about a second after it is written, pushed by the server as server-sent events): search, level (key, notes, errors), which log, wrap, follow; scroll up and it holds still and counts new lines |
 
-It refreshes every 10 s; jobs are still controlled with `./panther`.
+It refreshes every 10 s; jobs are still controlled with `./panther`. Since it may be public, the server's account and address and the shared service's domain are masked in everything it sends, and at most 16 live log streams run at once. Running it on the server: `deploy/server/README.md`.
 
 ```bash
 uv run python scripts/server/dashboard.py --data /path/to/data --port 43800   # then open http://localhost:43800

@@ -49,7 +49,7 @@ Below, `svcuser` stands for that account and "the server" for that host.
 | 2 | `semanage fcontext -a -e /var/lib/containers /s3/panther/work/containers` | container storage on `/s3` needs container labels | `semanage fcontext -d -e …` |
 | 3 | `loginctl enable-linger svcuser` (only if off) | jobs survive the SSH session ending | `loginctl disable-linger svcuser` |
 
-No packages, firewall rules, nginx config, Quadlets or system services. The script is idempotent, checks
+No packages, firewall rules, Quadlets or system services; the only proxy change is the optional dashboard below. The script is idempotent, checks
 GitLab returns 200 before and after, and undoes its own run on any failure. `--dry-run` prints the steps.
 
 Applied 2026-11-10; ledger:
@@ -58,6 +58,29 @@ REMOVE_BASE
 semanage fcontext -d -e /var/lib/containers /s3/panther/work/containers
 loginctl disable-linger svcuser
 ```
+
+## The dashboard
+
+`./panther dashboard` (also run by `./panther start`) keeps `panther-dashboard` running: a small CPU container
+(2 CPUs, 1 GB) serving `scripts/server/dashboard.py` with `data/` mounted read-only. Pause and stop leave it
+running. It listens only at `PANTHER_DASHBOARD_BIND` on the server: loopback for an SSH tunnel
+(`ssh -L 43800:localhost:43800 …`), or the gateway of the network the server's reverse proxy sits on, so the proxy
+reaches it and the LAN does not. The page is read-only and public; the server's account and address and the shared
+service's domain (from `local.env`) are masked in everything it sends, and at most 16 live log streams run at once.
+
+A public URL goes through the server's existing reverse proxy (a root nginx container in front of GitLab, configs
+in `/etc/nginx/conf.d`, Let's Encrypt certificates renewed by a certbot timer). `proxy-setup.sh`, run once as root
+after the DNS record exists and the dashboard is running, makes three more host changes, each logged with its undo:
+
+| # | Change | Undo (in ledger) |
+|---|---|---|
+| 4 | `/etc/nginx/conf.d/panther-http.conf` (ACME challenge, redirect to HTTPS), then `nginx -t` and a graceful reload | remove it, `nginx -t`, reload |
+| 5 | a certificate named `panther` (the certbot image the renewal timer uses; renewed with the others) | `certbot delete --cert-name panther` |
+| 6 | `/etc/nginx/conf.d/panther.conf` (HTTPS; GET only; per-address request and connection limits) | remove it, `nginx -t`, reload |
+
+It refuses to start if GitLab isn't 200, the proxy's config doesn't pass `nginx -t`, the name doesn't resolve, the
+proxy can't reach the dashboard, or either file exists; it checks the page and GitLab return 200 afterwards and
+undoes its own run on any failure. `--dry-run` prints the steps. Templates: `nginx/`.
 
 ## The image (Containerfile)
 

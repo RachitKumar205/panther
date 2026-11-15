@@ -16,16 +16,45 @@ import argparse
 import json
 import os
 import re
+import select
 import shutil
+import socket
 import subprocess
+import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import status as S
 
 STATIC = Path(__file__).with_name("dashboard")
 NUM = r"([-+]?[\d.]+)"
+STREAMS = threading.BoundedSemaphore(16)  # live log streams at once: each holds a thread for as long as it is open
+
+
+def site_names() -> list[tuple[re.Pattern, str]]:
+    """What the page never shows, since it may be public: the server's account and address, and the domain of the
+    service it shares the machine with, all from the git-ignored deploy/server/local.env."""
+    f = Path(__file__).resolve().parents[2] / "deploy/server/local.env"
+    env = dict(re.findall(r"^\s*(PANTHER_\w+)=(\S*)", f.read_text(), re.M)) if f.exists() else {}
+    user, _, addr = env.get("PANTHER_HOST", "").rpartition("@")
+    host = urlsplit(env.get("PANTHER_HEALTH_URL", "")).hostname or ""
+    domain = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
+    out = [(rf"(?<![\w.-]){re.escape(v)}(?![\w-])", label) for v, label in
+           ((env.get("PANTHER_USER", ""), "svcuser"), (user, "svcuser"), (addr, "server")) if v]
+    if domain:
+        out.append((rf"(?:[\w-]+\.)*{re.escape(domain)}(?![\w-])", "service"))
+    return [(re.compile(p, re.I), label) for p, label in out]
+
+
+MASK = site_names()
+
+
+def mask(text: str) -> str:
+    for p, label in MASK:
+        text = p.sub(label, text)
+    return text
 
 
 def ist() -> time.struct_time:
@@ -318,8 +347,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")  # the browser revalidates, so a new version shows at once
         super().end_headers()
 
-    def send(self, body: bytes, kind: str = "application/json"):
-        self.send_response(200)
+    def send(self, body: bytes, kind: str = "application/json", code: int = 200):
+        self.send_response(code)
         self.send_header("Content-Type", kind)
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -328,6 +357,14 @@ class Handler(SimpleHTTPRequestHandler):
     def stream(self):
         """Server-sent events: every new line of every log, about a second after it is written (each log is read
         from where it ended when the page connected; a log that shrinks was rotated and is read from its start)."""
+        if not STREAMS.acquire(blocking=False):
+            return self.send(b'{"error": "too many live streams"}', code=503)
+        try:
+            self.tail()
+        finally:
+            STREAMS.release()
+
+    def tail(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -353,7 +390,7 @@ class Handler(SimpleHTTPRequestHandler):
                             chunk = rest.get(f, b"") + h.read(size - p)
                         pos[f] = size
                         *lines, rest[f] = chunk.split(b"\n")
-                        out += [{"src": source(f), "line": x.decode(errors="replace")} for x in lines if x.strip()]
+                        out += [{"src": source(f), "line": mask(x.decode(errors="replace"))} for x in lines if x.strip()]
                 for o in out:
                     self.wfile.write(b"data: " + json.dumps(o).encode() + b"\n\n")
                 if not out and time.time() - beat > 15:
@@ -362,7 +399,8 @@ class Handler(SimpleHTTPRequestHandler):
                 elif out:
                     beat = time.time()
                 self.wfile.flush()
-                time.sleep(1)
+                if select.select([self.connection], [], [], 1)[0] and not self.connection.recv(1, socket.MSG_PEEK):
+                    return  # the page went away: free its slot now, not at the next failed write
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
@@ -372,12 +410,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self.stream()
         if path == "/api/logs":
             m = re.search(r"[?&]n=(\d+)", self.path)
-            return self.send(json.dumps(backlog(min(int(m.group(1)) if m else 3000, 20000))).encode())
+            return self.send(mask(json.dumps(backlog(min(int(m.group(1)) if m else 3000, 20000)))).encode())
         if path != "/api/state":
             return super().do_GET()
         if time.time() - Handler.cache[0] > 5:  # the page polls; the files are read at most every 5 s
             try:
-                Handler.cache = (time.time(), json.dumps(state(), default=float).encode())
+                Handler.cache = (time.time(), mask(json.dumps(state(), default=float)).encode())
             except Exception as e:  # noqa: BLE001  (the page shows the error and keeps polling)
                 Handler.cache = (time.time(), json.dumps({"error": f"{type(e).__name__}: {e}"}).encode())
         self.send(Handler.cache[1])

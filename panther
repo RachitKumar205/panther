@@ -8,6 +8,7 @@
 #   ./panther build | test          build the server image | run the tests (on your machine)
 #   ./panther exec CMD...           one command in a GPU container (log: data/logs/exec-<pid>.log)
 #   ./panther save 14b | upload 24b@7   save type copies / upload a winner for the Pi (both also automatic)
+#   ./panther dashboard             (re)start the read-only web dashboard (also started by start)
 #
 # Live page: https://huggingface.co/<user>/panther-status. Settings: deploy/server/local.env (git-ignored).
 set -uo pipefail
@@ -16,11 +17,11 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 W="${PANTHER_WORK:-/s3/panther/work}"
 
 if [ ! -d "$W" ]; then  # your machine: sync the code, then the same command on the server
-  case "${1:-}" in test) cd "$ROOT" && exec uv run pytest -q ;; ""|help) sed -n 2,11p "$0"; exit 0 ;; esac
+  case "${1:-}" in test) cd "$ROOT" && exec uv run pytest -q ;; ""|help) sed -n 2,12p "$0"; exit 0 ;; esac
   SSH="ssh -o ControlPath=$PANTHER_SSH_CONTROL -o ProxyCommand=false -o BatchMode=yes"
   $SSH "$PANTHER_HOST" true 2>/dev/null || { echo "No connection to the server; open it first (deploy/server/README.md)."; exit 1; }
   rsync -a --delete -e "$SSH" --exclude .git/ --exclude .venv/ --exclude /data/ --exclude __pycache__/ \
-    --exclude .pytest_cache/ "$ROOT/" "$PANTHER_HOST:$W/repo/"
+    --exclude .pytest_cache/ --exclude .claude/ "$ROOT/" "$PANTHER_HOST:$W/repo/"
   exec $SSH "$PANTHER_HOST" "$W/repo/panther $(printf '%q ' "$@")"
 fi
 
@@ -29,7 +30,7 @@ P=(podman --root "$W/containers/storage" --runroot "/run/user/$(id -u)/panther" 
 mkdir -p "$DATA/logs" "$W/tmp/libpod"; export TMPDIR="$W/tmp"
 log() { echo "$(TZ=Asia/Kolkata date +%H:%M) $*" >> "$LOG"; echo "$*"; }
 healthy() { [ "$(curl -sL -o /dev/null -w '%{http_code}' --max-time 20 "$PANTHER_HEALTH_URL")" = 200 ]; }
-ours() { "${P[@]}" ps --format '{{.Names}}' --filter "status=$1" | grep '^panther-' | grep -v '^panther-status$'; }
+ours() { "${P[@]}" ps --format '{{.Names}}' --filter "status=$1" | grep '^panther-' | grep -vE '^panther-(status|dashboard)$'; }
 model() { grep -ioE "name: [^ ]*-${1%@*}-[^ ]*" "$W/repo/configs/models.yaml" | head -1 | cut -d' ' -f2; }
 
 job() {  # job cpu|gpu NAME CMD...: one container, waited for; returns its exit code. Log: data/logs/NAME.log
@@ -45,6 +46,18 @@ job() {  # job cpu|gpu NAME CMD...: one container, waited for; returns its exit 
   "${P[@]}" run -d --name "$name" "${a[@]}" "$IMAGE:current" bash -o pipefail -c \
     '"$@" 2>&1 | tee -a "/work/data/logs/$0.log"' "${name#panther-}" "$@" >/dev/null || return 1
   local rc; rc="$("${P[@]}" wait "$name" | head -1)"; "${P[@]}" rm "$name" >/dev/null 2>&1; return "${rc:-1}"
+}
+
+dashboard() {  # the read-only web dashboard: kept running (pause and stop leave it), data mounted read-only,
+  # published only at PANTHER_DASHBOARD_BIND (default loopback; the reverse proxy's network gateway for a public URL)
+  healthy || { log "GitLab is not healthy; not starting the dashboard"; return 1; }
+  "${P[@]}" rm -f panther-dashboard >/dev/null 2>&1
+  "${P[@]}" run -d --name panther-dashboard --restart on-failure --userns keep-id --cap-drop all \
+    --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,size=64m --pids-limit 256 --cpus 2 --memory 1g \
+    --memory-swap 1g --network pasta -p "${PANTHER_DASHBOARD_BIND:-127.0.0.1}:43800:43800" \
+    -v "$W/repo:/work/repo:ro,z" -v "$DATA:/work/data:ro,z" --log-driver k8s-file --log-opt max-size=5mb \
+    "$IMAGE:current" /opt/venv/bin/python scripts/server/dashboard.py --data /work/data --host 0.0.0.0 --port 43800 \
+    >/dev/null && echo "dashboard: http://${PANTHER_DASHBOARD_BIND:-127.0.0.1}:43800 on the server${PANTHER_DASHBOARD_DOMAIN:+, https://$PANTHER_DASHBOARD_DOMAIN}"
 }
 
 turn() { mkdir -p "$DATA/store/$1"; touch "$DATA/store/$1/.turn"; }  # lets the model's early GPU step begin
@@ -101,6 +114,7 @@ case "${1:-}" in
   start)
     shift
     "${P[@]}" image exists "$IMAGE:current" || "$0" build
+    [ "$("${P[@]}" ps --format '{{.Names}}' --filter name='^panther-dashboard$')" ] || dashboard
     for d in _guard _status; do  # detached, so this command returns at once
       pgrep -f "panther $d" >/dev/null || (setsid nohup "$0" "$d" >/dev/null 2>&1 < /dev/null &)
     done
@@ -142,7 +156,8 @@ case "${1:-}" in
   exec) shift; job gpu "exec-$$" "$@" ;;
   save) job cpu "save-${2%@*}" /opt/venv/bin/python scripts/server/pipeline.py save 0 "$(model "$2@0")" ;;
   upload) job cpu "upload-${2/@/-b}" /opt/venv/bin/python scripts/server/pipeline.py upload "${2#*@}" "$(model "$2")" ;;
+  dashboard) dashboard ;;
   _guard) guard ;;
   _status) job cpu status /opt/venv/bin/python scripts/server/status.py ;;
-  *) sed -n 2,11p "$0" ;;
+  *) sed -n 2,12p "$0" ;;
 esac
