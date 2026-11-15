@@ -89,7 +89,7 @@ def _run(layer, x, rope):
 
 
 def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst: Path, cache: Path, log=print,
-          blocks: int | None = None) -> Path:
+          blocks: int | None = None, rebuild_gpu=None) -> Path:
     """Block-AP on every layer matrix of `start` (a GGUF in fakequant's types) against `original` (the 16-bit
     GGUF), on token samples (n x length); the trained codes and scales go into dst, a copy of start."""
     import gguf
@@ -134,6 +134,9 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
     while saved(done).exists() and (blocks is None or done < blocks):
         done += 1
     state = json.loads((cache / "state.json").read_text()) if (cache / "state.json").exists() else {}
+    import contextlib
+    held = (rebuild_gpu or contextlib.nullcontext)() if done else contextlib.nullcontext()
+    held.__enter__()  # extra GPU memory while every trained block is on the GPU (a resume), released below
     with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
         emb = m.model.embed_tokens.cuda()
         qemb = torch.from_numpy(dequantize(src["token_embd.weight"].data, src["token_embd.weight"].tensor_type)
@@ -161,6 +164,7 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
     m.model.embed_tokens.cpu()
     del emb, qemb, origs, quants, vs
     torch.cuda.empty_cache()
+    held.__exit__(None, None, None)
     for b in range(done, blocks or len(m.model.layers)):
         (cache / "state.json").write_text(json.dumps({"done": b, "clean": False, "n": n}))  # caches change below
         orig = m.model.layers[b].cuda()

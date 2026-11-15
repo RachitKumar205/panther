@@ -802,9 +802,9 @@ def qat(model: str) -> None:
         build(model, w, f["start"])
     if not f["stage1"].exists():
         t = np.load(out(model, "qat", "tokens.npz"))
-        resume = any(cache.glob("block-*.npz"))  # a resume holds every trained block on the GPU (14B: ~60 GB)
-        with gpu((64 if resume else 24) * GIB, 12 * 3600):
-            train(bf16, f["start"], t["block"], t["val"], f["stage1"], cache, lambda m: note(f"{sm} {m}"))
+        with gpu(24 * GIB, 24 * 3600):  # a block in training; a resume books 40 GB more while it rebuilds the caches
+            train(bf16, f["start"], t["block"], t["val"], f["stage1"], cache, lambda m: note(f"{sm} {m}"),
+                  rebuild_gpu=lambda: gpu(40 * GIB, 3 * 3600))
         shutil.rmtree(cache, ignore_errors=True)
         note(f"{sm} QAT stage 1 done")
     _stage2(model, f["stage1"], f["stage12"], "stage 2 after stage 1")
