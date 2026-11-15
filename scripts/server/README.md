@@ -27,12 +27,12 @@ Every formula and number (RAM model, rounding, score, search, distillation, verd
 
 ## The dashboard
 
-`dashboard.py` serves a self-hosted, read-only web page of the whole pipeline, from `data/` only (no outside
-service, no fonts or scripts from the internet): every contest (state, steps and ETA, the verdict as a forest plot
-of ours − preset with its 95% interval, the full held-out table, our mix of types, the Pi's RAM and speed), the
-EfficientQAT experiment (Stage 1's strategy, every block's validation error before and after, each block's training
-curve, Stage 2's KL with a trend line, the held-out results against the winner and the preset), GPU memory and
-bookings, disk, and the log. It refreshes every 10 s; jobs are still controlled with `./panther`.
+`dashboard.py` serves a self-hosted, read-only web page of the pipeline, from `data/` only (no outside service, no
+fonts or scripts from the internet). It answers three questions, in order: what is running and when it ends (the
+header); how the experiment is going (three numbers, a strip of every block's improvement, the chosen block's
+training curve, results; details on demand); how the contests did (one row each: verdict, ours − preset with its 95%
+interval, accuracies, the Pi's RAM; click for the full held-out table and our mix of types). The log shows the last
+notes and results. It refreshes every 10 s; jobs are still controlled with `./panther`.
 
 ```bash
 uv run python scripts/server/dashboard.py --data /path/to/data --port 43800   # then open http://localhost:43800

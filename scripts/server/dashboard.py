@@ -212,7 +212,7 @@ def state() -> dict:
     t = ist()
     return {"now": time.strftime("%d %b %H:%M:%S", t), "contests": contests(log, ln), "qat": qat(log, ln),
             "pi": pi(), "system": system(),
-            "events": events(80)}
+            "events": events(400)}
 
 
 class Handler(SimpleHTTPRequestHandler):

@@ -10,40 +10,26 @@
 <script>try { const t = localStorage.getItem("panther-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
 </head>
 <body>
-<div class="top">
-  <div class="mark"><b>PANTHER</b><span>quantization contests · Raspberry Pi 5</span></div>
-  <div class="live">
-    <span id="running" class="chip run" hidden></span>
-    <span><span id="dot" class="dot"></span> <span id="age" class="mono">connecting…</span></span>
-    <span id="clock" class="mono"></span>
-    <button class="btn" id="theme" title="Light / dark">◐ theme</button>
-  </div>
-</div>
+<header class="top">
+  <b class="mark">PANTHER</b>
+  <span id="headline" class="headline"></span>
+  <span class="meta">
+    <span id="sys" class="mono muted"></span>
+    <span class="mono"><span id="dot" class="dot"></span> <span id="age">connecting…</span></span>
+    <button class="btn" id="theme" title="Light / dark">◐</button>
+  </span>
+</header>
 <div id="banner" class="banner" hidden></div>
 <main class="wrap">
-  <div class="col">
-    <section class="gauges" id="gauges"></section>
-    <section class="card exp reveal" id="exp" hidden></section>
-    <section class="card reveal" style="animation-delay:.12s">
-      <header><h2>Contests</h2><span class="sub">ours − llama.cpp's preset on the held-out test, points, 95% interval · click a row for details</span></header>
-      <div class="body forest" id="forest"></div>
-    </section>
-  </div>
-  <aside class="col">
-    <section class="card reveal" style="animation-delay:.08s">
-      <header><h2>On the Pi 5</h2><span class="sub">peak RAM of our winners vs the budget · tokens/s</span></header>
-      <div class="body pis" id="pis"></div>
-    </section>
-    <section class="card reveal" style="animation-delay:.16s">
-      <header><h2>Log</h2>
-        <div class="filters" id="filters">
-          <button data-f="key" class="on">key</button><button data-f="notes">notes</button><button data-f="all">all</button>
-        </div>
-      </header>
-      <div class="body"><ul class="feed" id="feed"></ul></div>
-    </section>
-  </aside>
-  <footer class="f">self-hosted · read from data/ · read-only (control with ./panther) · refreshes every 10 s</footer>
+  <section id="exp" hidden></section>
+  <section>
+    <h2>Contests <span class="muted">ours − llama.cpp's preset, held-out test, 95% interval</span></h2>
+    <div id="contests"></div>
+  </section>
+  <section>
+    <h2>Log <button class="link" id="more">show all</button></h2>
+    <ul class="feed" id="feed"></ul>
+  </section>
 </main>
 <script src="app.js"></script>
 </body>
