@@ -816,16 +816,33 @@ def _stage2(model: str, src: Path, dst: Path, what: str) -> None:
                 lr=E2E_LR, train_norms=False)
 
 
+def drop_copies(model: str) -> None:
+    """The model's type copies removed, as when its contest ends (the 16-bit original, the importance matrix and the
+    presets stay; the record of what was rounded is archived first). Not while a contest of this model is running."""
+    d = STORE / model
+    r = d / "rounded.json"
+    if r.exists():
+        a = DATA / "archive" / "rounded"
+        a.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(r, a / f"{model}-{time.strftime('%Y%m%dT%H%M', time.localtime(r.stat().st_mtime))}.json")
+        r.unlink()
+    for g in d.glob(f"{model}-*.gguf"):
+        if not g.name.endswith("-BF16.gguf"):
+            g.unlink()
+    note(f"{short(model)} type copies removed (the starting file is built)")
+
+
 def qat(model: str) -> None:
     """EfficientQAT on this contest's winner: its types rebuilt with our rounding (the undistilled file the final
     step started from); Stage 1 (Block-AP); Stage 2 (scales only, end to end, KL to the original instead of the
     paper's cross-entropy) on that; both files tested like the winner. The control (qatcontrol) runs beside it."""
     from panther.blockap import train
     w = json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())["assignment"]
-    store(model, sorted(set(w.values())))
     f, cache, bf16, sm = _qatfiles(model), DATA / "cache" / "blockap" / model, copy_of(model, "BF16"), short(model)
-    if not f["start"].exists():
+    if not f["start"].exists():  # the type copies are needed only to build the starting file
+        store(model, sorted(set(w.values())))
         build(model, w, f["start"])
+        drop_copies(model)  # Stage 1's cache needs the disk (22B: 206 GB beside 82 GB of copies)
     if not f["stage1"].exists():
         t = np.load(out(model, "qat", "tokens.npz"))
         with gpu(24 * GIB, 24 * 3600):  # a block in training; a resume books 40 GB more while it rebuilds the caches
