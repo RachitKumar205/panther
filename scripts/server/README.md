@@ -39,7 +39,7 @@ that lead to detail pages, tabs on a detail page, and links that can be shared (
 | Experiments | the EfficientQAT runs and the control, with status and results |
 | Experiment | Overview, Stage 1 (a strip of every block, the chosen block's validation curve over all 4,096 steps, a table of blocks), Stage 2 (KL against the control), Settings (strategy, how it was chosen) |
 | System | GPU memory, the booking ledger, disk, the Pi's measurements |
-| Logs | every event, newest first, filtered by text and kind (key events, notes, failures) |
+| Logs | a live tail of every log (the last 3,000 lines, then each new line about a second after it is written, pushed by the server as server-sent events): search, level (key, notes, errors), which log, wrap, follow; scroll up and it holds still and counts new lines |
 
 It refreshes every 10 s; jobs are still controlled with `./panther`.
 

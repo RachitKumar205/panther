@@ -6,7 +6,7 @@
 //   #/experiments               experiments (EfficientQAT)
 //   #/experiments/qat[/stage1|/stage2|/settings]
 //   #/system                    GPU, bookings, disk, the Pi
-//   #/logs                      every event, searchable
+//   #/logs                      every log, streamed live (server-sent events), searchable
 // Plain DOM and SVG, no libraries.
 "use strict";
 const $ = (s, r = document) => r.querySelector(s);
@@ -20,7 +20,7 @@ const TASKS = [["mmlu", "MMLU"], ["hellaswag", "HellaSwag"], ["arc_challenge", "
 const LABEL = { store: "Store", error: "Error estimates", refs: "References", preset: "Preset", ga: "Genetic search", final: "Final", bundle: "Pi bundle" };
 const QAT_NAME = "EfficientQAT on 14B @ 5 GiB";
 const RUNS = { "stage 1 + 2": "EfficientQAT (Stage 1 + 2)", "stage 2 only": "Control (Stage 2 only)" };
-const ui = { state: null, last: 0, path: null, block: null, picked: false, filter: "all", sort: null, asc: true, logq: "", logk: "key" };
+const ui = { state: null, last: 0, path: null, block: null, picked: false, filter: "all", sort: null, asc: true, logq: "", logk: "all" };
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const dark = () => document.documentElement.dataset.theme === "dark" || (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
 const typeColor = (t) => { const b = Math.min(1, Math.max(0, ((BPW[t] ?? 4) - 1.5) / 7)); return `hsl(${200 - 175 * b} ${42 + 18 * b}% ${dark() ? 58 : 44}%)`; };
@@ -343,22 +343,95 @@ pages.system = (st, el) => {
     </div>`;
 };
 
+// The log page is a live tail, like `kubectl logs -f` or a CI job's log: the last 3,000 lines of every log, then each
+// new line pushed by the server as it is written (server-sent events). It scrolls with the tail while you are at the
+// bottom; scroll up and it holds still and counts what arrived.
+const LOG = { lines: [], es: null, follow: true, wrap: true, src: "all", unseen: 0, live: false };
+const LEVELS = [["all", "All", () => true], ["key", "Key", (k) => k !== "quiet"], ["note", "Notes", (k) => k === "note"], ["fail", "Errors", (k) => k === "fail"]];
+const srcHue = (s) => (s === "main" ? 35 : [...s].reduce((a, c) => a * 31 + c.charCodeAt(0), 7) % 360);
+function logMatch(o) {
+  const q = ui.logq.trim().toLowerCase(), lv = (LEVELS.find((l) => l[0] === ui.logk) || LEVELS[0])[2];
+  return lv(o.k) && (LOG.src === "all" || o.src === LOG.src) && (!q || o.line.toLowerCase().includes(q));
+}
+function logRow(o) {
+  const q = ui.logq.trim(), t = /^\d\d:\d\d /.test(o.line), msg = t ? o.line.slice(6) : o.line;
+  let m = esc(msg);
+  if (q) m = m.replace(new RegExp(esc(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), (x) => `<mark>${x}</mark>`);
+  return `<div class="ln ${o.k}"><span class="no">${o.n}</span><span class="tm">${t ? o.line.slice(0, 5) : ""}</span><span class="src" style="--h:${srcHue(o.src)}">${esc(o.src)}</span><span class="msg">${m}</span></div>`;
+}
+function logAdd(list) {
+  for (const o of list) { o.k = kind(o.line); o.n = (LOG.lines.at(-1)?.n || 0) + 1; LOG.lines.push(o); }
+  if (LOG.lines.length > 6000) { LOG.lines.splice(0, LOG.lines.length - 5000); return logDraw(); }
+  const box = $("#logbox"); if (!box) return;
+  const hits = list.filter(logMatch);
+  if (!hits.length) return logMeta();
+  box.querySelector(".empty")?.remove();
+  box.insertAdjacentHTML("beforeend", hits.map(logRow).join(""));
+  if (LOG.follow) box.scrollTop = box.scrollHeight; else LOG.unseen += hits.length;
+  logMeta();
+}
+function logDraw() {
+  const box = $("#logbox"); if (!box) return;
+  const hits = LOG.lines.filter(logMatch);
+  box.innerHTML = hits.map(logRow).join("") || `<div class="empty">${LOG.lines.length ? "No line matches." : "Loading…"}</div>`;
+  box.classList.toggle("nowrap", !LOG.wrap);
+  if (LOG.follow) box.scrollTop = box.scrollHeight;
+  const srcs = ["all", ...new Set(LOG.lines.map((o) => o.src))], sel = $("#lsrc");
+  if (sel.options.length !== srcs.length) sel.innerHTML = srcs.map((s) => `<option value="${esc(s)}">${s === "all" ? "All logs" : s === "main" ? "main log" : `${s} progress`}</option>`).join("");
+  sel.value = LOG.src;
+  logMeta(hits.length);
+}
+function logMeta(shown) {
+  if (shown == null) shown = $("#logbox")?.querySelectorAll(".ln").length ?? 0;
+  $("#llive").className = `live ${LOG.live ? "on" : ""}`;
+  $("#llive").textContent = LOG.live ? "streaming" : "reconnecting…";
+  $("#lcount").textContent = `${shown.toLocaleString()} of ${LOG.lines.length.toLocaleString()} lines`;
+  $("#lfollow").classList.toggle("on", LOG.follow);
+  $("#lnew").hidden = LOG.follow || !LOG.unseen;
+  $("#lnew").textContent = `↓ ${LOG.unseen} new line${LOG.unseen === 1 ? "" : "s"}`;
+}
+function logClose() { if (LOG.es) { LOG.es.close(); LOG.es = null; LOG.live = false; } }
+async function logOpen() {
+  logClose();
+  try { LOG.lines = []; logAdd(await (await fetch("api/logs?n=3000", { cache: "no-store" })).json()); logDraw(); } catch (e) {}
+  const es = (LOG.es = new EventSource("api/logs/stream"));
+  let dropped = false;
+  es.onopen = () => { LOG.live = true; logMeta(); if (dropped) { dropped = false; logOpen(); } };
+  es.onerror = () => { LOG.live = false; dropped = true; if ($("#llive")) logMeta(); };
+  es.onmessage = (e) => logAdd([JSON.parse(e.data)]);
+}
+
 pages.logs = (st, el, _, fresh) => {
-  const kinds = [["key", "Key events", (k) => k !== "quiet"], ["all", "Everything", () => true], ["note", "Notes", (k) => k === "note"], ["fail", "Failures", (k) => k === "fail"]];
-  if (fresh || !el.querySelector("#logres")) {
-    el.innerHTML = `<div class="ph"><h1>Logs</h1><div class="sub">The main log and every contest's progress log, newest first (times IST).</div></div>
-      <div class="toolbar"><input class="search" id="q" placeholder="Filter, e.g. 14b, block 12, held-out" value="${esc(ui.logq)}"><div class="chips" id="lk"></div></div>
-      <div class="card tw" id="logres"></div>`;
-    $("#q").oninput = (e) => { ui.logq = e.target.value; pages.logs(ui.state, el); };
-    $("#lk").onclick = (e) => { const b = e.target.closest("button"); if (b) { ui.logk = b.dataset.k; pages.logs(ui.state, el); } };
-  }
-  const evs = (st.events || []).map((x) => ({ x, k: kind(x) })), q = ui.logq.trim().toLowerCase();
-  const terms = q ? [q] : [];
-  const f = (kinds.find((k) => k[0] === ui.logk) || kinds[0])[2];
-  const hits = evs.filter(({ x, k }) => f(k) && terms.every((t) => x.toLowerCase().includes(t)));
-  $("#lk").innerHTML = kinds.map(([k, n, g]) => `<button data-k="${k}" class="${k === ui.logk ? "on" : ""}">${n}<em>${evs.filter((e) => g(e.k)).length}</em></button>`).join("");
-  const hl = (s) => { let o = esc(s); for (const t of terms) o = o.replace(new RegExp(esc(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), (m) => `<mark>${m}</mark>`); return o; };
-  $("#logres").innerHTML = `<table class="logt"><tbody>${hits.slice(0, 300).map(({ x, k }) => `<tr class="${k}"><td class="mono">${esc(x.slice(0, 5))}</td><td>${hl(x.slice(6).replace(/^note: /, ""))}</td></tr>`).join("") || '<tr><td colspan="2" class="empty">Nothing matches.</td></tr>'}</tbody></table>`;
+  if (!fresh && el.querySelector("#logbox")) return;  // the stream keeps it current; polls leave it alone
+  el.innerHTML = `
+    <div class="ph"><h1>Logs</h1><span class="live" id="llive"></span><div class="sub">Every log on anton, live. Times IST.</div></div>
+    <div class="logv">
+      <div class="lbar">
+        <input class="search" id="q" placeholder="Search lines" value="${esc(ui.logq)}" spellcheck="false">
+        <div class="seg" id="lk">${LEVELS.map(([k, n]) => `<button data-k="${k}" class="${k === ui.logk ? "on" : ""}">${n}</button>`).join("")}</div>
+        <select id="lsrc" class="sel"></select>
+        <span class="grow"></span>
+        <span class="muted small mono" id="lcount"></span>
+        <button class="tbtn" id="lwrap" title="Wrap long lines">Wrap</button>
+        <button class="tbtn" id="lfollow" title="Keep the newest line in view">Follow</button>
+      </div>
+      <div class="logbox" id="logbox"></div>
+      <button class="lnew" id="lnew" hidden></button>
+    </div>`;
+  const box = $("#logbox");
+  $("#q").oninput = (e) => { ui.logq = e.target.value; logDraw(); };
+  $("#lk").onclick = (e) => { const b = e.target.closest("button"); if (!b) return; ui.logk = b.dataset.k; $("#lk").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); logDraw(); };
+  $("#lsrc").onchange = (e) => { LOG.src = e.target.value; logDraw(); };
+  $("#lwrap").classList.toggle("on", LOG.wrap);
+  $("#lwrap").onclick = () => { LOG.wrap = !LOG.wrap; $("#lwrap").classList.toggle("on", LOG.wrap); box.classList.toggle("nowrap", !LOG.wrap); };
+  const bottom = () => { LOG.follow = true; LOG.unseen = 0; box.scrollTop = box.scrollHeight; logMeta(); };
+  $("#lfollow").onclick = () => { if (LOG.follow) { LOG.follow = false; logMeta(); } else bottom(); };
+  $("#lnew").onclick = bottom;
+  box.onscroll = () => {
+    const end = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+    if (end !== LOG.follow) { LOG.follow = end; if (end) LOG.unseen = 0; logMeta(); }
+  };
+  if (LOG.lines.length && LOG.es) logDraw(); else { logDraw(); logOpen(); }
 };
 
 // --- router and shell ---------------------------------------------------------------------------------------------------
@@ -375,7 +448,7 @@ function draw(fresh = false) {
   document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("on", a.dataset.nav === r.nav));
   $("#crumbs").innerHTML = [["Panther", "#/"], ...r.crumbs].map(([n, h], i, a) => (i < a.length - 1 ? `<a href="${h}">${esc(n)}</a><span class="sep">/</span>` : `<b>${esc(n)}</b>`)).join("");
   document.title = `${r.crumbs.at(-1)[0]} · Panther`;
-  if (!st) { $("#page").innerHTML = '<div class="empty">Loading…</div>'; return; }
+  if (!st) { if (r.page === "logs") pages.logs(null, $("#page"), [], fresh); else $("#page").innerHTML = '<div class="empty">Loading…</div>'; return; }
   const js = jobs(st), sys = st.system || {}, pz = sys.paused || [];
   $("#running").hidden = !js.length;
   $("#running").textContent = js.length === 1 ? `${js[0].step}${js[0].eta ? ` · ~${js[0].eta}` : ""}` : `${js.length} running`;
@@ -384,6 +457,7 @@ function draw(fresh = false) {
   const ban = $("#banner"), low = sys.disk && sys.disk.free < 20e9;
   ban.hidden = !pz.length && !st.error && !low;
   ban.textContent = st.error ? `The server could not read the data: ${st.error}` : pz.length ? `Paused: ${pz.join(", ")}` : low ? `Disk almost full: ${(sys.disk.free / 1e9).toFixed(0)} GB free` : "";
+  if (r.page !== "logs") logClose();
   if (st.error && !st.contests) return;
   pages[r.page](st, $("#page"), r.args, fresh);
 }

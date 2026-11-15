@@ -3,6 +3,8 @@
   python scripts/server/dashboard.py [--data DIR] [--port 43800]      then open http://localhost:43800
 
 GET /            the page (scripts/server/dashboard/)
+GET /api/logs?n=3000     the last n lines of every log, oldest first: [{"src": "main" | "b5" ..., "line": ...}]
+GET /api/logs/stream     server-sent events: each new log line as it is written (checked every second)
 GET /api/state   everything the page shows, as JSON: contests and their steps, verdicts and held-out tables, the
                  Pi's results, the EfficientQAT experiment (strategy, every block's checks, Stage 2 updates,
                  results), GPU memory and bookings, disk, events and notes.
@@ -49,6 +51,25 @@ def dated(f: Path, n: int) -> list[tuple[int, str]]:
         prev = S.clock(x)
         out.append((day * 1440 + prev, x))
     return out
+
+
+def log_files() -> list[Path]:
+    return [S.DATA / "logs/panther.log", *sorted(S.DATA.glob("logs/progress-b*.log"))]
+
+
+def source(f: Path) -> str:
+    return "main" if f.name == "panther.log" else f.stem.removeprefix("progress-")
+
+
+def backlog(n: int) -> list[dict]:
+    """The last n timed lines of every log, oldest first, each with the log it came from."""
+    rows, seen = [], set()
+    for k, f in enumerate(log_files()):
+        for i, (m, x) in enumerate(reversed(dated(f, n))):
+            if (m, x) not in seen:  # a line written to two logs shows once
+                seen.add((m, x))
+                rows.append((m, k, i, {"src": source(f), "line": x}))
+    return [r[3] for r in sorted(rows, key=lambda r: r[:3])][-n:]
 
 
 def events(n: int) -> list[str]:
@@ -226,23 +247,73 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*a, directory=str(STATIC), **k)
 
     def end_headers(self):
-        if self.path.split("?")[0] != "/api/state":
+        if not self.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-cache")  # the browser revalidates, so a new version shows at once
         super().end_headers()
 
+    def send(self, body: bytes, kind: str = "application/json"):
+        self.send_response(200)
+        self.send_header("Content-Type", kind)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def stream(self):
+        """Server-sent events: every new line of every log, about a second after it is written (each log is read
+        from where it ended when the page connected; a log that shrinks was rotated and is read from its start)."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        pos = {f: f.stat().st_size for f in log_files() if f.exists()}
+        rest: dict[Path, bytes] = {}
+        beat = time.time()
+        try:
+            self.wfile.write(b"retry: 3000\n\n")
+            self.wfile.flush()
+            while True:
+                out = []
+                for f in log_files():
+                    if not f.exists():
+                        continue
+                    size, p = f.stat().st_size, pos.setdefault(f, 0)  # a log that appears later is read whole
+                    if size < p:
+                        p, rest[f] = 0, b""
+                    if size > p:
+                        with f.open("rb") as h:
+                            h.seek(p)
+                            chunk = rest.get(f, b"") + h.read(size - p)
+                        pos[f] = size
+                        *lines, rest[f] = chunk.split(b"\n")
+                        out += [{"src": source(f), "line": x.decode(errors="replace")} for x in lines if x.strip()]
+                for o in out:
+                    self.wfile.write(b"data: " + json.dumps(o).encode() + b"\n\n")
+                if not out and time.time() - beat > 15:
+                    self.wfile.write(b": ping\n\n")  # keeps tunnels and proxies from closing an idle stream
+                    beat = time.time()
+                elif out:
+                    beat = time.time()
+                self.wfile.flush()
+                time.sleep(1)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
     def do_GET(self):  # noqa: N802
-        if self.path.split("?")[0] != "/api/state":
+        path = self.path.split("?")[0]
+        if path == "/api/logs/stream":
+            return self.stream()
+        if path == "/api/logs":
+            m = re.search(r"[?&]n=(\d+)", self.path)
+            return self.send(json.dumps(backlog(min(int(m.group(1)) if m else 3000, 20000))).encode())
+        if path != "/api/state":
             return super().do_GET()
         if time.time() - Handler.cache[0] > 5:  # the page polls; the files are read at most every 5 s
             try:
                 Handler.cache = (time.time(), json.dumps(state(), default=float).encode())
             except Exception as e:  # noqa: BLE001  (the page shows the error and keeps polling)
                 Handler.cache = (time.time(), json.dumps({"error": f"{type(e).__name__}: {e}"}).encode())
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(Handler.cache[1])
+        self.send(Handler.cache[1])
 
     def log_message(self, format, *args):  # noqa: A002  (quiet)
         pass
