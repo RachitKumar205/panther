@@ -137,6 +137,57 @@ def results(b: int, sm: str) -> list[str]:
     return out
 
 
+def winner(b: int, sm: str) -> dict | None:
+    f = next(iter((DATA / "rewrite" / f"budget-{b}").glob(f"winner-*-{sm}-*-v2.json")), None)
+    return json.loads(f.read_text()) if f else None
+
+
+def searched(b: int, sm: str) -> bool:
+    """True if the config still searches a model of this size at this budget."""
+    import yaml
+    c = yaml.safe_load((Path(__file__).resolve().parents[2] / "configs/search.yaml").read_text())
+    return any(f"-{sm}-" in m for m in c["contests"].get(b, {}).get("searched", []))
+
+
+def qat(ln: list[tuple[int, str, list[str]]], log: list[str]) -> list[str]:
+    """The EfficientQAT experiment on a finished contest's winner (./panther qat): what it is, where it is, results."""
+    lines = [x for _, _, ls in ln for x in ls if "block-ap" in x or "QAT" in x]
+    res = {f: json.loads(f.read_text()) for f in sorted(DATA.glob("rewrite/budget-*/qat-*.json")) if "trial" not in f.name}
+    if not lines and not res:
+        return []
+    out = ["## Experiment: EfficientQAT on 14B @ 5 GiB", "",
+           "Does training the codes help beyond our distillation? On the 14B @ 5 GiB winner's mix of types, rebuilt "
+           "without distillation: **Stage 1** (Block-AP: block by block, the weights trained so each quantized block "
+           "reproduces the original's), then **Stage 2** (the block scales trained end to end, KL to the original, "
+           "4,096 x 4,096 tokens). The **control** runs Stage 2 alone, so a gain can be credited to Stage 1 or not. "
+           "Each file then takes the final step's tests against the current winner and the preset.", ""]
+    note = next((x for x in reversed(log) if "note:" in x and ("QAT" in x or "Stage" in x or "block-0" in x)), None)
+    if note:
+        out += [f"**Now:** {note[6:].replace('note: ', '')}", ""]
+    blocks = [x for x in lines if re.search(r"block-ap block \d+: validation", x)]
+    if blocks:
+        out += ["Stage 1, latest blocks (validation error of the block's output, before -> after training; lower is "
+                "better):", ""] + [f"- {x[6:]}" for x in blocks[-6:]] + [""]
+    ctl = [x for x in lines if "stage 2 only" in x]
+    if ctl:
+        out += [f"Control (Stage 2 only): {ctl[-1][6:]}", ""]
+    s12 = [x for x in lines if "stage 2 after stage 1" in x]
+    if s12:
+        out += [f"Stage 2 after Stage 1: {s12[-1][6:]}", ""]
+    for f, r in res.items():
+        out += [f"Results ({f.name}), held-out test:", "", "| file | accuracy | vs current winner [95%] | vs preset [95%] "
+                "| KL | perplexity | flips |", "|---|---|---|---|---|---|---|"]
+        for name, x in r.items():
+            h, w, p = x["held_out"], x["vs_winner"], x["vs_preset"]
+            out.append(f"| {name} | {h['accuracy']:.2f} | {w['diff']:+.2f} [{w['ci'][0]:+.2f}, {w['ci'][1]:+.2f}] "
+                       f"{w['verdict']} | {p['diff']:+.2f} [{p['ci'][0]:+.2f}, {p['ci'][1]:+.2f}] {p['verdict']} | "
+                       f"{h['kl']:.4f} | {h['ppl']:.2f} | {h['flips']:.1f} |")
+        x = next(iter(r.values()))
+        out += ["", f"Current winner {x['vs_winner']['winner_accuracy']:.2f}, preset {x['vs_preset']['preset']} "
+                f"{x['vs_preset']['preset_accuracy']:.2f}, original {x['original_accuracy']:.2f}.", ""]
+    return out + [""]
+
+
 def render() -> str:
     head = [f"# Panther: live progress", "", f"Updated {time.strftime('%d %b %H:%M', time.gmtime(time.time() + 19800))}"
             " IST, every 30 s. Each contest: one model at one RAM budget on the Raspberry Pi 5; our quantization (every"
@@ -147,9 +198,16 @@ def render() -> str:
             "|---|---|---|---|"]
     log = (DATA / "logs/panther.log").read_text().splitlines() if (DATA / "logs/panther.log").exists() else []
     state = {}
-    for x in log:
-        if m := re.match(r"\d\d:\d\d (\S+): (.*)", x):
+    for x in log:  # a contest's last line; notes and the QAT experiment are not contests
+        if (m := re.match(r"\d\d:\d\d (\S+): (.*)", x)) and m.group(1) != "note" and "QAT" not in m.group(2):
             state[m.group(1)] = m.group(2)
+    for k in state:  # a finished contest shows its verdict; one no longer in the config, as dropped
+        sz, b = k.split("-b")
+        w = winner(int(b), sz.upper())
+        if w:
+            state[k] = f"done: **{w['verdict']}** {w['diff']:+.2f} points vs preset {w['preset']}"
+        elif not searched(int(b), sz.upper()):
+            state[k] = "dropped (see the project README)"
     paused = [f"**PAUSED** ({w})" for f, w in (("PAUSED", "by the user"), ("PAUSED.guard", "GitLab unhealthy"))
               if (DATA / f).exists()]
     ln = lanes()
@@ -162,6 +220,8 @@ def render() -> str:
         "", "## Recent events", "", *[f"    {x}" for x in recent(log[-10:] + [x for _, _, ls in ln for x in ls[-6:]])], ""]
     body = []
     for b, sm, ls in ln:
+        if not winner(b, sm) and not searched(b, sm):
+            continue  # a dropped contest
         v = next((x for x in reversed(ls) if "our winner" in x), None)
         if v and (m := re.search(r"our winner ([+-][\d.]+) pts \[([+-][\d.]+), ([+-][\d.]+)\]", v)):
             d, lo, hi = map(float, m.groups())
@@ -175,7 +235,7 @@ def render() -> str:
     pi = ["## On the Pi (our winners: real peak RAM and speed)", ""] + [f"- {k}: {v}" for k, v in sorted(PI.items())
                                                                         if "@" in k] + ["", "(none yet)" if not any(
         "@" in k for k in PI) else "", ""]
-    return "\n".join(head + [""] + pi + body) + "\n"
+    return "\n".join(head + [""] + pi + qat(ln, log) + body) + "\n"
 
 
 def main() -> None:

@@ -183,7 +183,7 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
                 return sum(torch.nn.functional.mse_loss(_run(ql, vq[i:i + BATCH].cuda(), rope).float(),
                                                         _run(orig, vfp[i:i + BATCH].cuda(), rope).float()).item()
                            for i in range(0, len(vq), BATCH)) / math.ceil(len(vq) / BATCH)
-        before, total = val_loss(), 0.0
+        before, total, mark = val_loss(), 0.0, 0.0
         for ep in range(EPOCHS):
             nxt = (get(fp, 0), get(qn, 0))
             for i in range(0, n, BATCH):
@@ -201,6 +201,10 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
                 opt.step()
                 sched.step()
                 total += loss.item()
+                k = ep * (n // BATCH) + i // BATCH + 1
+                if k % 512 == 0:  # the training error so far in this stretch: shows if a block drifts late
+                    log(f"block-ap block {b}: step {k}/{steps}, train MSE {(total - mark) / 512:.5f}")
+                    mark = total
             flush()  # epoch 2 reads what epoch 1 wrote
         for q in qlin.values():
             q.frozen, q.codes = True, fq.encode(q.t, q.W, q.scales())  # the final codes, used from here on
