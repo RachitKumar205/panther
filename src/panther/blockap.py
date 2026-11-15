@@ -10,7 +10,8 @@ written into a copy of the file (same types, same size). As the paper (arXiv 240
 Ours: llama.cpp's own types (panther.fakequant) instead of uniform quantization; bf16 instead of fp16 (Qwen2.5
 overflows fp16); a matrix's codes are re-chosen every RECODE steps (the IQ pattern search is the slow part; the
 weights move by ~1e-5 a step). Every 512 steps the block's validation error is measured and the best point is kept
-(training can drift late: on the 14B, block 0's error halved by step 512, then doubled by step 4,096). The hidden
+(training can drift late, or blow up: on the 14B, block 0's error halved by step 512, then doubled), and a
+block stops training after PATIENCE checks without a better point. The hidden
 states of every sample (two copies, original and quantized) do not fit in memory at the paper's size (14B: 2 x 86
 GB), so they are streamed from disk (bf16), as the paper's code does for large models (fp16 there).
 """
@@ -32,7 +33,7 @@ import torch
 from panther import fakequant as fq
 from panther.distill import LINEAR
 
-BATCH, EPOCHS, LR_W, LR_S, MIN_LR, RECODE = 2, 2, 2e-5, 0, 1 / 20, 16
+BATCH, EPOCHS, LR_W, LR_S, MIN_LR, RECODE, PATIENCE = 2, 2, 2e-5, 0, 1 / 20, 16, 2
 # LR_S (relative, per unit of log d) is 0: weights only. On the 14B's block 0 at 4,096 steps, weights + scales (1e-3)
 # went 0.0098 -> 0.0181 (the error halved, then doubled: the scales drift); weights only 0.0098 -> 0.0040. Scales are
 # trained in Stage 2 instead, end to end, with the codes frozen.
@@ -195,28 +196,36 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
             return [p.detach().cpu().clone() for p in ws + ss]
         before, total, mark = val_loss(), 0.0, 0.0
         best = (before, 0, snap())  # (validation error, step, weights and scales): never end worse than the start
+        stop, ran = False, 0  # no better point for PATIENCE checks: stop (the paper's early stopping)
         for ep in range(EPOCHS):
             nxt = (get(fp, 0), get(qn, 0))
             for i in range(0, n, BATCH):
                 xf, xq = (f.result().cuda() for f in nxt)
                 if i + BATCH < n:
                     nxt = (get(fp, i + BATCH), get(qn, i + BATCH))
+                if stop and ep > 0:
+                    break
                 with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                     tgt = _run(orig, xf, rope) if ep == 0 else xf  # epoch 2 reads the targets epoch 1 stored
                 if ep == 0:
                     put(fp, i, tgt)  # the cache becomes the original's input to the next block
+                if stop:
+                    continue  # stopped early: the original's outputs are still written for the next block
                 with torch.autocast("cuda", torch.bfloat16):
                     loss = torch.nn.functional.mse_loss(_run(ql, xq, rope).float(), tgt.float())
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 opt.step()
                 sched.step()
-                total += loss.item()
+                total, ran = total + loss.item(), ran + 1
                 k = ep * (n // BATCH) + i // BATCH + 1
                 if k % 512 == 0:  # every 512 steps: the training error of the stretch, and the best point so far
                     v = val_loss()
                     if v < best[0]:
                         best = (v, k, snap())
+                    stop = k - best[1] >= PATIENCE * 512
+                    if stop:
+                        log(f"block-ap block {b}: stopping early at step {k} (best at step {best[1]})")
                     log(f"block-ap block {b}: step {k}/{steps}, train MSE {(total - mark) / 512:.5f}, "
                         f"validation {v:.5f}")
                     mark = total
@@ -237,7 +246,7 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
         os.rename(f"{saved(b)}.part.npz", saved(b))
         (cache / "state.json").write_text(json.dumps({"done": b + 1, "clean": True, "n": n}))
         log(f"block-ap block {b}: validation MSE {before:.5f} -> {after:.5f} (best at step {best[1]}; "
-            f"train {total / steps:.5f})")
+            f"train {total / max(1, ran):.5f})")
         m.model.layers[b] = orig.cpu()
         del ql, qlin, opt, ws, ss
         torch.cuda.empty_cache()
