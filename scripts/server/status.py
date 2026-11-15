@@ -164,6 +164,12 @@ def qat(ln: list[tuple[int, str, list[str]]], log: list[str]) -> list[str]:
     note = next((x for x in reversed(log) if "note:" in x and ("QAT" in x or "Stage" in x or "block-0" in x)), None)
     if note:
         out += [f"**Now:** {note[6:].replace('note: ', '')}", ""]
+    strat = [x for x in lines if "block-ap strategy:" in x]
+    if strat:
+        out += [f"**Stage 1 strategy:** {strat[-1][6:].split('strategy: ')[1]}", ""]
+    tests = [x for x in log if "note: block-0 test" in x]
+    if tests:
+        out += ["Block-0 tests (which settings to use):", ""] + [f"- {x[6:].split('block-0 test: ')[1]}" for x in tests] + [""]
     blocks = [x for x in lines if re.search(r"block-ap block \d+: validation", x)]
     if blocks:
         out += ["Stage 1, latest blocks (validation error of the block's output, before -> after training; lower is "

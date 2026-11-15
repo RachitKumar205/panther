@@ -93,6 +93,8 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
     if m.config.model_type not in ("qwen2",):  # llama-style models reorder q/k rows in the file (distill.reorder)
         raise SystemExit(f"Block-AP: {m.config.model_type} not supported yet")
     src = {t.name: t for t in gguf.GGUFReader(start).tensors}
+    log(f"block-ap strategy: {'weights only (block scales frozen)' if LR_S == 0 else 'weights and block scales'}, "
+        f"weights lr {LR_W:g}, scales lr {LR_S:g} (relative), {EPOCHS} epochs x {len(tokens)} samples")
     n, L, H = *tokens.shape, m.config.hidden_size
     cache.mkdir(parents=True, exist_ok=True)
     assert n % BATCH == 0 and len(val) % BATCH == 0
