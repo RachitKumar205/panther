@@ -134,7 +134,8 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
                                              attn_implementation="sdpa").eval()
     src = {t.name: t for t in gguf.GGUFReader(start).tensors}
     log(f"block-ap strategy: {'weights only (block scales frozen)' if LR_S == 0 else 'weights and block scales'}, "
-        f"weights lr {LR_W:g} x each matrix's weight size, scales lr {LR_S:g} (relative), {EPOCHS} epochs x {len(tokens)} samples")
+        f"weights lr {LR_W:g} x each matrix's weight size, scales lr {LR_S:g} (relative), {EPOCHS} epochs x {len(tokens)} samples, "
+        f"{blocks or len(m.model.layers)} blocks")
     n, L, H = *tokens.shape, m.config.hidden_size
     cache.mkdir(parents=True, exist_ok=True)
     assert n % BATCH == 0 and len(val) % BATCH == 0

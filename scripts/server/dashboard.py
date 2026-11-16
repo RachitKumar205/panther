@@ -6,7 +6,7 @@ GET /            the page (scripts/server/dashboard/)
 GET /api/logs?n=3000     the last n lines of every log, oldest first: [{"src": "main" | "b5" ..., "line": ...}]
 GET /api/logs/stream     server-sent events: each new log line as it is written (checked every second)
 GET /api/state   everything the page shows, as JSON: contests and their steps, verdicts and held-out tables, the
-                 Pi's results, the EfficientQAT experiment (strategy, every block's checks, Stage 2 updates,
+                 Pi's results, the EfficientQAT experiments (strategy, every block's checks, Stage 2 updates,
                  results), GPU memory and bookings, disk, events and notes.
 """
 
@@ -240,13 +240,11 @@ def config() -> list[dict]:
     return out
 
 
-def qat(log: list[str], ln) -> dict | None:
-    """The EfficientQAT experiment, from the progress lines and its results file."""
-    lines = [x for _, _, ls in ln for x in ls if "block-ap" in x or "QAT" in x]
-    res = {f.name: json.loads(f.read_text()) for f in sorted(S.DATA.glob("rewrite/budget-*/qat-*.json"))
-           if "trial" not in f.name}
-    if not lines and not res:
-        return None
+LAYERS = {"1.5B": 28, "3B": 36, "7B": 28, "14B": 48, "20B": 48, "22B": 56, "24B": 40}  # blocks, for runs whose log does not say
+
+
+def _qat_run(b: int, sm: str, lines: list[str], res: dict, log: list[str]) -> dict:
+    """One EfficientQAT experiment (a contest's winner), from its lane's progress lines and its results file."""
     runs = [i for i, x in enumerate(lines) if "block-ap strategy:" in x]
     while len(runs) > 1 and runs[-1] + 1 < len(lines) and "resuming" in lines[runs[-1] + 1]:
         runs.pop()  # a resumed Stage 1 continues the run before it
@@ -254,42 +252,61 @@ def qat(log: list[str], ln) -> dict | None:
     blocks: dict[int, dict] = {}
     for x in cur:
         if m := re.search(r"block-ap block (\d+): step 0, validation " + NUM, x):  # where training starts
-            b = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})
-            b["checks"], b["stopped"], b["start"] = [{"step": 0, "train": None, "val": float(m.group(2)), "at": x[:5]}], None, float(m.group(2))
+            k = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})
+            k["checks"], k["stopped"], k["start"] = [{"step": 0, "train": None, "val": float(m.group(2)), "at": x[:5]}], None, float(m.group(2))
         elif m := re.search(r"block-ap block (\d+): step (\d+)/(\d+), train MSE " + NUM + r"(?:, validation " + NUM + ")?", x):
-            b = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})
-            b["of"] = int(m.group(3))
-            if int(m.group(2)) == 512 and not (b["checks"] and b["checks"][-1]["step"] == 0):
-                b["checks"], b["stopped"] = [], None  # retrained after a resume (logs before step 0 was logged)
-            b["checks"].append({"step": int(m.group(2)), "train": float(m.group(4)),
+            k = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})
+            k["of"] = int(m.group(3))
+            if int(m.group(2)) == 512 and not (k["checks"] and k["checks"][-1]["step"] == 0):
+                k["checks"], k["stopped"] = [], None  # retrained after a resume (logs before step 0 was logged)
+            k["checks"].append({"step": int(m.group(2)), "train": float(m.group(4)),
                                 "val": float(m.group(5)) if m.group(5) else None, "at": x[:5]})
         elif m := re.search(r"block-ap block (\d+): validation MSE " + NUM + " -> " + NUM + r" \(best at step (\d+)", x):
-            b = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})
-            b.update(before=float(m.group(2)), after=float(m.group(3)), best=int(m.group(4)), done=x[:5])
+            k = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})
+            k.update(before=float(m.group(2)), after=float(m.group(3)), best=int(m.group(4)), done=x[:5])
         elif m := re.search(r"block-ap block (\d+): stopping early at step (\d+)", x):
             blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})["stopped"] = int(m.group(2))
 
     def updates(tag: str) -> list[dict]:
         return [{"update": int(m.group(1)), "of": int(m.group(2)), "kl": float(m.group(3)), "at": x[:5]}
                 for x in lines if tag in x and (m := re.search(r"update (\d+)/(\d+): KL on the teacher's top \d+ " + NUM, x))]
-    done = sorted(b for b, v in blocks.items() if "after" in v)
-    times = [S.clock(blocks[b]["done"]) for b in done]
+    done = sorted(k for k, v in blocks.items() if "after" in v)
+    times = [S.clock(blocks[k]["done"]) for k in done]
     per = (times[-1] - times[0]) % 1440 / max(1, len(times) - 1) if len(times) > 1 else None
-    total = 48
-    left = total - len(done)
-    eta = None
+    strategy = cur[0].split("strategy: ", 1)[1] if cur else None
+    total = int(m.group(1)) if strategy and (m := re.search(r"(\d+) blocks", strategy)) else LAYERS.get(sm, 48)
+    left, eta = total - len(done), None
     if per and left:
         t = ist()
         e = t.tm_hour * 60 + t.tm_min + per * left
         eta = f"{int(e // 60) % 24:02d}:{int(e % 60):02d}"
-    strategy = lines[[i for i, x in enumerate(lines) if "block-ap strategy:" in x][-1]].split("strategy: ", 1)[1] if cur else None
-    notes = [x for x in log if "note:" in x and ("QAT" in x or "Stage" in x or "block-0" in x) and "block-0 test" not in x]
-    return {"strategy": strategy, "blocks": [blocks[b] for b in sorted(blocks)], "total": total,
-            "minutes_per_block": per, "stage1_eta": eta, "now": notes[-1][6:].replace("note: ", "") if notes else None, "now_at": notes[-1][:5] if notes else None,
-            "tests": tests([x[6:].split("block-0 test: ", 1)[1] for x in log if "note: block-0 test" in x]),
+    notes = [x for x in log if "note:" in x and f" {sm} " in f" {x[6:]} " and ("QAT" in x or "Stage" in x)]
+    rid = f"{sm.lower()}@{b}"
+    return {"id": rid, "name": f"EfficientQAT on {sm} @ {b} GiB", "size": sm, "budget": b,
+            "started": next((x[:5] for x in lines if "QAT started" in x or "block-ap strategy" in x), None),
+            "strategy": strategy, "blocks": [blocks[k] for k in sorted(blocks)], "total": total,
+            "minutes_per_block": per, "stage1_eta": eta,
+            "now": notes[-1][6:].replace("note: ", "") if notes else None, "now_at": notes[-1][:5] if notes else None,
+            "tests": tests([x[6:].split("block-0 test: ", 1)[1] for x in log if "note: block-0 test" in x])
+            if rid == "14b@5" else [],  # the block-0 tests that chose Stage 1's settings were on the 14B @ 5
             "config": config(),
-            "control": updates("stage 2 only"), "stage2": updates("stage 2 after stage 1"),
-            "results": {name: r for _, rs in res.items() for name, r in rs.items()}}
+            "control": updates("stage 2 only"), "stage2": updates("stage 2 after stage 1"), "results": res}
+
+
+def qats(log: list[str], ln) -> list[dict]:
+    """Every EfficientQAT experiment: one per contest whose winner was trained (its lane has Block-AP lines or it
+    has a results file), running ones first."""
+    out = []
+    for b, sm, ls in ln:
+        lines = [x for x in ls if "block-ap" in x or ("QAT" in x and "QAT trial" not in x)]
+        res = {}
+        for f in sorted(S.DATA.glob(f"rewrite/budget-{b}/qat-*.json")):
+            if "trial" not in f.name and f"-{sm}-" in f.name:
+                res.update(json.loads(f.read_text()))
+        if any("block-ap" in x for x in lines) or res or any("QAT started" in x for x in log if x[6:].startswith(f"{sm.lower()}-b{b}:")):
+            out.append(_qat_run(b, sm, lines, res, log))
+    out.sort(key=lambda q: ("stage 1 + 2" in q["results"], -q["budget"], q["size"]))
+    return out
 
 
 def pi() -> list[dict]:
@@ -333,7 +350,7 @@ def system() -> dict:
 def state() -> dict:
     log, ln = logs()
     t = ist()
-    return {"now": time.strftime("%d %b %H:%M:%S", t), "contests": contests(log, ln), "qat": qat(log, ln),
+    return {"now": time.strftime("%d %b %H:%M:%S", t), "contests": contests(log, ln), "qats": qats(log, ln),
             "pi": pi(), "system": system(),
             "events": events(400)}
 

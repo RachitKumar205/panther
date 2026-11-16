@@ -4,7 +4,7 @@
 //   #/contests                  every contest, filterable and sortable
 //   #/contests/<id>[/steps|/events]   one contest: results, step timeline, its events
 //   #/experiments               experiments (EfficientQAT)
-//   #/experiments/qat[/stage1|/stage2|/settings]
+//   #/experiments/<id>[/stage1|/stage2|/setup]   one EfficientQAT run (e.g. 22b@7)
 //   #/system                    GPU, bookings, disk, the Pi
 //   #/logs                      every log, streamed live (server-sent events), searchable
 // Plain DOM and SVG, no libraries.
@@ -18,7 +18,7 @@ const BPW = { IQ1_S: 1.56, IQ1_M: 1.75, IQ2_XXS: 2.06, IQ2_XS: 2.31, IQ2_S: 2.5,
   IQ4_XS: 4.25, Q4_K: 4.5, Q5_K: 5.5, Q6_K: 6.56, Q8_0: 8.5 };
 const TASKS = [["mmlu", "MMLU"], ["hellaswag", "HellaSwag"], ["arc_challenge", "ARC"], ["winogrande", "WinoGrande"], ["gsm8k", "GSM8K"]];
 const LABEL = { store: "Store", error: "Error estimates", refs: "References", preset: "Preset", ga: "Genetic search", final: "Final", bundle: "Pi bundle" };
-const QAT_NAME = "EfficientQAT on 14B @ 5 GiB";
+const qatById = (st, id) => (st.qats || []).find((q) => q.id === id) || (id === "qat" ? (st.qats || []).find((q) => q.id === "14b@5") : null);
 const RUNS = { "stage 1 + 2": "EfficientQAT (Stage 1 + 2)", "stage 2 only": "Control (Stage 2 only)" };
 const ui = { state: null, last: 0, path: null, block: null, picked: false, filter: "all", sort: null, asc: true, logq: "", logk: "all" };
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -86,8 +86,11 @@ function qatState(q) {
   return { state: "running", step: "Stage 2 starting, then held-out tests", tab: "stage2", done };
 }
 function jobs(st) {
-  const out = [], qs = qatState(st.qat);
-  if (qs && qs.state === "running") out.push({ name: QAT_NAME, kind: "experiment", href: `#/experiments/qat/${qs.tab}`, ...qs });
+  const out = [];
+  for (const q of st.qats || []) {
+    const qs = qatState(q);
+    if (qs.state === "running") out.push({ name: q.name, kind: "experiment", href: `#/experiments/${q.id}/${qs.tab}`, ...qs });
+  }
   for (const c of (st.contests || []).filter((c) => c.state === "running")) {
     const r = c.steps.find((s) => s.state === "running");
     out.push({ name: `${c.size} @ ${c.budget} GiB`, kind: "contest", href: `#/contests/${c.id}/steps`, step: r ? LABEL[r.name] || r.name : "running",
@@ -231,18 +234,20 @@ pages.contest = (st, el, [id, tab]) => {
 };
 
 pages.experiments = (st, el) => {
-  const q = st.qat, qs = qatState(q);
-  if (!q) { el.innerHTML = `<div class="ph"><h1>Experiments</h1></div><div class="card empty">No experiments.</div>`; return; }
-  const runs = [{ name: RUNS["stage 1 + 2"], r: q.results?.["stage 1 + 2"], state: qs.state, step: qs.step, frac: qs.frac, eta: qs.eta },
-    { name: RUNS["stage 2 only"], r: q.results?.["stage 2 only"], state: q.results?.["stage 2 only"] ? "done" : "running", step: q.results?.["stage 2 only"] ? "finished" : "running" }];
-  el.innerHTML = `
-    <div class="ph"><h1>Experiments</h1></div>
-    <div class="card"><h2>${QAT_NAME} <a class="more" href="#/experiments/qat">open →</a></h2><div class="tw"><table>
+  const qs = st.qats || [];
+  if (!qs.length) { el.innerHTML = `<div class="ph"><h1>Experiments</h1></div><div class="card empty">No experiments.</div>`; return; }
+  el.innerHTML = `<div class="ph"><h1>Experiments</h1></div>` + qs.map((q) => {
+    const s0 = qatState(q), res = q.results || {};
+    const runs = [{ name: RUNS["stage 1 + 2"], r: res["stage 1 + 2"], state: s0.state, step: s0.step, frac: s0.frac, eta: s0.eta }];
+    if (res["stage 1 only"]) runs.push({ name: "Stage 1 only", r: res["stage 1 only"], state: "done" });
+    if (res["stage 2 only"] || (q.control || []).length) runs.push({ name: RUNS["stage 2 only"], r: res["stage 2 only"], state: res["stage 2 only"] ? "done" : "running", step: "running" });
+    return `<div class="card section"><h2>${esc(q.name)} <a class="more" href="#/experiments/${esc(q.id)}">open →</a></h2><div class="tw"><table>
       <thead><tr><th>Run</th><th>Status</th><th class="hide-s">Progress</th><th class="n">Held-out</th><th>vs winner</th><th class="hide-s">vs preset</th></tr></thead>
-      <tbody>${runs.map((x) => `<tr class="click" data-href="#/experiments/qat"><td><b>${esc(x.name)}</b></td><td>${badge(x.state)}</td>
+      <tbody>${runs.map((x) => `<tr class="click" data-href="#/experiments/${esc(q.id)}"><td><b>${esc(x.name)}</b></td><td>${badge(x.state)}</td>
         <td class="hide-s" style="min-width:180px">${x.state === "running" ? `${prog(x.frac)}<div class="muted small">${esc(x.step)}${x.eta ? ` · ~${esc(x.eta)}` : ""}</div>` : '<span class="muted small">finished</span>'}</td>
         <td class="n">${x.r ? x.r.held_out.accuracy.toFixed(2) : "–"}</td><td>${x.r ? `${verdict(x.r.vs_winner.verdict)} <span class="num">${sgn(x.r.vs_winner.diff)}</span>` : '<span class="muted">pending</span>'}</td>
         <td class="hide-s">${x.r ? `${verdict(x.r.vs_preset.verdict)} <span class="num">${sgn(x.r.vs_preset.diff)}</span>` : ""}</td></tr>`).join("")}</tbody></table></div></div>`;
+  }).join("");
 };
 
 function strip(q) {
@@ -285,9 +290,11 @@ function resultsTable(res) {
     `<tr><td>${esc(RUNS[n] || n)}</td><td class="n">${r.held_out.accuracy.toFixed(2)}</td><td class="num">${verdict(r.vs_winner.verdict)} ${sgn(r.vs_winner.diff)} <span class="muted hide-s">[${sgn(r.vs_winner.ci[0])}, ${sgn(r.vs_winner.ci[1])}]</span></td><td class="num hide-s">${verdict(r.vs_preset.verdict)} ${sgn(r.vs_preset.diff)}</td></tr>`).join("")}</tbody></table>`;
 }
 
-pages.qat = (st, el, [tab = ""]) => {
-  const q = st.qat;
-  if (!q) { el.innerHTML = `<div class="empty">No experiment running.</div>`; return; }
+pages.qat = (st, el, [id, tab = ""]) => {
+  const q = qatById(st, id);
+  if (!q) { el.innerHTML = `<div class="empty">No experiment called ${esc(id)}.</div>`; return; }
+  const base = `#/experiments/${q.id}`;
+  if (ui.qatId !== q.id) { ui.qatId = q.id; ui.picked = false; }
   const qs = qatState(q), done = qs.done, cur = q.blocks.find((b) => b.after == null), s2 = q.stage2 || [], res = q.results || {};
   const main = res["stage 1 + 2"], ctl = res["stage 2 only"];
   const mean = done.length ? done.reduce((a, b) => a + (b.after - b.before) / b.before, 0) / done.length : 0;
@@ -320,16 +327,16 @@ pages.qat = (st, el, [tab = ""]) => {
         ${kpi("Stage 2 · scales", s2.length ? `${s2.at(-1).update}<small>/ ${s2.at(-1).of}</small>` : `<span class="muted">—</span>`, s2.length ? "updates" : "after Stage 1")}
         ${kpi("Result vs winner", main ? `${verdict(main.vs_winner.verdict)} ${sgn(main.vs_winner.diff)}` : `<span class="muted">pending</span>`, ctl ? `control: ${ctl.vs_winner.verdict} ${sgn(ctl.vs_winner.diff)}` : "")}
       </div>
-      <div class="card pad section"><h2>Stage 1 blocks <a class="more" href="#/experiments/qat/stage1">details →</a></h2>${strip(q)}</div>
+      <div class="card pad section"><h2>Stage 1 blocks <a class="more" href="${base}/stage1">details →</a></h2>${strip(q)}</div>
       <div class="card tw section"><h2>Results</h2>${Object.keys(res).length ? resultsTable(res) : '<div class="empty">No results yet.</div>'}</div>
       ${q.now ? `<div class="card pad section prose"><h2>Latest note <span class="muted">${esc(q.now_at || "")}</span></h2><p>${esc(q.now)}</p></div>` : ""}`;
   }
   el.innerHTML = `
-    <div class="ph"><h1>${QAT_NAME}</h1>${badge(qs.state)}<div class="sub">${esc((q.strategy || "").split(",")[0])}${qs.state === "running" ? ` · ${esc(qs.step)}` : ""}</div></div>
-    ${tabs("#/experiments/qat", [["", "Overview"], ["stage1", "Stage 1 · blocks"], ["stage2", "Stage 2 · scales"], ["setup", "Setup"]], tab)}
+    <div class="ph"><h1>${esc(q.name)}</h1>${badge(qs.state)}<div class="sub">${esc((q.strategy || "").split(",")[0])}${qs.state === "running" ? ` · ${esc(qs.step)}` : ""}</div></div>
+    ${tabs(base, [["", "Overview"], ["stage1", "Stage 1 · blocks"], ["stage2", "Stage 2 · scales"], ["setup", "Setup"]], tab)}
     ${body}`;
   const s = el.querySelector("#strip");
-  if (s) s.onclick = (e) => { const c = e.target.closest(".cell"); if (!c) return; ui.block = +c.dataset.b; ui.picked = true; if (tab !== "stage1") location.hash = "#/experiments/qat/stage1"; else draw(); };
+  if (s) s.onclick = (e) => { const c = e.target.closest(".cell"); if (!c) return; ui.block = +c.dataset.b; ui.picked = true; if (tab !== "stage1") location.hash = `${base}/stage1`; else draw(); };
   el.querySelectorAll("tr[data-block]").forEach((r) => (r.onclick = () => { ui.block = +r.dataset.block; ui.picked = true; draw(); scrollTo({ top: 0, behavior: "smooth" }); }));
   const b = q.blocks.find((x) => x.block === ui.block);
   chart(el.querySelector("#c-block"), {
@@ -460,7 +467,7 @@ pages.logs = (st, el, _, fresh) => {
 function resolve() {
   const p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   if (p[0] === "contests" && p[1]) return { page: "contest", nav: "contests", args: p.slice(1), crumbs: [["Contests", "#/contests"], [p[1].toUpperCase().replace("@", " @ ") + " GiB"]] };
-  if (p[0] === "experiments" && p[1]) return { page: "qat", nav: "experiments", args: p.slice(2), crumbs: [["Experiments", "#/experiments"], [QAT_NAME]] };
+  if (p[0] === "experiments" && p[1]) return { page: "qat", nav: "experiments", args: p.slice(1), crumbs: [["Experiments", "#/experiments"], [p[1] === "qat" ? "EfficientQAT · 14B @ 5 GiB" : `EfficientQAT · ${p[1].toUpperCase().replace("@", " @ ")} GiB`]] };
   const known = { contests: "Contests", experiments: "Experiments", system: "System", logs: "Logs" };
   if (known[p[0]]) return { page: p[0], nav: p[0], args: [], crumbs: [[known[p[0]]]] };
   return { page: "overview", nav: "overview", args: [], crumbs: [["Overview"]] };
