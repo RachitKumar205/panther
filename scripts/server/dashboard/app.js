@@ -82,6 +82,7 @@ function qatState(q) {
   const done = q.blocks.filter((b) => b.after != null), s2 = q.stage2 || [], res = q.results || {};
   if (res["stage 1 + 2"]) return { state: "done", step: "finished", done };
   if (done.length < q.total && q.blocks.length) return { state: "running", step: `Stage 1 · block ${done.length} of ${q.total}`, frac: done.length / q.total, eta: q.stage1_eta, etaWhat: "Stage 1 ends", tab: "stage1", done };
+  if (!q.blocks.length && !s2.length) return { state: "running", step: "preparing: type copies, then the starting file", tab: "", done };
   if (s2.length) { const u = s2.at(-1); return { state: "running", step: `Stage 2 · update ${u.update} of ${u.of}`, frac: u.update / u.of, tab: "stage2", done }; }
   return { state: "running", step: "Stage 2 starting, then held-out tests", tab: "stage2", done };
 }
