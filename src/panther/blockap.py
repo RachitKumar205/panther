@@ -13,7 +13,9 @@ weights move by ~1e-5 a step). Every 512 steps the block's validation error is m
 (training can drift late, or blow up: on the 14B, block 0's error halved by step 512, then doubled), and a
 block stops training after PATIENCE checks without a better point. The hidden
 states of every sample (two copies, original and quantized) do not fit in memory at the paper's size (14B: 2 x 86
-GB), so they are streamed from disk (bf16), as the paper's code does for large models (fp16 there).
+GB), so they are streamed from disk (bf16), as the paper's code does for large models (fp16 there). A finished
+block's output is not written in a pass of its own: the next block's first epoch computes it from the cache (which
+still holds the finished block's input) and writes it back, one read of the cache fewer per block.
 """
 
 from __future__ import annotations
@@ -180,7 +182,10 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
             for o, q in zip(origs, quants):
                 x, xq = _run(o, x, rope), _run(q, xq, rope)
             return x, xq
-        if state != {"done": done, "clean": True, "n": n}:
+        # the quantized cache is one block behind after a finished block ("lag"): the next block's first epoch
+        # runs the block before it on what it reads and writes that back, instead of a pass of its own
+        lag = state.get("lag", 0) if (state.get("done"), state.get("clean"), state.get("n")) == (done, True, n) else 0
+        if (state.get("done"), state.get("clean"), state.get("n")) != (done, True, n):
             if done:
                 log(f"block-ap: resuming after block {done - 1}; rebuilding the caches through the trained blocks")
             for i in range(0, n, BATCH):
@@ -193,6 +198,7 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
     for o in origs:
         o.cpu()
     m.model.embed_tokens.cpu()
+    prev = quants[-1] if lag and quants else None  # the last trained block, quantized: the cache is its input
     del emb, qemb, origs, quants, vs
     torch.cuda.empty_cache()
     held.__exit__(None, None, None)
@@ -249,8 +255,12 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
                     break
                 with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                     tgt = _run(orig, xf, rope) if ep == 0 else xf  # epoch 2 reads the targets epoch 1 stored
+                    if ep == 0 and prev is not None:
+                        xq = _run(prev, xq, rope)  # the cache held the input of the block before: now this one's
                 if ep == 0:
                     put(fp, i, tgt)  # the cache becomes the original's input to the next block
+                    if prev is not None:
+                        put(qn, i, xq)  # and epoch 2 reads this block's input
                 if stop:
                     continue  # stopped early: the original's outputs are still written for the next block
                 with torch.autocast("cuda", torch.bfloat16):
@@ -278,19 +288,18 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
         for q in qlin.values():
             q.frozen, q.codes = True, fq.encode(q.t, q.W, q.scales())  # the final codes, used from here on
         after = val_loss()
-        with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):  # the quantized block's output: next input
-            for i in range(0, n, BATCH):
-                put(qn, i, _run(ql, get(qn, i).result().cuda(), rope))
+        with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):  # the validation samples move on a block
             vq = torch.cat([_run(ql, vq[i:i + BATCH].cuda(), rope).cpu() for i in range(0, len(vq), BATCH)])
             vfp = torch.cat([_run(orig, vfp[i:i + BATCH].cuda(), rope).cpu() for i in range(0, len(vfp), BATCH)])
         flush()
         np.savez(f"{saved(b)}.part.npz", **{k: q.final() for k, q in qlin.items()})
         os.rename(f"{saved(b)}.part.npz", saved(b))
-        (cache / "state.json").write_text(json.dumps({"done": b + 1, "clean": True, "n": n}))
+        (cache / "state.json").write_text(json.dumps({"done": b + 1, "clean": True, "n": n, "lag": 1}))
         log(f"block-ap block {b}: validation MSE {_f(before)} -> {_f(after)} (best at step {best[1]}; "
             f"train {_f(total / max(1, ran))})")
         m.model.layers[b] = orig.cpu()
-        del ql, qlin, opt, ws, ss
+        prev = ql  # frozen at its final codes: the next block's first epoch runs it on the quantized cache
+        del qlin, opt, ws, ss
         torch.cuda.empty_cache()
     shutil.copy(start, f"{dst}.part")
     rw = gguf.GGUFReader(f"{dst}.part", "r+")

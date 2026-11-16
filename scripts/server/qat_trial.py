@@ -10,6 +10,7 @@ Needs the model's token samples (pipeline.py qatdata) and its winner at that bud
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -30,9 +31,16 @@ def main() -> int:
     blockap.PATIENCE = 10**6  # no early stop: the whole curve
     if len(sys.argv) > 6:  # a (relative) learning rate for the weights other than the run's
         blockap.LR_W = float(sys.argv[6])
+    if os.environ.get("TRIAL_RECODE"):  # how often a matrix's codes are re-chosen (to time that part)
+        blockap.RECODE = int(os.environ["TRIAL_RECODE"])
     t0 = time.time()
-    blockap.train(P.copy_of(model, "BF16"), Path(win["file"]), t["block"][:n, :length], t["val"][:8, :length], Path("/tmp/trial.gguf"),
-          Path("/tmp/trial-cache"), lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True), blocks=blocks)
+    args = (P.copy_of(model, "BF16"), Path(win["file"]), t["block"][:n, :length], t["val"][:8, :length],
+            Path("/tmp/trial.gguf"), Path("/tmp/trial-cache"), lambda m: print(f"{time.strftime('%H:%M:%S')} {m}", flush=True))
+    if os.environ.get("TRIAL_RESUME"):  # stop a block early and resume: the last block must come out the same
+        blockap.train(*args, blocks=blocks - 1)
+        Path("/tmp/trial.gguf").unlink()
+        print("-- resuming", flush=True)
+    blockap.train(*args, blocks=blocks)
     print(f"trial done in {(time.time() - t0) / 60:.1f} min ({n} samples x {length} tokens, {blocks} block(s))")
     return 0
 

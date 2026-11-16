@@ -832,7 +832,7 @@ def drop_copies(model: str) -> None:
     note(f"{short(model)} type copies removed (the starting file is built)")
 
 
-def qat(model: str) -> None:
+def qat(model: str, lean: bool = False) -> None:
     """EfficientQAT on this contest's winner: its types rebuilt with our rounding (the undistilled file the final
     step started from); Stage 1 (Block-AP); Stage 2 (scales only, end to end, KL to the original instead of the
     paper's cross-entropy) on that; both files tested like the winner. The control (qatcontrol) runs beside it."""
@@ -851,7 +851,10 @@ def qat(model: str) -> None:
         shutil.rmtree(cache, ignore_errors=True)
         note(f"{sm} QAT stage 1 done")
     _stage2(model, f["stage1"], f["stage12"], "stage 2 after stage 1")
-    qateval(model, {"stage 1 + 2": (f["stage12"], f"qat12:{BUDGET}"), "stage 1 only": (f["stage1"], f"qat1:{BUDGET}")})
+    files = {"stage 1 + 2": (f["stage12"], f"qat12:{BUDGET}"), "stage 1 only": (f["stage1"], f"qat1:{BUDGET}")}
+    if lean:  # only the result that matters (what Stage 1 alone and the control show is known from the 14B)
+        del files["stage 1 only"]
+    qateval(model, files)
 
 
 def qatcontrol(model: str) -> None:
@@ -910,7 +913,10 @@ def main() -> int:
     cmd, b, model = sys.argv[1:4]
     BUDGET = int(b)
     if cmd in ("fetch", "upload", "save", "qatdata", "qat", "qatcontrol", "qatupload"):
-        {"fetch": fetch, "upload": upload, "save": save, "qatdata": qatdata, "qat": qat,
+        if cmd == "qat":
+            qat(model, lean="lean" in sys.argv[4:])
+            return 0
+        {"fetch": fetch, "upload": upload, "save": save, "qatdata": qatdata,
          "qatcontrol": qatcontrol, "qatupload": qatupload}[cmd](model)
         return 0
     if cmd == "prep":

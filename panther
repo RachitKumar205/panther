@@ -8,6 +8,7 @@
 #   ./panther build | test          build the server image | run the tests (on your machine)
 #   ./panther exec CMD...           one command in a GPU container (log: data/logs/exec-<pid>.log)
 #   ./panther save 14b | upload 24b@7   save type copies / upload a winner for the Pi (both also automatic)
+#   ./panther qat 14b@5 [lean]      EfficientQAT on a contest's winner (lean: no control, no Stage 1-only test)
 #   ./panther qatupload 14b@5       upload a contest's EfficientQAT file as its own Pi bundle (<repo>-qat)
 #   ./panther dashboard             (re)start the read-only web dashboard (also started by start)
 #
@@ -18,7 +19,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 W="${PANTHER_WORK:-/s3/panther/work}"
 
 if [ ! -d "$W" ]; then  # your machine: sync the code, then the same command on the server
-  case "${1:-}" in test) cd "$ROOT" && exec uv run pytest -q ;; ""|help) sed -n 2,13p "$0"; exit 0 ;; esac
+  case "${1:-}" in test) cd "$ROOT" && exec uv run pytest -q ;; ""|help) sed -n 2,14p "$0"; exit 0 ;; esac
   SSH="ssh -o ControlPath=$PANTHER_SSH_CONTROL -o ProxyCommand=false -o BatchMode=yes"
   $SSH "$PANTHER_HOST" true 2>/dev/null || { echo "No connection to the server; open it first (deploy/server/README.md)."; exit 1; }
   rsync -a --delete -e "$SSH" --exclude .git/ --exclude .venv/ --exclude /data/ --exclude __pycache__/ \
@@ -148,11 +149,15 @@ case "${1:-}" in
   _contest) contest "$2" "$3" "$4" ;;
   qat)  # EfficientQAT's Stage 1 on a finished contest's winner (an experiment): ./panther qat 14b@5
     m="$(model "$2")"; [ -n "$m" ] || { echo "unknown contest '$2' (write it like 14b@5)"; exit 1; }
-    (setsid nohup "$0" _qat "${2%@*}" "${2#*@}" "$m" >/dev/null 2>&1 < /dev/null &); echo "started QAT for $2 ($m)" ;;
+    (setsid nohup "$0" _qat "${2%@*}" "${2#*@}" "$m" "${3:-}" >/dev/null 2>&1 < /dev/null &); echo "started QAT for $2 ($m)${3:+, $3}" ;;
   _qat) R=(/opt/venv/bin/python scripts/server/pipeline.py); log "$2-b$3: QAT started"
     job cpu "$2-b$3-qatdata" "${R[@]}" qatdata "$3" "$4" || { log "$2-b$3: QAT FAILED or stopped (files kept)"; exit; }
-    job gpu "$2-b$3-qatctl" "${R[@]}" qatcontrol "$3" "$4" & c=$!  # the control, beside Stage 1
-    job gpu "$2-b$3-qat" "${R[@]}" qat "$3" "$4"; a=$?; wait "$c"; b=$?
+    if [ "${5:-}" = lean ]; then  # no control and no Stage 1-only test: only Stage 1 + 2's result
+      job gpu "$2-b$3-qat" "${R[@]}" qat "$3" "$4" lean; a=$?; b=0
+    else
+      job gpu "$2-b$3-qatctl" "${R[@]}" qatcontrol "$3" "$4" & c=$!  # the control, beside Stage 1
+      job gpu "$2-b$3-qat" "${R[@]}" qat "$3" "$4"; a=$?; wait "$c"; b=$?
+    fi
     if [ "$a" = 0 ] && [ "$b" = 0 ]; then log "$2-b$3: QAT done"; else log "$2-b$3: QAT FAILED or stopped (files kept, to resume)"; fi ;;
   exec) shift; job gpu "exec-$$" "$@" ;;
   save) job cpu "save-${2%@*}" /opt/venv/bin/python scripts/server/pipeline.py save 0 "$(model "$2@0")" ;;
@@ -161,5 +166,5 @@ case "${1:-}" in
   dashboard) dashboard ;;
   _guard) guard ;;
   _status) job cpu status /opt/venv/bin/python scripts/server/status.py ;;
-  *) sed -n 2,13p "$0" ;;
+  *) sed -n 2,14p "$0" ;;
 esac
