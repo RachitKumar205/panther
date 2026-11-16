@@ -245,6 +245,18 @@ ARM processor llama.cpp otherwise keeps a second, repacked copy of K-type weight
 tokens. **Reading speed** = prompt tokens per second, **writing speed** = generated tokens per second, **peak RAM** =
 the process's maximum resident memory (VmHWM), and the Pi's throttle state before and after.
 
+**Writing speed on the Pi** (measured 16 Nov 2026 on the 14B @ 5 QAT file; `pi/runtime_check.py`, `pi/membw.c`,
+`pi/spec_check.py`). Writing is limited by the CPU decoding weights, not by memory: the Pi reads 12.7–14.1 GB/s,
+enough for ~2.9 tokens/s, but every type family tops out near 20–22 billion weights a second (a 14B: ~1.5 tokens/s),
+and four busy cores reach 80–85 °C within a minute and throttle (1.48 cold, 1.25 over five answers).
+`ik_llama.cpp` (`fcf7b364`) reads prompts 6.6x faster than mainline (9.63 vs 1.47 tokens/s, no repacking) and writes
+25 % faster with run-time repacking (`-rtr`, which in turn halves reading). Speculative decoding with a
+Qwen2.5-0.5B draft (Q4_K_M, default settings) writes 1.79 tokens/s (+43 %, 68 % of guesses kept) but peaks at 5.33
+GiB: the draft adds ~0.6 GiB that batch size and draft context do not change. Within 5 GiB it fits only with a
+2,048-token context and a 4-bit KV cache (1.44 tokens/s, +15 %, answers changed). Forcing longer guesses, auto-tuning,
+n-gram and suffix lookups give nothing or lose. Any change of arithmetic path (`-rtr`, batching, a draft) changes
+some greedy answers by rounding; none was tested on the held-out questions.
+
 ## 7. Running it: one command
 
 ```bash
