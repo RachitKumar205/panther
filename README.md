@@ -256,6 +256,10 @@ GiB: the draft adds ~0.6 GiB that batch size and draft context do not change. Wi
 2,048-token context and a 4-bit KV cache (1.44 tokens/s, +15 %, answers changed). Forcing longer guesses, auto-tuning,
 n-gram and suffix lookups give nothing or lose. Any change of arithmetic path (`-rtr`, batching, a draft) changes
 some greedy answers by rounding; none was tested on the held-out questions.
+The 22B @ 7 QAT file (18 Nov, `therachitkumar/panther-22b-7g-v2-qat`) with `ik_llama.cpp -rtr` writes 0.96 tokens/s
+on the 64-token check and 0.81 over five answers (the contest winner on mainline: 0.67), reads 2.97 tokens/s (mainline
+0.90) and peaks at 6.60 GiB. Without `-rtr` it reads 5.12 tokens/s but writes only 0.54, so `-rtr` matters more here
+than on the 14B (+78 % writing against +25 %).
 
 ## 7. Running it: one command
 
