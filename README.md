@@ -160,8 +160,9 @@ importance_c the mean squared input of column c. Used only to repair genomes and
   6 % flips → 6.
 - **Drift**: average KL divergence per token between the genome's and the original's next-word probabilities, on
   the select text: the original's greedy answers (up to 256 tokens, in its chat template) to the 150 select prompts,
-  then the select web text; the first 48 chunks of 2,048 tokens (all of the chat part, then the start of the web
-  part). 0.15 → 1.5.
+  then whole select web documents in a fixed random order, up to 100,352 tokens (49 × 2,048) in all. The whole file
+  is read, in chunks of 2,048 tokens (48 in practice: a last partial chunk, under 2,048 tokens, is not read).
+  0.15 → 1.5.
 - Example total: **7.5**. Accuracy is recorded, never optimized directly.
 - **Same top word %**, from the same drift run, is reported next to drift and is not in the score.
 - **Relative score** = score ÷ the preset's score × 100, the preset scored the same way on the same questions and
@@ -209,13 +210,14 @@ importance_c the mean squared input of column c. Used only to repair genomes and
 
 - **Teacher**: the 16-bit original. **Student**: our file, loaded into PyTorch with every weight at its quantized value.
 - **Data**: the train split only: the original's chat answers to the 300 train prompts, then the train web text
-  (the calibration text), in sequences of 512 tokens (the first 256). No selection or held-out question or text. For
+  (the calibration text), all of it, in sequences of 512 tokens (~750). No selection or held-out question or text. For
   every position the teacher's **64 most likely next words** and their probabilities are stored.
 - **Trained**: for every matrix, one number **θ per block of 256 weights of a row**, effective weights
   **W × exp(θ)** (θ starts at 0, so the student starts as the file; exp keeps scales positive); plus every **norm
   weight**. The whole numbers never change.
 - **Loss**: at every position, KL(teacher ‖ student) over the teacher's top 64 (teacher probabilities renormalized
-  over them; the student's from its full output). Adam, 600 steps of 2 sequences; learning rate 0.002 for θ, 0.0001
+  over them; the student's from its full output). Adam, 600 steps of 2 sequences, in a random order (seed 0)
+  with every sequence used once before any repeats (~1.6 passes); learning rate 0.002 for θ, 0.0001
   for norms; activations recomputed instead of stored, to save memory.
 - **Written back**: every K and IQ type stores one 16-bit scale **d** per block and a block's values are proportional
   to it, so **d ← d × exp(θ)** at the block's byte position (Q2_K, Q4_K, Q5_K also scale their minimum, dmin; Q8_0's
@@ -347,6 +349,8 @@ was picked, and whether the guard was passed, may have been affected.
 | 13 | Final | **The verdict is the relative score on held-out data**: our fitness ÷ the preset's × 100, with flips on the held-out questions and KL on the test split (100 = the preset's damage, lower is better). Its 95 % interval comes from the same standard error the search uses (9): ±1.96 standard errors of the difference, from the per-question flips (paired) and the two KL runs. WIN if the whole interval is below 100, LOSE if it is all above, TIE otherwise. Accuracy, its difference from the preset, perplexity and same top word % are reported next to it and decide nothing. One rule throughout: the search, picking the winner, the guard and the verdict all use the same relative fitness (the guard on selection data, the verdict on held-out data). Replaces the accuracy difference with a bootstrap interval. At 95 %, about 1 contest in 20 where the two files are truly equal still comes out WIN or LOSE by chance. |
 | 14 | Pi | The Pi's result line says FITS or OVER: whether the real peak RAM is within the bundle's budget. Reported on the page next to the verdict; it does not change the verdict. |
 | 15 | Final | Reported next to the verdict, deciding nothing: **accuracy kept**, each file's held-out accuracy ÷ the original's × 100, for ours and the preset; and whether the verdict stays the same with the KL weight at 5 and 20 instead of 10 (the weight is a choice, so its effect is shown). The relative score already places the original at 0 and the preset at 100. |
+| 16 | Data | Every stage reads the whole of its split, never a part of it. The select split is made smaller instead (~100k tokens: the 150 chat prompts' answers and whole web documents up to the rest), so the search's KL reads all of it at today's cost. The held-out test reads the whole test split. Distillation covers the whole train split: every sequence, in a random order (fixed seed), for the same 600 updates as before (about 1.6 passes), so it takes about as long. Web documents left out of the smaller select split are used by nothing. |
+| 17 | QAT | The QAT experiment's FineWeb-Edu sample (Stage 1: 4,096 × 2,048 tokens, its early-stopping checks 64 × 2,048; Stage 2: 4,096 × 4,096) counts as part of the train split: a web-only extension used only by QAT, about 60× larger than the rest of the train split. It shares no document with the select or test splits, and the split check confirms that. QAT's files are judged like a winner (guard on selection data, verdict on held-out data). |
 
 ### The dataset (decision 6)
 
@@ -358,7 +362,7 @@ Two kinds of text, each cut three ways with no overlap:
 | | Train | Select | Test |
 |---|---|---|---|
 | **Chat**: OpenAssistant prompts (pinned, Apache-2.0) answered greedily by the original model in its own chat template | 300 prompts | 150 prompts | 150 prompts |
-| **Web**: FineWeb-Edu documents (pinned) | 300k tokens | 150k tokens | 150k tokens |
+| **Web**: FineWeb-Edu documents (pinned) | 300k tokens | whole documents (fixed random order) until chat + web reach ~100k tokens; the rest of the 150k unused | 150k tokens |
 
 - **The web part already exists:** the former calibration, selection and held-out web text, already disjoint by
   document, under these three names.
@@ -393,10 +397,11 @@ The GSM8K few-shot examples stay as part of how a GSM8K question is asked.
    and writes `prompts.json` (each prompt's split, how many were dropped). Made once, shared by all models.
 2. `refs` (GPU, no network): the original answers every prompt, written as `chat-<model>-train.txt`, `-select.txt`
    and `-test.txt`; then the original's probabilities on the select and test text (chat and web) are recorded in
-   `reference/<model>/select.kld` and `test.kld`.
+   `reference/<model>/select100k.kld` and `test.kld` (the select text is `select100k-<model>.txt`; the name changes
+   with its definition, so an older select text, reference or cached KL is never reused).
 3. The check (decision 3), run by `prompts`: the three web files and both question splits match their manifests'
    hashes; no web document, question or chat prompt is in two splits; no prompt shares 8 words with a benchmark
-   question.
+   question; no QAT sample comes from a select or test document (decision 17).
 
 **Archived, not deleted:** `bench.txt`, `answers-<model>.txt`, the sensitivity and agreement text,
 `gen_prompts.json`, WikiText, the MMLU few-shot examples.

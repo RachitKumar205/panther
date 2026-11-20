@@ -56,12 +56,19 @@ def teacher_tops(teacher: Path, ids, batch: int = BATCH):
     return tv, ti
 
 
+def passes(n: int, batch: int, steps: int, rng) -> list:
+    """steps batches of `batch` sequences of n: shuffled passes, every sequence used before any repeats."""
+    order = np.concatenate([rng.permutation(n) for _ in range(-(-steps * batch // n))])
+    return [order[k * batch:(k + 1) * batch] for k in range(steps)]
+
+
 def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=print, *, ids=None, tops=None,
             steps: int | None = STEPS, batch: int = BATCH, accum: int = 1, lr: float = 2e-3,
             train_norms: bool = True) -> Path:
-    """The final step's distillation (STEPS random batches of the texts, scales and norms), or with steps=None one
-    epoch over `ids` in a random order, `accum` micro-batches per update, the learning rate falling linearly to 0
-    (EfficientQAT's Stage 2 with KL instead of cross-entropy: scales only, train_norms=False)."""
+    """The final step's distillation (STEPS batches of the texts, scales and norms: every sequence once, in a random
+    order, before any repeats), or with steps=None one epoch over `ids` in a random order, `accum` micro-batches
+    per update, the learning rate falling linearly to 0 (EfficientQAT's Stage 2 with KL instead of cross-entropy:
+    scales only, train_norms=False)."""
     import gguf
     import torch
     import torch.nn.utils.parametrize as P
@@ -69,7 +76,7 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
     if ids is None:
         tok = AutoTokenizer.from_pretrained(str(teacher.parent), gguf_file=teacher.name)
         ids = torch.cat([tok(t.read_text(), return_tensors="pt").input_ids[0] for t in texts])
-        ids = ids[: len(ids) // SEQ * SEQ].view(-1, SEQ)[:256]
+        ids = ids[: len(ids) // SEQ * SEQ].view(-1, SEQ)  # the whole train text
     tv, ti = tops if tops is not None else teacher_tops(teacher, ids, batch)
     m = _load(student).train()  # checkpointing only applies in training mode: without it every rescaled weight
     m.gradient_checkpointing_enable()  # is kept for the backward pass, a second copy of the model (24B: 95 GB)
@@ -111,7 +118,7 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
         perm = rng.permutation(len(ids))
         micro = [perm[k:k + batch] for k in range(0, len(perm), batch)]
     else:
-        micro = [rng.choice(len(ids), batch, replace=False) for _ in range(steps)]
+        micro = passes(len(ids), batch, steps, rng)
     updates = math.ceil(len(micro) / accum)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda u: 1 - u / updates if steps is None else 1)
     for k, b in enumerate(micro):

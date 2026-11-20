@@ -55,8 +55,11 @@ BUDGET = 0
 SPLITS = ("train", "select", "test")
 WEB = dict(zip(SPLITS, (DATA / "splits/calibration.txt", DATA / "splits/text/selection.txt",
                         DATA / "splits/text/test_web.txt")))
-KL_CHUNKS = {"select": 48, "test": None}  # 2048-token chunks; select is read by every genome: ~100k tokens, the
-# whole chat part then the start of the web part. test is read a few times per contest: whole (~95 chunks)
+# Every stage reads the whole of its split. select is read by every genome, so it is kept small: the chat part and
+# whole web documents in a fixed random order up to SELECT_TOKENS in all. Its name carries the definition, so a
+# select text, reference and cached KL records from another definition are never reused
+SELECT_TOKENS = 49 * 2048
+REF = {"select": "select100k", "test": "test"}  # each scored split's joined text and .kld reference
 # The chat prompts: English first messages of OpenAssistant oasst1 (Apache-2.0), a fixed draw, none overlapping a
 # benchmark question
 PROMPTS = {"repo": "OpenAssistant/oasst1", "revision": "fdf72ae0827c1cda404aff25b6603abec9e3399b",
@@ -107,7 +110,7 @@ def chat_text(model: str, split: str) -> Path:
 
 def joined_text(model: str, split: str) -> Path:
     """A split's chat and web parts in one file (llama-perplexity reads one); its stem is the ppl run's text name."""
-    return DATA / "splits/text" / f"{split}-{model}.txt"
+    return DATA / "splits/text" / f"{REF[split]}-{model}.txt"
 
 
 def record(kind: str, model: str, suffix: str = "") -> Path:
@@ -322,6 +325,35 @@ def error(model: str) -> None:
     dst.write_text(json.dumps(done))
 
 
+def select_docs(docs: list[str], first: int, count, limit: int = SELECT_TOKENS) -> list[str]:
+    """The select split's web part: whole documents in a fixed random order while the total (first + theirs) stays
+    within limit; the rest are used by nothing."""
+    keep = []
+    for i in np.random.default_rng(0).permutation(len(docs)):
+        if (first := first + count(docs[i])) > limit:
+            break
+        keep.append(docs[i])
+    return keep
+
+
+def select_text(model: str, bf16: Path) -> str:
+    """The select split: the original's answers to the 150 select prompts and whole web documents of the web select
+    text, up to SELECT_TOKENS tokens in all (counted with the model's tokenizer)."""
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(str(bf16.parent), gguf_file=bf16.name)
+    count = lambda x: len(tok(x + "\n\n", add_special_tokens=False).input_ids)  # noqa: E731
+    docs, ids = WEB["select"].read_text().split("\n\n"), json.loads(WEB["select"].with_suffix(".ids.json").read_text())
+    if len(docs) != len(ids):  # documents were joined by a blank line; one with a blank line inside splits in two
+        note(f"{short(model)} select text: {len(docs)} pieces for {len(ids)} documents; pieces taken as documents")
+    chat = chat_text(model, "select").read_text()
+    web = select_docs(docs, count(chat), count)
+    text = chat + "\n" + "\n\n".join(web)
+    n = len(tok(text).input_ids)
+    note(f"{short(model)} select text: {len(web)} of {len(docs)} web documents, {n} tokens, {n // 2048} chunks read "
+         f"({n % 2048} tokens in the last partial chunk not read)")
+    return text
+
+
 def refs(model: str) -> None:
     """The original's reference outputs: its chat answers to the prompts of every split (the dataset's chat part),
     its next-word probabilities on the select and test text (chat + web), and which selection and held-out questions
@@ -334,14 +366,15 @@ def refs(model: str) -> None:
             outs = llama.complete(bf16, [x["text"] for x in ps], chat=True)
             for sp in SPLITS:
                 chat_text(model, sp).write_text("\n\n".join(o for o, x in zip(outs, ps) if x["split"] == sp) + "\n")
-        for sp, chunks in KL_CHUNKS.items():
+        for sp, name in REF.items():
             if not (j := joined_text(model, sp)).exists():
-                j.write_text(chat_text(model, sp).read_text() + "\n" + WEB[sp].read_text())
-            if not (ref / f"{sp}.kld").exists():
+                j.write_text(select_text(model, bf16) if sp == "select" else
+                             chat_text(model, sp).read_text() + "\n" + WEB[sp].read_text())
+            if not (ref / f"{name}.kld").exists():  # whole 2048-token chunks: a last partial one is not read
                 subprocess.run([str(BIN / "llama-perplexity"), "-m", str(bf16), "-f", str(j), "-c", "2048", "-b",
-                                "2048", "-ngl", "99", "-t", str(THREADS), "--kl-divergence-base", f"{ref}/{sp}.part"]
-                               + (["--chunks", str(chunks)] if chunks else []), check=True, capture_output=True)
-                os.rename(f"{ref}/{sp}.part", ref / f"{sp}.kld")
+                                "2048", "-ngl", "99", "-t", str(THREADS), "--kl-divergence-base",
+                                f"{ref}/{name}.part"], check=True, capture_output=True)
+                os.rename(f"{ref}/{name}.part", ref / f"{name}.kld")
         for t in TASKS:
             for n in (FIT, FIRST, ALL):
                 llama.run("task", model, bf16, "original", task=t, split="selection", n=n[t])
@@ -386,7 +419,7 @@ def test(model: str, path: Path, label: str) -> dict:
     """The held-out test: 4 multiple-choice tasks, GSM8K (test split), KL and perplexity on the test text."""
     c = {t: np.array(llama.run("task", model, path, label, task=t, split="poc_test", n=0)["correct"]) for t in TASKS}
     c["gsm8k"] = llama.gsm8k(model, path, label, DATA / "splits/llama_tasks/poc_test/gsm8k.jsonl")
-    kl = None if label == "original" else llama.run("kl", model, path, label, reference="test")["metrics"]
+    kl = None if label == "original" else llama.run("kl", model, path, label, reference=REF["test"])["metrics"]
     return {"correct": c, "kl": kl and kl["kl_mean"], "kl_se": kl and kl["kl_se"], "same_top": kl and kl["top1_pct"],
             "ppl": llama.run("ppl", model, path, label, text=joined_text(model, "test").stem)["metrics"]["ppl"]}
 
@@ -397,7 +430,7 @@ def score(model: str, a: dict[str, str] | None, label: str, path: Path | None = 
     With cut: a first look on a third of the questions; a genome already worse than cut there is dropped
     ("dropped": True, its score from that third) instead of finishing."""
     n = ALL if full else FIT
-    built = path is None and not (llama.find(model, label, reference="select") and all(
+    built = path is None and not (llama.find(model, label, reference=REF["select"]) and all(
         llama.find(model, label, task=t, split="selection", n=n[t]) for t in TASKS))
 
     def result(n: dict) -> dict:
@@ -408,7 +441,7 @@ def score(model: str, a: dict[str, str] | None, label: str, path: Path | None = 
     try:
         path = path or (build(model, a) if built else Path("/dev/null"))
         with gpu(int(1.1 * path.stat().st_size) + 4 * GIB, 1800):
-            m = llama.run("kl", model, path, label, reference="select")["metrics"]
+            m = llama.run("kl", model, path, label, reference=REF["select"])["metrics"]
             kl, se, top1 = m["kl_mean"], m["kl_se"], m["top1_pct"]  # same top word %: reported, not scored
             if cut is not None:
                 for t in TASKS:
@@ -915,6 +948,10 @@ def check() -> None:
     ids = {sp: set(json.loads((s / "text" / f"{p.stem}.ids.json").read_text())) for sp, p in WEB.items()}
     bad += [f"web {a} and {b}: {n} documents in both" for a, b in combinations(SPLITS, 2)
             if (n := len(ids[a] & ids[b]))]
+    qat = [p.with_suffix(".ids.json") for p in RW.glob("*/qat/tokens.npz")]  # decision 17: QAT text is train text
+    bad += [f"{q}: {n} documents in select or test" for q in qat if q.exists()
+            and (n := len(set(json.loads(q.read_text())) & (ids["select"] | ids["test"])))]
+    old = sum(not q.exists() for q in qat)
     key = lambda r: " ".join(words(" ".join(r)))  # noqa: E731  (the whole question: stem, choices, answer)
     held = questions("test")
     for f, rs in questions("selection").items():
@@ -929,7 +966,8 @@ def check() -> None:
         note("split check FAILED: " + "; ".join(bad))
         raise SystemExit(1)
     note(f"split check: {sum((s / f).exists() for f in want)} files match their hashes; web documents, questions and "
-         f"chat prompts share nothing")
+         f"chat prompts share nothing; QAT samples share no document with select or test"
+         + (f" ({old} QAT samples without recorded documents (made before 20 Nov), not checked)" if old else ""))
 
 
 def prep(model: str) -> None:
@@ -966,7 +1004,7 @@ def corpus(model: str) -> None:
         raise SystemExit(f"{f}: not the pinned file")
     used = {i for g in (DATA / "splits/text").glob("*.ids.json") for i in json.loads(g.read_text())}
     t = pq.read_table(f, columns=["text", "id", "token_count"]).to_pydict()
-    docs = [(x, n) for x, i, n in zip(t["text"], t["id"], t["token_count"]) if i not in used]
+    docs = [(x, n, i) for x, i, n in zip(t["text"], t["id"], t["token_count"]) if i not in used]
     hf, bf16 = DATA / "hf" / model, copy_of(model, "BF16")
     tok = (AutoTokenizer.from_pretrained(str(hf)) if (hf / "config.json").exists() else
            AutoTokenizer.from_pretrained(str(bf16.parent), gguf_file=bf16.name))
@@ -979,12 +1017,15 @@ def corpus(model: str) -> None:
         pool = [i for i in pool if docs[i][1] > length * 0.8]  # the file's own token counts: skip clearly short ones
         a, k = np.empty((n, length), np.int32), 0
         while k < n:
-            ids = tok(docs[rng.choice(pool)][0]).input_ids
+            ids = tok(docs[d := rng.choice(pool)][0]).input_ids
             if len(ids) > length:
                 i = rng.randint(0, len(ids) - length - 1)
                 a[k], k = ids[i:i + length], k + 1
+                drawn.add(docs[d][2])
         return a
+    drawn: set[str] = set()  # the documents the samples come from, for the split check
     np.savez(f"{dst}.part.npz", **{k: draw(order[:cut] if k != "val" else order[cut:], *v) for k, v in QAT_SIZES.items()})
+    dst.with_suffix(".ids.json").write_text(json.dumps(sorted(drawn)))
     os.rename(f"{dst}.part.npz", dst)
     note(f"{short(model)} QAT corpus: FineWeb-Edu, {len(docs)} documents ({len(used)} held out); samples drawn")
 
