@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from multiprocessing import get_context
 from functools import cache
 from pathlib import Path
 
@@ -30,9 +31,15 @@ PRESETS = {"IQ1_S": 1.56, "IQ1_M": 1.75, "IQ2_XXS": 2.06, "IQ2_XS": 2.31, "IQ2_S
 
 
 @cache
-def tensors(f: Path) -> dict:
+def reader(f: Path):
+    """A GGUF's reader, kept: building a genome reads the same type copies again and again."""
     import gguf
-    return {t.name: t for t in gguf.GGUFReader(f).tensors}
+    return gguf.GGUFReader(f)
+
+
+@cache
+def tensors(f: Path) -> dict:
+    return {t.name: t for t in reader(f).tensors}
 
 
 def _error_one(job: tuple[str, str, list[str], np.ndarray]) -> tuple[str, dict[str, float]]:
@@ -189,7 +196,7 @@ def build(model: str, a: dict[str, str], dst: Path) -> Path:
     import gguf
     if dst.exists():
         return dst
-    srcs = {t: gguf.GGUFReader(copy_of(model, t)) for t in set(a.values())}
+    srcs = {t: reader(copy_of(model, t)) for t in set(a.values())}
     by = {t: {x.name: x for x in r.tensors} for t, r in srcs.items()}
     base = srcs[sorted(srcs)[0]]
     part = f"{dst}.{uuid.uuid4().hex[:8]}.part"  # a writer's own part file
@@ -299,12 +306,14 @@ def ga(model: str, budget: int) -> None:
     def one(a: dict[str, str], cut: float | None) -> dict:
         f = tmp / f"{digest(a)}.gguf"
         try:
-            return ms.score(model, label(model, a), lambda: build(model, a, f), cut=cut)
+            return ms.score(model, label(model, a), lambda: procs.submit(build, model, a, f).result(), cut=cut)
         finally:
             f.unlink(missing_ok=True)
     g, m = ms.need(budget * GIB)  # a genome's file is about the budget, its runs one booking: as many as fit the claim
     inflight = max(1, min(16, hold.total[0] // g, hold.total[1] // m))
-    with ThreadPoolExecutor(inflight) as ex:
+    # files are built in worker processes (CPU-bound Python: in threads they would queue on one interpreter), their
+    # measurements booked and run from these threads
+    with ThreadPoolExecutor(inflight) as ex, ProcessPoolExecutor(inflight, mp_context=get_context("spawn")) as procs:
         running = {}
 
         def submit(a: dict[str, str] | None) -> None:
