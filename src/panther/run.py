@@ -19,7 +19,7 @@ from panther.model import DATA, GIB, RUN, Model, clock, done, hold, lock, named,
 CAP_GPU, CAP_RAM, RUN_RAM = 94 * GIB, 120 * GIB, 120 * GIB  # 96 GiB GPU, 124 GiB host: 4 GiB left for the system
 GENOMES = 8  # genomes scored at once that a claim is sized for (fewer if the caps do not hold them)
 SIDE = 2  # runs a claim is sized to fit beside each other: each run's genomes fit in 1 / SIDE of the caps
-RESERVE = 4 * GIB  # the orchestrator's own RAM outside its bookings: torch and CUDA, tokenizer, GGUF readers
+RESERVE = 12 * GIB  # the run's own processes outside its bookings: the orchestrator (torch, mapped type copies, records) and the genome builders
 CLAIMS = DATA / "locks/claims.json"
 _HELD = []  # this process's own run lock, when no ./panther holds it
 
