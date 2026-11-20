@@ -53,7 +53,9 @@ token length; lookups are hash-map `O(1)`.
   cut into `train`/`select`/`test` in order by the fixed counts.
 - Questions: keep each benchmark in a canonical order (sort by id), then `selection = first k`,
   `held-out = rest`, for the fixed per-task counts.
-- Web: assign documents to splits by id before any text is read (set operations).
+- Web: from one pool, assign whole documents disjointly by id — filling train (300k) then test
+  (150k) then select (<= 100,352) in a seeded order; the select pool is reconciled with the chat
+  answers later (`select_text`).
 
 ## Token budgeting (select text)
 

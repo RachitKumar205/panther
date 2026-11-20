@@ -14,22 +14,28 @@ from panther_data.config import (
     load_search_config,
 )
 from panther_data.dataset import (
+    BuiltDataset,
     ChatPrompt,
+    DatasetSource,
     Question,
     SplitName,
     SplitSpec,
     WebDocument,
+    build_splits,
     fill_to_budget,
     overlapping,
     partition_questions,
+    partition_web,
     split_prompts,
     words,
 )
 from panther_data.integrity import manifest_problems, question_overlap, sha256_file
 
 __all__ = [
+    "BuiltDataset",
     "ChatPrompt",
     "ContestSpec",
+    "DatasetSource",
     "LlamaCpp",
     "ModelConfig",
     "ModelEntry",
@@ -39,6 +45,7 @@ __all__ = [
     "SplitName",
     "SplitSpec",
     "WebDocument",
+    "build_splits",
     "fill_to_budget",
     "load_model_config",
     "load_models",
@@ -46,6 +53,7 @@ __all__ = [
     "manifest_problems",
     "overlapping",
     "partition_questions",
+    "partition_web",
     "question_overlap",
     "sha256_file",
     "split_prompts",

@@ -11,6 +11,7 @@ import random
 import re
 from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -129,7 +130,7 @@ def partition_questions(
     sel: dict[str, list[str]] = {}
     held: dict[str, list[str]] = {}
     for task, keys in questions.items():
-        k = selection[task]
+        k = selection.get(task, 0)  # a task absent from the spec is held out entirely
         sel[task] = list(keys[:k])
         held[task] = list(keys[k:])
     return sel, held
@@ -153,3 +154,81 @@ def fill_to_budget(
         out.append(docs[i])
         used += n
     return out
+
+
+class DatasetSource(Protocol):
+    """The raw sources; real implementations download, tests provide synthetic data."""
+
+    def chat_prompts(self) -> Sequence[str]:
+        """Ordered, filtered, deduplicated prompt texts."""
+        raise NotImplementedError
+
+    def questions(self) -> Mapping[str, Sequence[Question]]:
+        """Ordered questions per benchmark task."""
+        raise NotImplementedError
+
+    def web_documents(self) -> Sequence[WebDocument]:
+        """All web documents in one pool; the builder partitions them disjointly."""
+        raise NotImplementedError
+
+
+class BuiltDataset(BaseModel):
+    """The built split: prompts, questions and web documents, per split."""
+
+    model_config = ConfigDict(frozen=True)
+
+    prompts: dict[SplitName, list[str]]  # split -> prompt texts
+    selection: dict[str, list[str]]  # task -> question ids kept for selection
+    heldout: dict[str, list[str]]  # task -> question ids held out
+    web: dict[SplitName, list[WebDocument]]  # split -> documents (disjoint by id)
+
+
+_TEXT_ORDER = (SplitName.TRAIN, SplitName.TEST, SplitName.SELECT)
+"""Fill order for the web budgets: train, then test, then select."""
+
+
+def partition_web(
+    docs: Sequence[WebDocument],
+    budgets: Mapping[SplitName, int],
+    count_tokens: Callable[[str], int],
+    seed: int = 0,
+) -> dict[SplitName, list[WebDocument]]:
+    """Assign whole documents, disjoint by id, filling train then test then select budgets.
+
+    The select budget is the select-text cap; ``select_text`` later reconciles it with the chat
+    answers (chat + web <= budget).
+    """
+    order = list(range(len(docs)))
+    random.Random(seed).shuffle(order)
+    out: dict[SplitName, list[WebDocument]] = {name: [] for name in _TEXT_ORDER}
+    used: dict[SplitName, int] = {name: 0 for name in _TEXT_ORDER}
+    for i in order:
+        n = count_tokens(docs[i].text)
+        for name in _TEXT_ORDER:
+            if used[name] + n <= budgets[name]:
+                out[name].append(docs[i])
+                used[name] += n
+                break
+        else:
+            break  # fits no remaining budget; the rest is unused
+    return out
+
+
+def build_splits(
+    source: DatasetSource,
+    spec: SplitSpec,
+    count_tokens: Callable[[str], int],
+) -> BuiltDataset:
+    """Build the chat, question and web splits; a prompt overlapping any question is dropped."""
+    questions = source.questions()
+    texts = [" ".join((q.stem, *q.choices, q.answer)) for qs in questions.values() for q in qs]
+    need = sum(spec.prompt_counts.values())
+    candidates = list(source.chat_prompts())[: 2 * need]
+    clean = [p for i, p in enumerate(candidates) if i not in overlapping(candidates, texts, spec.overlap_n)][:need]
+    prompts = split_prompts(clean, spec.prompt_counts, spec.seed)
+    selection, heldout = partition_questions(
+        {task: [q.id for q in qs] for task, qs in questions.items()},
+        spec.selection_questions,
+    )
+    web = partition_web(source.web_documents(), spec.web_tokens, count_tokens, spec.seed)
+    return BuiltDataset(prompts=prompts, selection=selection, heldout=heldout, web=web)
