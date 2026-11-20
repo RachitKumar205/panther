@@ -18,6 +18,7 @@ from panther.model import DATA, GIB, RUN, Model, clock, done, hold, lock, named,
 
 CAP_GPU, CAP_RAM, RUN_RAM = 94 * GIB, 120 * GIB, 120 * GIB  # 96 GiB GPU, 124 GiB host: 4 GiB left for the system
 GENOMES = 8  # genomes scored at once that a claim is sized for (fewer if the caps do not hold them)
+SIDE = 2  # runs a claim is sized to fit beside each other: each run's genomes fit in 1 / SIDE of the caps
 RESERVE = 4 * GIB  # the orchestrator's own RAM outside its bookings: torch and CUDA, tokenizer, GGUF readers
 CLAIMS = DATA / "locks/claims.json"
 _HELD = []  # this process's own run lock, when no ./panther holds it
@@ -47,21 +48,22 @@ class Refused(SystemExit):
     pass
 
 
-def sizes(model: str, budget: int, free_gpu: int = CAP_GPU, free_ram: int = CAP_RAM) -> tuple[int, int, int]:
-    """The run's GPU and RAM claim, and how many genomes it scores at once: as many as fit in what is free (at most
-    GENOMES), so a run alone gets all it can use and a run started beside others gets the rest. GPU: distillation's
-    peak (the 16-bit model + 20 GiB) or k genomes' llama.cpp runs, whichever is more. RAM: RESERVE + k genomes' runs,
-    or the transformers load of the 16-bit model in rounding and distillation (they book the whole claim, so run
-    alone): the model in host RAM before it moves to the GPU, one tensor's fp32 copy and the orchestrator, b16 + 8 GiB.
-    k below 1 means it does not fit (claim refuses)."""
-    b16, (g, m) = 2 * Model(model).params, measure.need(budget * GIB)
-    k = min(GENOMES, (min(RUN_RAM, free_ram) - RESERVE) // m, min(CAP_GPU, free_gpu) // g)
-    return max(b16 + 20 * GIB, max(k, 1) * g), max(b16 + 8 * GIB, RESERVE + max(k, 1) * m), k
+def sizes(model: str, budget: int) -> tuple[int, int, int]:
+    """The run's GPU and RAM claim, and how many genomes it scores at once: as many as fit in half the caps (at most
+    GENOMES), so two runs fit side by side. GPU: distillation's peak (the 16-bit model + 20 GiB) or k genomes' llama.cpp
+    runs, whichever is more. RAM: RESERVE + k genomes' runs, or the transformers load of the 16-bit model in rounding
+    and distillation (they book the whole claim, so run alone): the model in host RAM before it moves to the GPU, one
+    tensor's fp32 copy and the orchestrator, b16 + 8 GiB."""
+    b16, (g, m) = 2 * Model(model).params, measure.need(budget * GIB, model=model)
+    k = max(1, min(GENOMES, (CAP_RAM // SIDE - RESERVE) // m, CAP_GPU // SIDE // g))
+    return max(b16 + 20 * GIB, k * g), max(b16 + 8 * GIB, RESERVE + k * m), k
 
 
-def claim() -> int:
+def claim(new: bool = False) -> int:
     """The whole run's GPU and RAM (sizes), or a refusal naming the runs that hold the rest: all claims stay within
-    CAP_GPU and CAP_RAM. Returns the RAM (the container's limit); the run books within it less RESERVE."""
+    CAP_GPU and CAP_RAM. new (the claim step, before the run's containers): a claim left by an earlier run of this
+    contest is replaced. Otherwise the run keeps exactly what its claim step claimed. Returns the RAM (the container's
+    limit); the run books within it less RESERVE."""
     r = rid()
     with lock("claims"):
         f = open(DATA / "locks" / f"run-{r}.lock", "a")
@@ -71,14 +73,14 @@ def claim() -> int:
         except BlockingIOError:
             f.close()  # ./panther holds it for the whole run
         book = active()
-        if r in book:  # the run's own claim, made by its claim step: the run keeps exactly what was claimed
+        if new:
+            book.pop(r, None)
+        if r in book:
             gpu, ram = book[r]["gpu"], book[r]["ram"]
         else:
             others = [f"{k} ({v['gpu'] / GIB:.0f} GiB GPU, {v['ram'] / GIB:.0f} GiB RAM)" for k, v in book.items()]
-            free_gpu = CAP_GPU - sum(v["gpu"] for v in book.values())
-            free_ram = CAP_RAM - sum(v["ram"] for v in book.values())
-            gpu, ram, k = sizes(RUN["model"], RUN["budget"], free_gpu, free_ram)
-            if k < 1 or gpu > free_gpu or ram > free_ram:
+            gpu, ram, _ = sizes(RUN["model"], RUN["budget"])
+            if sum(v["gpu"] for v in book.values()) + gpu > CAP_GPU or sum(v["ram"] for v in book.values()) + ram > CAP_RAM:
                 raise Refused(f"{r} does not fit: it needs {gpu / GIB:.0f} GiB of GPU and {ram / GIB:.0f} GiB of RAM "
                                  f"and {', '.join(others)} hold the rest of {CAP_GPU // GIB} GiB GPU and "
                                  f"{CAP_RAM // GIB} GiB RAM; start it when one of them ends")
@@ -155,7 +157,7 @@ def publish() -> None:
     step("tidy", tidy, False)
 
 
-KEYWORDS = {"claim": lambda: print(claim()), "fetch": fetch, "run": run, "publish": publish}
+KEYWORDS = {"claim": lambda: print(claim(new=True)), "fetch": fetch, "run": run, "publish": publish}
 
 
 def main() -> None:

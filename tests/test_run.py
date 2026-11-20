@@ -30,12 +30,12 @@ def test_claims(tmp_path):
         assert re.fullmatch(r"\d\d:\d\d 24b-b7: refused: 24b-b7 does not fit: .* 14b-b5 \(\d+ GiB GPU.*\n",
                             (tmp_path / "logs/panther.log").read_text())
         assert not (tmp_path / "logs/progress-b7.log").exists()
-        assert py(tmp_path, "claim", "1.5b", "1").returncode == 3  # a run alone takes all it can use
+        assert py(tmp_path, "claim", "1.5b", "1").returncode == 0  # a second run fits beside it
     finally:
         holder.kill()
         holder.wait()
     r = py(tmp_path, "claim", "24b", "7")  # the holder ended: its claim lapsed
-    assert r.returncode == 0 and 52 * GIB < int(r.stdout.split()[-1]) <= 120 * GIB
+    assert r.returncode == 0 and 52 * GIB < int(r.stdout.split()[-1]) <= 60 * GIB
 
 
 def test_a_failed_step_is_loud(tmp_path):
