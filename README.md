@@ -54,7 +54,8 @@ end, on llama.cpp's own types; its code was removed on 20 Nov 2026 and stays in 
 - The 14B @ 5 and 22B @ 7 QAT files were made before fix 79d9754 (20 Nov): until then a block's codes were picked
   again in fp32 when saved, while training and its checks picked them in bf16, so a block could be saved worse than
   it scored. Their results are true for the files as saved. The 14B @ 7 QAT run was stopped at block 17 on 20 Nov
-  and removed (block 5: scored 0.01606, saved 0.01981; blocks 0-4 saved that way).
+  and removed (block 5: scored 0.01606, saved 0.01981; blocks 0-4 saved that way). How the fix works, each
+  number's precision and why, and what is still open: [src/panther, QAT](src/panther/README.md#qat-blockappy-fakequantpy-optional-decision-22).
 
 **On the Pi:**
 - Weight repacking: on the Pi's ARM processor llama.cpp keeps a second, repacked copy of K-type weights unless

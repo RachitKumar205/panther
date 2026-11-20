@@ -187,6 +187,53 @@ on the search's 900 questions (`score_fit`) and on all selection questions are t
   are put into the file's row order; a check first confirms the reordered weights match the file row for row (if
   not, those matrices are not tuned).
 
+### QAT (`blockap.py`, `fakequant.py`; optional, decision 22)
+
+**Block-AP**: block by block, the latent weights W (starting at the original's) are trained so the quantized block
+reproduces the original block's output (mean squared error) on the QAT samples, its input being the output of the
+blocks already quantized. The forward pass uses W's quantized value (`fakequant.fake`: the codes nearest to W under
+the file's scales, decoded exactly as llama.cpp decodes them), with the gradient straight through to W. The block
+scales stay as the file has them (training them drifted on the 14B); distillation trains them afterwards. Every 512
+steps the block is validated on 64 held-back samples and the best point is kept.
+
+**Precision**, each number in the one that suits its job:
+
+| What | Precision | Why |
+|---|---|---|
+| The file's scales (`d`, `dmin`) | fp16 | The GGUF format; every use snaps them to fp16 first, so training sees what the file stores |
+| Picking codes (`fakequant.encode`) | fp32, autocast off | As llama.cpp's own quantizer picks them; near-ties between grid patterns decide the code, and fp16 or bf16 would round them together |
+| The forward pass | bf16 | Qwen2.5's activations overflow fp16 (max 65,504); bf16 has fp32's range |
+| The latent weights W (and distillation's multipliers) | fp32 | Mixed-precision practice: Block-AP's updates are ~0.1 % of a weight a step, below bf16's resolution (~0.4 %) |
+
+**The code-picking bug and its fix (20 Nov: `79d9754`, `15199b3`).** Codes were picked under bf16 during training
+and at the checks, and again in fp32 at the save. For 4–8 % of IQ groups the two disagreed on a near-tie, so the
+file held another block than the one scored: 14B @ 7's block 5 scored 0.01606 at its last check and was saved at
+0.01981 (its start: 0.01742). The fix, four parts:
+
+1. One picker everywhere: `encode` picks in fp32 with autocast off, in training, at every check and at the save;
+   the same weights give the same codes (`test_encode_ignores_autocast`, all 14 types).
+2. The save picks from the best check's weights, restored exactly (an fp32 copy), so it repeats the check's work.
+3. The block is scored from what is saved: packed to the file's bytes, rebuilt from them, scored again; that score
+   is the one logged and used.
+4. It never ends worse than it started: a block not better than the file's keeps the file's.
+
+Parts 1 and 2 stop a mismatch, 3 and 4 catch one. Blocks 14–16 of the 14B @ 7, run after `79d9754`, saved at
+exactly their best checks (0.03740, 0.04035, 0.04163). The `15199b3` version restored here has not yet run on a
+real model.
+
+**Open (no result changes):**
+- Codes are re-picked every 16 forward passes, validation passes included; a check validates with codes from the
+  current weights only because the check interval (512) and the validation batches (32) are multiples of 16. With 60
+  validation samples 1 check in 8 would, with 66 none: a check would score with codes up to 15 steps old and the best
+  point be chosen on scores the save does not reproduce. Clearing the codes before validating removes the dependence.
+- The code search's distances are an fp32 matrix product. TF32 is off (PyTorch's default; neither this code nor
+  transformers turns it on), but nothing pins it; under TF32 they would have a 10-bit mantissa, the same kind of loss.
+
+**Not a bug:** Block-AP and distillation run the decoded weights in bf16, llama.cpp exactly: 0.14 % mean, 0.39 %
+largest relative difference per weight, for every type. It costs training some accuracy, not honesty: the winner,
+the guard and the verdict are all measured on the real llama.cpp files (whose own GPU kernels also quantize the
+activations to 8 bits).
+
 ### The final step and the verdict (`final.py`)
 
 1. Each of the best 3 genomes is built undistilled (the same file the search scored, so its results are reused) and
