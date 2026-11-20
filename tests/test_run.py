@@ -30,12 +30,12 @@ def test_claims(tmp_path):
         assert re.fullmatch(r"\d\d:\d\d 24b-b7: refused: 24b-b7 does not fit: .* 14b-b5 \(\d+ GiB GPU.*\n",
                             (tmp_path / "logs/panther.log").read_text())
         assert not (tmp_path / "logs/progress-b7.log").exists()
-        assert py(tmp_path, "claim", "1.5b", "1").returncode == 0  # a small run fits beside it
+        assert py(tmp_path, "claim", "1.5b", "1").returncode == 3  # a run alone takes all it can use
     finally:
         holder.kill()
         holder.wait()
     r = py(tmp_path, "claim", "24b", "7")  # the holder ended: its claim lapsed
-    assert r.returncode == 0 and 52 * GIB < int(r.stdout.split()[-1]) <= 64 * GIB
+    assert r.returncode == 0 and 52 * GIB < int(r.stdout.split()[-1]) <= 120 * GIB
 
 
 def test_a_failed_step_is_loud(tmp_path):
@@ -57,8 +57,8 @@ def test_nothing_twice(tmp_path, monkeypatch):
     hold.set(10 * GIB, 10 * GIB)
     f = tmp_path / "x.gguf"
     f.write_bytes(b"gguf")
-    first = measure.run("kl", "M", f, "x:1", reference="select100k")
-    assert measure.run("kl", "M", f, "x:1", reference="select100k") == first
+    first = measure.run("kl", "Qwen2.5-1.5B-Instruct", f, "x:1", reference="select100k")
+    assert measure.run("kl", "Qwen2.5-1.5B-Instruct", f, "x:1", reference="select100k") == first
     assert (tmp_path / "calls").read_text().count("run") == 1
     h = sha(f)
     assert sha(f) == h and Path(f"{f}.sha256").exists()  # kept beside the file

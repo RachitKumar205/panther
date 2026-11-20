@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from panther.data import PROMPT_FILE, REF, SPLITS, WEB, chat_text, joined_text, select_text
-from panther.model import BIN, DATA, GIB, THREADS, hold, lock, put, sha
+from panther.model import BIN, DATA, GIB, REPO, RUN, THREADS, hold, lock, put, sha
 from panther.store import copy_of
 
 TASKS = ["mmlu", "hellaswag", "arc_challenge", "winogrande"]
@@ -65,14 +65,17 @@ def parse_winogrande(text: str, n: int) -> np.ndarray:
     return np.array([int(a == b) for a, b in rows], dtype=np.int8)
 
 
-def need(size: int, extra: int = 4 * GIB) -> tuple[int, int]:
-    """GPU and RAM of one llama.cpp process on a file of size bytes (it holds ~2.7 x its file in RAM besides the GPU
-    copy). A file's runs book this once and run one after another."""
-    return int(1.1 * size) + extra, int(2.7 * size) + GIB
+def need(size: int, extra: int = 4 * GIB, model: str = "") -> tuple[int, int]:
+    """GPU and RAM of one llama.cpp process on a file of size bytes. RAM is its next-word buffer: multiple choice
+    holds 5 sequences x 4,096 positions x the vocabulary in float32 (measured 20 Nov on the 1.5B: 12.6 GB, the same
+    for 300 or all questions; perplexity and KL, 2,048 positions, 1.2 GB), plus the file and 1 GiB. A file's runs book
+    this once and run one after another."""
+    vocab = json.loads((REPO / "configs/model_configs" / f"{model or RUN['model']}.json").read_text())["vocab_size"]
+    return int(1.1 * size) + extra, 5 * 4096 * vocab * 4 + size + GIB
 
 
-def cost(f: Path, extra: int = 4 * GIB) -> tuple[int, int]:
-    return need(f.stat().st_size, extra)
+def cost(f: Path, extra: int = 4 * GIB, model: str = "") -> tuple[int, int]:
+    return need(f.stat().st_size, extra, model)
 
 
 def write(f: Path, x) -> None:
@@ -129,7 +132,7 @@ def run(kind: str, model: str, gguf: Path, label: str, **how) -> dict:
         cmd += ["-f" if o == "--winogrande" else "-bf", f, o, f"{o}-tasks", str(how.get("n", 0)), "-c", "4096", "-np", "5"]
     t0, log = time.monotonic(), d / "logs" / f"{eid}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    with hold(*cost(gguf)):
+    with hold(*cost(gguf, model=model)):
         p = subprocess.run(cmd, capture_output=True, text=True)
     text = p.stdout + p.stderr
     log.write_text(text)
