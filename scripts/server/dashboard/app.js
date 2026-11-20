@@ -28,7 +28,8 @@ const mins = (s) => (s ? +s.slice(0, 2) * 60 + +s.slice(3, 5) : null);
 const hhmm = (m) => `${String(Math.floor(((m % 1440) + 1440) % 1440 / 60)).padStart(2, "0")}:${String(Math.round(((m % 60) + 60) % 60)).padStart(2, "0")}`;
 const dur = (m) => (m == null ? "–" : m < 60 ? `${Math.round(m)} min` : `${Math.floor(m / 60)} h ${String(Math.round(m % 60)).padStart(2, "0")}`);
 const badge = (s) => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
-const verdict = (v) => (v ? `<span class="v ${v}">${v}</span>` : "");
+const say = (v) => (v ? v[0] + v.slice(1).toLowerCase() : "");
+const verdict = (v) => (v ? `<span class="v ${v}">${say(v)}</span>` : "");
 const kpi = (k, v, s = "", extra = "") => `<div class="card kpi"><div class="k">${k}</div><div class="v">${v}</div>${s ? `<div class="s">${s}</div>` : ""}${extra}</div>`;
 const prog = (f) => (f == null ? "" : `<div class="prog"><i style="width:${(Math.max(0, Math.min(1, f)) * 100).toFixed(1)}%"></i></div>`);
 const tabs = (base, list, on) => `<nav class="tabs">${list.map(([k, n]) => `<a href="${base}${k ? "/" + k : ""}" class="${k === on ? "on" : ""}">${n}</a>`).join("")}</nav>`;
@@ -326,7 +327,7 @@ pages.qat = (st, el, [id, tab = ""]) => {
         ${kpi("Stage 1 · blocks", `${done.length}<small>/ ${q.total}</small>`, qs.state === "running" && q.stage1_eta && done.length < q.total ? `ends ~${esc(q.stage1_eta)} · ${q.minutes_per_block ? Math.round(q.minutes_per_block) + " min a block" : ""}` : "finished", prog(done.length / q.total))}
         ${kpi("Stage 1 · error change", done.length ? `${sgn(mean * 100, 0)}<small>%</small>` : "–", "mean over finished blocks")}
         ${kpi("Stage 2 · scales", s2.length ? `${s2.at(-1).update}<small>/ ${s2.at(-1).of}</small>` : `<span class="muted">—</span>`, s2.length ? "updates" : "after Stage 1")}
-        ${kpi("Result vs winner", main ? `${verdict(main.vs_winner.verdict)} ${sgn(main.vs_winner.diff)}` : `<span class="muted">pending</span>`, ctl ? `control: ${ctl.vs_winner.verdict} ${sgn(ctl.vs_winner.diff)}` : "")}
+        ${kpi("Result vs winner", main ? `${verdict(main.vs_winner.verdict)} ${sgn(main.vs_winner.diff)}` : `<span class="muted">pending</span>`, ctl ? `control: ${say(ctl.vs_winner.verdict).toLowerCase()} ${sgn(ctl.vs_winner.diff)}` : "")}
       </div>
       <div class="card pad section"><h2>Stage 1 blocks <a class="more" href="${base}/stage1">details →</a></h2>${strip(q)}</div>
       <div class="card tw section"><h2>Results</h2>${Object.keys(res).length ? resultsTable(res) : '<div class="empty">No results yet.</div>'}</div>
