@@ -10,7 +10,15 @@ from panther_quant.reference import kl_topk, topk_logprobs
 
 
 def build() -> Qwen2Model:
-    return Qwen2Model(hidden_size=16, num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1, head_dim=8, intermediate_size=32, vocab_size=50)
+    return Qwen2Model(
+        hidden_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        intermediate_size=32,
+        vocab_size=50,
+    )
 
 
 def test_kl_topk_is_zero_for_identical_distributions() -> None:
