@@ -1,4 +1,5 @@
-"""The fake quantizers (all 14 types) against llama.cpp: decoding bit for bit, packing byte for byte, sane encoding, gradients.
+"""The fake quantizers (all 14 types) against llama.cpp: decoding bit for bit, packing byte for byte, sane encoding,
+gradients to the weights.
 Needs torch (the server image). PANTHER_FQ_FILE=<gguf> also round-trips every matrix of a
 real file (any of the 14 types in it); llama.cpp's C library, where present, is a second reference besides the gguf package."""
 
@@ -23,7 +24,7 @@ rng = np.random.default_rng(0)
 def random_raw(t: str, rows: int = 8, blocks: int = 4) -> np.ndarray:
     """Random valid bytes: any codes, scales and signs; a finite 16-bit d (and dmin)."""
     from panther.distill import D_OFF
-    b = rng.integers(0, 256, (rows, blocks, fq.SIZE[t]), dtype=np.uint8)
+    b = rng.integers(0, 256, (rows, blocks, fq.SPEC[t][0]), dtype=np.uint8)
     d = (rng.standard_normal((rows, blocks, 2)) * 1e-2).astype(np.float16)
     if t == "IQ1_M":  # d is spread over the top 4 bits of the 4 scale words
         w = b[..., 48:56].copy().view(np.uint16)
@@ -41,7 +42,7 @@ def c_decode(t: str, raw: np.ndarray) -> np.ndarray:
     lib = ctypes.CDLL(str(LIB))
     lib.ggml_get_type_traits.restype, lib.ggml_get_type_traits.argtypes = ctypes.POINTER(_Traits), [ctypes.c_int]
     raw = np.ascontiguousarray(raw)
-    out = np.empty((raw.shape[0], raw.shape[1] // fq.SIZE[t] * fq.SPEC[t][1]), np.float32)
+    out = np.empty((raw.shape[0], raw.shape[1] // fq.SPEC[t][0] * fq.SPEC[t][1]), np.float32)
     _TO_FLOAT(lib.ggml_get_type_traits(int(QT[t].value)).contents.to_float)(raw.ctypes.data, out.ctypes.data, out.size)
     return out
 
@@ -100,8 +101,7 @@ def test_encode_ignores_autocast(t):
 
 @pytest.mark.parametrize("t", fq.TYPES)
 def test_fake_forward_exact_and_gradients(t):
-    st = {k: (v.clone().requires_grad_(True) if v.is_floating_point() else v) for k, v in fq.unpack(t, random_raw(t))
-          .items()}
+    st = fq.unpack(t, random_raw(t))
     W = fq.decode(t, st)
     W = (W + torch.randn_like(W) * 1e-3).requires_grad_(True)
     out = fq.fake(t, W, st)
@@ -109,8 +109,5 @@ def test_fake_forward_exact_and_gradients(t):
     assert torch.equal(out.detach(), ref)  # the forward pass is exactly what llama.cpp would run
     (out * torch.randn_like(out)).sum().backward()
     assert torch.equal(W.grad != 0, torch.ones_like(W, dtype=torch.bool))  # straight through
-    for k in ("d", "sc", "dmin", "m"):
-        if k in st:
-            assert torch.isfinite(st[k].grad).all() and st[k].grad.abs().sum() > 0, k
     packed = fq.pack(t, {**st, **fq.encode(t, W, st)})  # what training ends with is a valid file
     assert np.array_equal(fq.decode(t, fq.unpack(t, packed)).numpy(), ref.numpy())

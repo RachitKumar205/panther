@@ -10,9 +10,9 @@ A matrix is held as its scales and codes (a "state"):
   unpack(t, raw) / pack(t, st)   file bytes <-> state, exactly llama.cpp's layout (ggml-common.h)
   decode(t, st)                  state -> weights, bit for bit as llama.cpp
   encode(t, W, st)               the codes nearest to W under st's scales (plain squared error)
-  fake(t, W, st)                 decode(encode(W)) exactly in the forward pass; gradients straight through to W and
-                                 LSQ's (value - W/step) to d, dmin and the sub-scales.
-Scales are trained as floats; every use snaps them to what the file stores (16-bit d, integer sub-scales)."""
+  fake(t, W, st)                 decode(encode(W)) exactly in the forward pass; gradients straight through to W (the
+                                 scales stay as the file has them: Block-AP trains the weights only)
+Every use of the scales snaps them to what the file stores (16-bit d, integer sub-scales)."""
 
 from __future__ import annotations
 
@@ -37,7 +37,6 @@ SPEC = {
     "IQ3_S": (110, QK, 8, (0, 15), "grid", (4, "free")), "IQ1_S": (50, QK, 8, (0, 7), "iq1", 32),
     "IQ1_M": (56, QK, 16, (0, 7), "iq1", 8)}
 TYPES = tuple(SPEC)
-SIZE = {t: s[0] for t, s in SPEC.items()}
 OFFSET = ("Q2_K", "Q4_K", "Q5_K")
 _GRID: dict[tuple[str, str], torch.Tensor] = {}
 
@@ -224,7 +223,7 @@ def _pack(t: str, s: dict[str, np.ndarray]) -> np.ndarray:
 
 def unpack(t: str, raw: np.ndarray, dev="cpu") -> dict[str, torch.Tensor]:
     """A matrix's bytes (rows x row bytes) -> state: float d (dmin) and sub-scales, integer codes."""
-    b = np.ascontiguousarray(raw).reshape(raw.shape[0], -1, SIZE[t])
+    b = np.ascontiguousarray(raw).reshape(raw.shape[0], -1, SPEC[t][0])
     st = {}
     for k, v in _unpack(t, b).items():
         v = torch.from_numpy(np.ascontiguousarray(v).astype(np.float32 if k in ("d", "dmin", "sc", "m") else
@@ -345,18 +344,6 @@ def encode(t: str, W: torch.Tensor, st: dict) -> dict:
 
 
 def fake(t: str, W: torch.Tensor, st: dict, codes: dict | None = None) -> torch.Tensor:
-    """W's quantized value (forward: exactly decode(encode(W)), or decode(codes) for codes chosen earlier), with
-    gradients to W and to st's float scales."""
-    c = codes or encode(t, W, st)
-    wq = decode(t, {**st, **c})
-    lo, hi = SPEC[t][3] or (0, 0)
-    sn = {k: v + ((v.round().clamp(lo, hi) if k in ("sc", "m") else v.half().float()) - v).detach()
-          for k, v in st.items() if k in ("d", "dmin", "sc", "m")}
-    step, off = _scales(t, sn)
-    val = _sub(t, _value(t, c, W.device).reshape(W.shape[0], -1))
-    u = ((_sub(t, W) + (off if off is not None else 0)) / step.clamp_min(1e-30)).detach()
-    lsq = step * (val - u).detach()
-    if off is not None:  # weights clamped at the ends of 0..max: the min moves them
-        lsq = lsq - off * (val != u.round()).float()
-    lsq = lsq.reshape(wq.shape)
-    return wq + (W - W.detach()) + (lsq - lsq.detach())  # both added terms are exactly 0 in the forward pass
+    """W's quantized value (forward: exactly decode(encode(W)), or decode(codes) for codes chosen earlier), its
+    gradient straight through to W (the added term is exactly 0 in the forward pass)."""
+    return decode(t, {**st, **(codes or encode(t, W, st))}) + (W - W.detach())
