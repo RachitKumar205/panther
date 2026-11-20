@@ -1,5 +1,5 @@
 /* Panther: an app shell in the shape of W&B / MLflow / Airflow (sidebar, breadcrumbs, list pages, detail pages with
-   tabs). Light: lab-notebook paper. Dark: graphite with phosphor amber. One accent (amber: live, running, selected); colour in the charts carries meaning. */
+   tabs). Light: lab-notebook paper. Dark: graphite with phosphor amber. Green: live and running. Amber: selected. Colour in the charts carries meaning. */
 @font-face {
   font-family: "Recursive";
   src: url("recursive.woff2") format("woff2-variations"), url("recursive.woff2") format("woff2");
@@ -11,7 +11,7 @@
   --rule: #e1dbcd; --hover: rgba(60, 50, 30, .05);
   --accent: #c2410c; --accent-soft: rgba(194, 65, 12, .1);
   --win: #2f7a4d; --win-soft: rgba(47, 122, 77, .12); --tie: #6f685b; --tie-soft: rgba(111, 104, 91, .12);
-  --lose: #b42318; --lose-soft: rgba(180, 35, 24, .1); --run: #c2410c; --run-soft: rgba(194, 65, 12, .1);
+  --lose: #b42318; --lose-soft: rgba(180, 35, 24, .1); --run: #2f7a4d; --run-soft: rgba(47, 122, 77, .12);
   --s1: #2f7a4d; --s2: #0b6b82; color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -20,7 +20,7 @@
     --rule: #262b30; --hover: rgba(255, 255, 255, .04);
     --accent: #f2a43a; --accent-soft: rgba(242, 164, 58, .12);
     --win: #66c993; --win-soft: rgba(102, 201, 147, .13); --tie: #a79f91; --tie-soft: rgba(167, 159, 145, .12);
-    --lose: #f07a6d; --lose-soft: rgba(240, 122, 109, .12); --run: #f2a43a; --run-soft: rgba(242, 164, 58, .12);
+    --lose: #f07a6d; --lose-soft: rgba(240, 122, 109, .12); --run: #66c993; --run-soft: rgba(102, 201, 147, .13);
     --s1: #66c993; --s2: #5cc3db; color-scheme: dark;
   }
 }
@@ -29,7 +29,7 @@
   --rule: #262b30; --hover: rgba(255, 255, 255, .04);
   --accent: #f2a43a; --accent-soft: rgba(242, 164, 58, .12);
   --win: #66c993; --win-soft: rgba(102, 201, 147, .13); --tie: #a79f91; --tie-soft: rgba(167, 159, 145, .12);
-  --lose: #f07a6d; --lose-soft: rgba(240, 122, 109, .12); --run: #f2a43a; --run-soft: rgba(242, 164, 58, .12);
+  --lose: #f07a6d; --lose-soft: rgba(240, 122, 109, .12); --run: #66c993; --run-soft: rgba(102, 201, 147, .13);
   --s1: #66c993; --s2: #5cc3db; color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -52,7 +52,7 @@ a.more { font-size: 12px; color: var(--muted); margin-left: auto; } a.more:hover
 .navgroup a:hover { background: var(--hover); color: var(--ink); }
 .navgroup a.on { background: var(--panel); color: var(--ink); font-weight: 500; box-shadow: 0 0 0 1px var(--rule); }
 .navgroup svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; flex: none; }
-.navgroup .cnt { margin-left: auto; font-size: 11px; color: var(--accent); font-variation-settings: "MONO" 1; }
+.navgroup .cnt { margin-left: auto; font-size: 11px; color: var(--run); font-variation-settings: "MONO" 1; }
 .sidefoot { margin-top: auto; display: grid; gap: 8px; font-size: 12px; }
 .main { min-width: 0; display: flex; flex-direction: column; }
 .bar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 16px; padding: 0 32px; height: 56px; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--rule); }
@@ -64,7 +64,7 @@ a.more { font-size: 12px; color: var(--muted); margin-left: auto; } a.more:hover
 .btn { font: inherit; font-size: 12px; display: inline-flex; align-items: center; gap: 8px; height: 28px; background: var(--panel); border: 1px solid var(--rule); color: var(--ink-2); border-radius: 8px; padding: 0 8px; cursor: pointer; transition: color .12s; }
 .btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; flex: none; }
 .btn:hover { color: var(--ink); }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; box-shadow: 0 0 0 3px var(--accent-soft); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--run); display: inline-block; box-shadow: 0 0 0 3px var(--run-soft); }
 .dot.stale { background: var(--muted); box-shadow: none; } .dot.err { background: var(--lose); box-shadow: 0 0 0 3px var(--lose-soft); }
 .banner { margin: 16px 32px 0; padding: 8px 12px; border-radius: 8px; background: var(--lose-soft); color: var(--lose); }
 .page { padding: 24px 32px 64px; max-width: 1240px; width: 100%; }
@@ -224,7 +224,7 @@ input.search:focus { outline: 2px solid var(--accent-soft); border-color: var(--
 .lnew { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); font: inherit; font-size: 12px; height: 28px; padding: 0 12px; border-radius: 8px; border: 0; background: #f2a43a; color: #16191c; font-weight: 500; cursor: pointer; box-shadow: 0 6px 20px rgba(0, 0, 0, .4); }
 .live { font-size: 12px; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-variation-settings: "MONO" 1; }
 .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
-.live.on { color: #f2a43a; } .live.on::before { background: #f2a43a; box-shadow: 0 0 0 3px rgba(242, 164, 58, .15); }
+.live.on { color: #66c993; } .live.on::before { background: #66c993; box-shadow: 0 0 0 3px rgba(102, 201, 147, .15); }
 .feed { list-style: none; margin: 0; padding: 0; }
 .feed li { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 8px; padding: 8px 16px; border-top: 1px solid var(--rule); font-size: 13px; color: var(--ink-2); }
 .feed time { color: var(--muted); font-size: 12px; } .feed li.res span { color: var(--ink); font-weight: 500; } .feed li.fail span { color: var(--lose); }
