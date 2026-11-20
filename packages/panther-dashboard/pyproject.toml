@@ -1,0 +1,13 @@
+[project]
+name = "panther-dashboard"
+version = "0.1.0"
+description = "Read-only dashboard backend and state assembly."
+requires-python = ">=3.12,<3.13"
+dependencies = ["panther-core", "panther-data", "pydantic>=2.9", "pyyaml>=6.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/panther_dashboard"]

@@ -1,11 +1,11 @@
 # Status
 
 **Last updated:** 2026-11-20
-**Current phase:** M0 — Bootstrap (in progress)
+**Current phase:** M0 — Bootstrap (code complete; waiting on the first CI run)
 
 | Phase | Status | Notes |
 |---|---|---|
-| M0 Bootstrap | In progress | plan, ADRs, git branch, ignore rules done; workspace/tooling next |
+| M0 Bootstrap | In progress | workspace, tooling, CI, docs and fixtures in place |
 | M1 `panther-core` | Planned | — |
 | M2 `panther-data` | Planned | — |
 | M3 `panther-measure` | Planned | — |
@@ -20,14 +20,27 @@
 
 ## Open work in the current phase
 
-- Create the uv workspace and the eight package members plus `apps/panther-cli`.
-- Add ruff, pyright, pytest, hypothesis, pytest-cov, import-linter, pydantic.
-- Add the CI workflow.
-- Capture reference fixtures from `panther-old` into `tests/parity/fixtures/`.
+- Confirm the first CI run on `lalit` is green.
+- Then close M0 and start M1 (`panther-core`).
 
-## Recently completed
+## Completed
 
 - `lalit` branch created from `master`; old tree removed from the branch (kept on `master` and in
   `panther-old/`).
 - `.gitignore` and `.containerignore` rewritten; `panther-old/` ignored (B20).
 - Rewrite plan written; ADRs 0001–0011 recorded.
+- uv workspace with eight packages plus `apps/panther-cli`; `uv.lock` generated.
+- Tooling: ruff, pyright `strict`, pytest, hypothesis, pytest-cov, import-linter, pydantic.
+- CLI bootstrap: `panther --help` and `panther version`.
+- CI workflow `.github/workflows/ci.yml`.
+- Reference `llama-perplexity` fixtures copied to `tests/parity/fixtures/llama/`.
+
+## Verification
+
+```
+uv sync
+uv run ruff check .        # passes
+uv run pyright             # 0 errors
+uv run lint-imports        # 1 contract kept
+uv run pytest -q           # 11 passed
+```
