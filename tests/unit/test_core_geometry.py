@@ -109,7 +109,7 @@ def test_invalid_geometry_is_rejected() -> None:
             intermediate_size=4,
             vocab_size=4,
         )
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(ValueError, match="greater than 0"):
         GeometrySpec(
             num_hidden_layers=0,
             hidden_size=8,

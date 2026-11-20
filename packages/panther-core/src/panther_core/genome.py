@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import random
 from collections.abc import Mapping
-from dataclasses import dataclass
+
+from pydantic import BaseModel, ConfigDict
 
 from panther_core.geometry import ModelGeometry
 from panther_core.quant import QuantType
@@ -18,12 +19,13 @@ from panther_core.ram import RamModel
 Assignment = dict[str, QuantType]
 
 
-@dataclass(frozen=True, slots=True)
-class RamWindow:
+class RamWindow(BaseModel):
     """An inclusive byte range a genome's total RAM must fall in."""
 
-    lo: int
-    hi: int
+    model_config = ConfigDict(frozen=True)
+
+    lo: int  # minimum total RAM bytes
+    hi: int  # maximum total RAM bytes
 
     def contains(self, ram: int) -> bool:
         return self.lo <= ram <= self.hi

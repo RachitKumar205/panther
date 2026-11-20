@@ -23,13 +23,16 @@ def build() -> tuple[Genome, RamModel, ModelGeometry]:
         model_type="qwen2",
     )
     geometry = ModelGeometry.from_spec(spec)
-    ram_model = RamModel(geometry=geometry, runtime=RuntimeConfig(4096, "Q8_0", 0.4))
+    ram_model = RamModel(
+        geometry=geometry,
+        runtime=RuntimeConfig(context_tokens=4096, kv_cache_type="Q8_0", overhead_gib=0.4),
+    )
     allowed = geometry.allowed(SEARCH_FORMATS, IMATRIX_FORMATS)
     # Higher bits -> lower error, so repair can rank moves.
     error = {n: {t: 10.0 / t.bits_per_weight for t in ts} for n, ts in allowed.items()}
     window = RamWindow(
-        ram_model.total_bytes({n: QuantType.Q2_K for n in allowed}),
-        ram_model.total_bytes({n: QuantType.Q4_K for n in allowed}),
+        lo=ram_model.total_bytes({n: QuantType.Q2_K for n in allowed}),
+        hi=ram_model.total_bytes({n: QuantType.Q4_K for n in allowed}),
     )
     genome = Genome(geometry, ram_model, allowed, window, error, rng=random.Random(0))
     return genome, ram_model, geometry

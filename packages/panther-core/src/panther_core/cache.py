@@ -1,19 +1,20 @@
 """Content-addressed cache keys.
 
 A result is only reusable if it was produced from *every* input that can change it. This module
-provides a deterministic hash over arbitrary, ordered-or-not inputs so cache keys are complete and
-stable (fixes bug B1: the old keys silently omitted inputs).
+provides a deterministic hash over arbitrary inputs so cache keys are complete and stable
+(fixes bug B1: the old keys silently omitted inputs).
 """
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from enum import Enum
 from pathlib import Path
 from typing import cast
+
+from pydantic import BaseModel
 
 _HEX_DIGITS = 16
 """Length of the returned key (64 bits): plenty for the number of records a run produces."""
@@ -31,8 +32,8 @@ def _canonical(value: object) -> object:
         return {"$bytes": value.hex()}
     if isinstance(value, Path):
         return value.as_posix()
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return _canonical(dataclasses.asdict(value))
+    if isinstance(value, BaseModel):
+        return _canonical(value.model_dump(mode="json"))
     if isinstance(value, Mapping):
         items = cast(Mapping[object, object], value).items()
         return {str(k): _canonical(v) for k, v in sorted(items, key=lambda kv: str(kv[0]))}
@@ -46,9 +47,9 @@ def _canonical(value: object) -> object:
 def key(*parts: object) -> str:
     """A stable, short content hash of ``parts``.
 
-    Dictionaries and sets are order-insensitive; :class:`~pathlib.Path` and :class:`str` compare
-    equal; enums are identified by name; dataclasses by their fields. Callers are responsible for
-    including *every* input that affects the result.
+    Dicts and sets are order-insensitive; :class:`~pathlib.Path` and :class:`str` compare equal;
+    enums are identified by name; pydantic models by their (mode-json) fields. Callers must include
+    *every* input that affects the result.
     """
     payload = json.dumps(
         [_canonical(part) for part in parts],

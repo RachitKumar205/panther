@@ -81,9 +81,9 @@ def test_unknown_kv_cache_type_is_rejected() -> None:
 
 
 def test_invalid_runtime_values_are_rejected() -> None:
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(ValueError, match="greater than 0"):
         RuntimeConfig(context_tokens=0, kv_cache_type="Q8_0", overhead_gib=0.4)
-    with pytest.raises(ValueError, match="non-negative"):
+    with pytest.raises(ValueError, match="greater than or equal to 0"):
         RuntimeConfig(context_tokens=4096, kv_cache_type="Q8_0", overhead_gib=-1)
 
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from panther_core.cache import key
 from panther_core.quant import QuantType
@@ -40,14 +40,15 @@ def test_bytes_are_hashed_by_content() -> None:
     assert key(b"abc") != key(b"abd")
 
 
-@dataclass(frozen=True, slots=True)
-class _Thing:
+class _Thing(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     name: str
     count: int
 
 
-def test_dataclass_is_hashed_by_fields() -> None:
-    assert key(_Thing("x", 1)) == key({"name": "x", "count": 1})
+def test_model_is_hashed_by_fields() -> None:
+    assert key(_Thing(name="x", count=1)) == key({"name": "x", "count": 1})
 
 
 def test_distinct_inputs_give_distinct_keys() -> None:

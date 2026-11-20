@@ -4,7 +4,7 @@
 
 | Package | Phase | Responsibility | Heavy deps |
 |---|---|---|---|
-| `panther-core` | M1 | types, geometry, RAM model, genome, score/statistics, cache keys | `numpy`, `gguf` |
+| `panther-core` | M1 | types, geometry, RAM model, genome, score/statistics, cache keys | `numpy`, `gguf`, `pydantic` |
 | `panther-data` | M2 | config schemas, split manifests, prompts, integrity checks | `pydantic`, `pyyaml`, `pyarrow` |
 | `panther-measure` | M3 | `LlamaBackend`, parsers, result cache, references | `numpy`, `gguf` |
 | `panther-quant` | M5 | store, imatrix, GPTQ rounding, distillation | `torch`, `transformers`, `huggingface_hub`, `gguf` |

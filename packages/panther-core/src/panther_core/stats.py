@@ -12,12 +12,12 @@ two statistical defects of the old implementation (bug B4):
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from enum import StrEnum
 from math import hypot, sqrt
 
 import numpy as np
 from numpy.typing import NDArray
+from pydantic import BaseModel, ConfigDict
 
 Correctness = Mapping[str, Sequence[bool]]
 """Task name -> per-question correctness (0/1 or bool)."""
@@ -104,20 +104,16 @@ def kl_diff_std_error(ours: Sequence[float], theirs: Sequence[float]) -> float:
     return _std_error(a - b)
 
 
-@dataclass(frozen=True, slots=True)
-class Score:
+class Score(BaseModel):
     """A file's fitness: flips plus KL, and their standard errors."""
 
-    flips: float
-    """Flip rate in percent."""
-    kl: float
-    """Mean KL divergence."""
-    kl_weight: float = 10.0
-    """Weight of one unit of KL relative to one point of flips."""
-    flips_se: float = 0.0
-    """Standard error of the flip rate, percent."""
-    kl_se: float = 0.0
-    """Standard error of the KL difference from the compared file, in KL units."""
+    model_config = ConfigDict(frozen=True)
+
+    flips: float  # flip rate, percent
+    kl: float  # mean KL divergence
+    kl_weight: float = 10.0  # KL weight relative to flips
+    flips_se: float = 0.0  # SE of the flip rate, percent
+    kl_se: float = 0.0  # SE of the KL difference, in KL units
 
     @property
     def value(self) -> float:
