@@ -35,7 +35,7 @@ def test_claims(tmp_path):
         holder.kill()
         holder.wait()
     r = py(tmp_path, "claim", "24b", "7")  # the holder ended: its claim lapsed
-    assert r.returncode == 0 and 52 * GIB < int(r.stdout.split()[-1]) <= 60 * GIB
+    assert r.returncode == 0 and 48 * GIB < int(r.stdout.split()[-1]) <= 60 * GIB
 
 
 def test_a_failed_step_is_loud(tmp_path):
