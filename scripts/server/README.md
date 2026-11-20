@@ -7,12 +7,13 @@ it works" explains every step. Each step skips work already on disk and writes p
 | Step | Output |
 |---|---|
 | `fetch` (CPU container) | `data/hf/<model>` |
+| `prompts` (CPU container, before the GPU steps) | `data/splits/text/prompts.json`: the dataset's chat prompts (OpenAssistant oasst1, Apache-2.0, pinned), 300 / 150 / 150 for train / select / test, none sharing 8 words with a benchmark question (how many were dropped is in the file); then the split check (decision 3): web documents, questions and prompts in one split each, files matching their manifests' hashes, else the contest stops |
 | `store` | `data/store/<model>/`: 16-bit original, importance matrix, one type copy per type (14), error-compensated |
 | `error` | `rewrite/<model>/error.json` |
-| `refs` | `data/reference/<model>/{selection,answers}.kld`, the original's answers and question results |
-| `preset` | `rewrite/budget-B/preset-<model>.json` |
+| `refs` | `data/splits/text/chat-<model>-{train,select,test}.txt` (the original's chat answers), `{select,test}-<model>.txt` (chat + web, one file each), `data/reference/<model>/{select,test}.kld`, the original's question results |
+| `preset` | `rewrite/budget-B/preset-<model>.json`: every fitting preset scored on all selection questions (`tried`), the most accurate one's held-out test (`test`) and its score on the GA's questions (`score_fit`, the base of the relative score) |
 | `ga` | `rewrite/budget-B/list-<model>-v2.json` (top 3), `ga-<model>-v2.json` (every genome), `ga-<model>-live.json` |
-| `final` | `rewrite/<model>/tuned/` (the distilled top 3), `rewrite/budget-B/winner-<model>-v2.json` (winner, verdict, held-out numbers for ours, preset, original) |
+| `final` | `rewrite/<model>/tuned/` (the top 3 distilled on the train text, chat + web), `rewrite/budget-B/winner-<model>-v2.json` (winner, verdict, held-out numbers for ours, preset, original) |
 | `bundle`, `upload` | `data/pi_bundle/budget-B-<size>-v2/` → private Hugging Face repo `panther-<size>-<B>g-v2` |
 | `qatdata`, `qat` (`./panther qat C`, an experiment) | `rewrite/<model>/qat/`: token samples, the rebuilt undistilled winner, Stage 1, Stage 1 + 2, Stage 2 only; `rewrite/budget-B/qat-<model>.json` (held-out results vs the winner and the preset) |
 

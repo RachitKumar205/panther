@@ -1,5 +1,6 @@
-"""Paired bootstrap: the difference in mean accuracy (mean over tasks of each task's accuracy) between two files
-answered on the same questions, with its 95% interval. WIN / LOSE when the whole interval is above / below 0."""
+"""Accuracy, flips, and the relative score with its 95% interval: one file's score (flips % + kl_weight x KL) as a
+share of another's (x 100), both answered on the same questions. WIN / LOSE when the whole interval is below / above
+100 (lower is better)."""
 
 from __future__ import annotations
 
@@ -15,17 +16,24 @@ def flips(correct: dict[str, np.ndarray], original: dict[str, np.ndarray]) -> fl
     return 100 * float(np.mean([np.mean(correct[t] != original[t]) for t in original]))
 
 
-def compare(a: dict[str, np.ndarray], b: dict[str, np.ndarray], n: int = 10_000) -> tuple[float, float, float]:
-    """(a - b, low, high) in accuracy points, resampling questions within each task."""
-    rng = np.random.default_rng(0)
-    boot = np.zeros(n)
-    for t in a:
-        d = a[t].astype(float) - b[t].astype(float)
-        boot += d[rng.integers(0, len(d), (n, len(d)))].mean(axis=1)
-    boot *= 100 / len(a)
-    lo, hi = np.quantile(boot, [0.025, 0.975])
-    return acc(a) - acc(b), float(lo), float(hi)
+def score_se(a: dict[str, np.ndarray], b: dict[str, np.ndarray], original: dict[str, np.ndarray], kl_se_a: float,
+             kl_se_b: float, kl_weight: float) -> float:
+    """Standard error of the difference of two scores (flips % + kl_weight x KL). Flips: paired over the same
+    questions, per task the SE of the mean difference of the flip indicators, combined as the mean over tasks;
+    KL: the two runs' own SEs (llama-perplexity's), independent."""
+    f = 100 * np.sqrt(sum(np.var((a[t] != o).astype(float) - (b[t] != o).astype(float), ddof=1) / len(o)
+                          for t, o in original.items())) / len(original)
+    return float(np.hypot(f, kl_weight * np.hypot(kl_se_a, kl_se_b)))
+
+
+def relative(a: dict[str, np.ndarray], b: dict[str, np.ndarray], original: dict[str, np.ndarray], kl_a: float,
+             kl_se_a: float, kl_b: float, kl_se_b: float, kl_weight: float) -> tuple[float, float, float]:
+    """a's score as % of b's, with its 95% interval: 100 x (score_a +- 1.96 SE of the difference) / score_b."""
+    sa, sb = flips(a, original) + kl_weight * kl_a, flips(b, original) + kl_weight * kl_b
+    h = 1.96 * score_se(a, b, original, kl_se_a, kl_se_b, kl_weight)
+    return 100 * sa / sb, 100 * (sa - h) / sb, 100 * (sa + h) / sb
 
 
 def verdict(lo: float, hi: float) -> str:
-    return "WIN" if lo > 0 else "LOSE" if hi < 0 else "TIE"
+    """From a relative score's interval: below 100 is better than the other file."""
+    return "WIN" if hi < 100 else "LOSE" if lo > 100 else "TIE"

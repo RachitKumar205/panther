@@ -1,6 +1,7 @@
 """The Panther pipeline (README: "How it works"). A contest is one model at one RAM budget (GiB).
 
   pipeline.py fetch BUDGET MODEL     # CPU container (has network): the weights at the pinned revision
+  pipeline.py prompts BUDGET MODEL   # CPU container: the dataset's chat prompts, then the check of every split
   pipeline.py run BUDGET MODEL       # GPU container: store, error, refs, preset, ga, final, bundle in order
   pipeline.py STEP BUDGET MODEL      # one of those steps; every step skips work already on disk
   pipeline.py upload BUDGET MODEL    # CPU container: the Pi bundle to Hugging Face
@@ -13,6 +14,7 @@ import fcntl
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -21,7 +23,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from hashlib import sha256
-from itertools import zip_longest
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -38,8 +40,8 @@ FIRST = {t: v // 3 for t, v in FIT.items()}  # a first look: a genome clearly wo
 ALL = dict.fromkeys(TASKS, 0)  # every selection question (llama.cpp's n = 0)
 DROP_MARGIN = 3.0  # dropped only if its first-look score is this much worse than the population's worst (~2 SE)
 WINDOW = (-0.01, 0.005)  # a genome's RAM must be within -1% / +0.5% of the budget
-POP, ELITE, MAX_EVALS, MIN_EVALS, PATIENCE, MIN_GAIN, TOP, SOLVED = 16, 4, 70, 30, 15, 0.2, 3, 4
-KL_WEIGHT = 10  # score = flips % + 10 x KL on the original's own answers (lower is better)
+POP, ELITE, MAX_EVALS, MIN_EVALS, PATIENCE, TOP, SOLVED = 16, 4, 70, 30, 15, 3, 4  # an improvement: beyond 1 SE
+KL_WEIGHT = 10  # score = flips % + 10 x KL on the select text (lower is better)
 SUFFIX = "-v2"
 FTYPE = {"Q3_K": "Q3_K_S", "Q4_K": "Q4_K_S", "Q5_K": "Q5_K_S", "IQ2_S": "IQ2_M"}  # --pure: one type everywhere
 PRESETS = {"IQ1_S": 1.56, "IQ1_M": 1.75, "IQ2_XXS": 2.06, "IQ2_XS": 2.31, "IQ2_S": 2.5, "IQ2_M": 2.7, "Q2_K_S": 2.9,
@@ -47,6 +49,20 @@ PRESETS = {"IQ1_S": 1.56, "IQ1_M": 1.75, "IQ2_XXS": 2.06, "IQ2_XS": 2.31, "IQ2_S
            "IQ4_XS": 4.25, "Q3_K_L": 4.27, "Q4_K_S": 4.58, "Q4_K_M": 4.89, "Q5_K_S": 5.54, "Q5_K_M": 5.69,
            "Q6_K": 6.56, "Q8_0": 8.5}
 BUDGET = 0
+# The dataset (README "The dataset"): train / select / test, each a web part (the existing FineWeb-Edu files) and a
+# chat part (the original's own answers to general prompts, per model). KL and perplexity are measured only on it;
+# nothing trains on anything but train.
+SPLITS = ("train", "select", "test")
+WEB = dict(zip(SPLITS, (DATA / "splits/calibration.txt", DATA / "splits/text/selection.txt",
+                        DATA / "splits/text/test_web.txt")))
+KL_CHUNKS = {"select": 48, "test": None}  # 2048-token chunks; select is read by every genome: ~100k tokens, the
+# whole chat part then the start of the web part. test is read a few times per contest: whole (~95 chunks)
+# The chat prompts: English first messages of OpenAssistant oasst1 (Apache-2.0), a fixed draw, none overlapping a
+# benchmark question
+PROMPTS = {"repo": "OpenAssistant/oasst1", "revision": "fdf72ae0827c1cda404aff25b6603abec9e3399b",
+           "file": "data/train-00000-of-00001-b42a775f407cee45.parquet",
+           "n": {"train": 300, "select": 150, "test": 150}}
+PROMPT_FILE = DATA / "splits/text/prompts.json"
 
 
 def note(msg: str) -> None:
@@ -82,6 +98,16 @@ def preset_file(model: str, p: str) -> Path:
 
 def bundle_dir(model: str, tag: str) -> Path:
     return DATA / "pi_bundle" / f"budget-{BUDGET}-{short(model).lower()}{tag}"
+
+
+def chat_text(model: str, split: str) -> Path:
+    """A split's chat part: the original's own answers to that split's prompts, in its chat template (made by refs)."""
+    return DATA / "splits/text" / f"chat-{model}-{split}.txt"
+
+
+def joined_text(model: str, split: str) -> Path:
+    """A split's chat and web parts in one file (llama-perplexity reads one); its stem is the ppl run's text name."""
+    return DATA / "splits/text" / f"{split}-{model}.txt"
 
 
 def record(kind: str, model: str, suffix: str = "") -> Path:
@@ -236,7 +262,7 @@ def store(model: str, types: list[str] | None = None) -> None:
     if not imat.exists():
         po = ["--process-output"] if MODELS[model].get("imatrix_process_output") else []
         with gpu(bf16.stat().st_size + 4 * GIB):  # the whole 16-bit model on the GPU: booked like every other job
-            subprocess.run([str(BIN / "llama-imatrix"), "-m", str(bf16), "-f", str(DATA / "splits/calibration.txt"),
+            subprocess.run([str(BIN / "llama-imatrix"), "-m", str(bf16), "-f", str(WEB["train"]),
                             "-o", f"{imat}.part.gguf", "-c", "512", "-ngl", "99", "-t", str(THREADS)] + po, check=True)
         os.rename(f"{imat}.part.gguf", imat)
     M = Model(model)
@@ -257,7 +283,7 @@ def store(model: str, types: list[str] | None = None) -> None:
         book = bf16.stat().st_size + 44 * GIB  # the model, 20 GiB of Hessians, several types rounded at once
         with gpu(book, 6 * 3600):
             round_copies(None, bf16, {t: copy_of(model, t) for t in todo},
-                         DATA / "splits/calibration.txt", max(1, int(20 * GIB // per_layer)), book)
+                         WEB["train"], max(1, int(20 * GIB // per_layer)), book)
         done.write_text(json.dumps(have + todo))
 
 
@@ -296,32 +322,26 @@ def error(model: str) -> None:
     dst.write_text(json.dumps(done))
 
 
-def jsonl(path: Path) -> list[dict]:
-    return [json.loads(x) for x in path.read_text().splitlines() if x]
-
-
 def refs(model: str) -> None:
-    """The original's reference outputs: its next-word probabilities on the selection text and on its own answers
-    (its GSM8K solutions and the multiple-choice questions with their answers), and which selection and test
-    questions it gets right (to count flips)."""
+    """The original's reference outputs: its chat answers to the prompts of every split (the dataset's chat part),
+    its next-word probabilities on the select and test text (chat + web), and which selection and held-out questions
+    it gets right (to count flips)."""
     ref, bf16 = DATA / "reference" / model, copy_of(model, "BF16")
     ref.mkdir(parents=True, exist_ok=True)
-    ans = DATA / "splits/text" / f"answers-{model}.txt"
     with gpu(bf16.stat().st_size + 12 * GIB, 4 * 3600):
-        if not ans.exists():
-            items = jsonl(DATA / "splits/tasks/selection/gsm8k.jsonl")[:200]
-            shots = jsonl(DATA / "splits/tasks/fewshot/gsm8k.jsonl")
-            sols = llama.complete(bf16, [llama.gsm8k_prompt(it["question"], shots) for it in items])
-            text = [f"Question: {it['question']}\nAnswer:{s}" for it, s in zip(items, sols)]
-            bench = DATA / "splits/text/bench.txt"  # selection multiple-choice questions with their answers
-            mc = bench.read_text().split("\n\n") if bench.exists() else []
-            ans.write_text("\n\n".join(x for pair in zip_longest(text, mc, fillvalue="") for x in pair if x) + "\n")
-        for name, text, chunks in (("selection", DATA / "splits/text/selection.txt", None), ("answers", ans, 16)):
-            if not (ref / f"{name}.kld").exists():
-                subprocess.run([str(BIN / "llama-perplexity"), "-m", str(bf16), "-f", str(text), "-c", "2048", "-b",
-                                "2048", "-ngl", "99", "-t", str(THREADS), "--kl-divergence-base", f"{ref}/{name}.part"]
+        if not all(chat_text(model, sp).exists() for sp in SPLITS):  # each model in its own chat template
+            ps = json.loads(PROMPT_FILE.read_text())["prompts"]
+            outs = llama.complete(bf16, [x["text"] for x in ps], chat=True)
+            for sp in SPLITS:
+                chat_text(model, sp).write_text("\n\n".join(o for o, x in zip(outs, ps) if x["split"] == sp) + "\n")
+        for sp, chunks in KL_CHUNKS.items():
+            if not (j := joined_text(model, sp)).exists():
+                j.write_text(chat_text(model, sp).read_text() + "\n" + WEB[sp].read_text())
+            if not (ref / f"{sp}.kld").exists():
+                subprocess.run([str(BIN / "llama-perplexity"), "-m", str(bf16), "-f", str(j), "-c", "2048", "-b",
+                                "2048", "-ngl", "99", "-t", str(THREADS), "--kl-divergence-base", f"{ref}/{sp}.part"]
                                + (["--chunks", str(chunks)] if chunks else []), check=True, capture_output=True)
-                os.rename(f"{ref}/{name}.part", ref / f"{name}.kld")
+                os.rename(f"{ref}/{sp}.part", ref / f"{sp}.kld")
         for t in TASKS:
             for n in (FIT, FIRST, ALL):
                 llama.run("task", model, bf16, "original", task=t, split="selection", n=n[t])
@@ -363,31 +383,33 @@ def correct(model: str, label: str, n: dict = ALL) -> dict[str, np.ndarray]:
 
 
 def test(model: str, path: Path, label: str) -> dict:
-    """The held-out test: 4 multiple-choice tasks, GSM8K (test split), KL on the selection text, perplexity."""
+    """The held-out test: 4 multiple-choice tasks, GSM8K (test split), KL and perplexity on the test text."""
     c = {t: np.array(llama.run("task", model, path, label, task=t, split="poc_test", n=0)["correct"]) for t in TASKS}
     c["gsm8k"] = llama.gsm8k(model, path, label, DATA / "splits/llama_tasks/poc_test/gsm8k.jsonl")
-    kl = None if label == "original" else llama.run("kl", model, path, label, reference="selection")["metrics"]
-    return {"correct": c, "kl": kl and kl["kl_mean"], "ppl": llama.run("ppl", model, path, label, text="test_web")[
-        "metrics"]["ppl"]}
+    kl = None if label == "original" else llama.run("kl", model, path, label, reference="test")["metrics"]
+    return {"correct": c, "kl": kl and kl["kl_mean"], "kl_se": kl and kl["kl_se"], "same_top": kl and kl["top1_pct"],
+            "ppl": llama.run("ppl", model, path, label, text=joined_text(model, "test").stem)["metrics"]["ppl"]}
 
 
 def score(model: str, a: dict[str, str] | None, label: str, path: Path | None = None, full: bool = False,
           cut: float | None = None) -> dict:
-    """Flips against the original and KL on its own answers (GA questions, or all selection questions if full).
+    """Flips against the original (GA questions, or all selection questions if full) and KL on the select text.
     With cut: a first look on a third of the questions; a genome already worse than cut there is dropped
     ("dropped": True, its score from that third) instead of finishing."""
     n = ALL if full else FIT
-    built = path is None and not (llama.find(model, label, reference="answers") and all(
+    built = path is None and not (llama.find(model, label, reference="select") and all(
         llama.find(model, label, task=t, split="selection", n=n[t]) for t in TASKS))
 
     def result(n: dict) -> dict:
         c = correct(model, label, n)
         f = stats.flips(c, correct(model, "original", n))
-        return {"score": f + KL_WEIGHT * kl, "flips": f, "kl": kl, "accuracy": stats.acc(c)}
+        return {"score": f + KL_WEIGHT * kl, "flips": f, "kl": kl, "kl_se": se, "same_top": top1,
+                "accuracy": stats.acc(c)}
     try:
         path = path or (build(model, a) if built else Path("/dev/null"))
         with gpu(int(1.1 * path.stat().st_size) + 4 * GIB, 1800):
-            kl = llama.run("kl", model, path, label, reference="answers")["metrics"]["kl_mean"]
+            m = llama.run("kl", model, path, label, reference="select")["metrics"]
+            kl, se, top1 = m["kl_mean"], m["kl_se"], m["top1_pct"]  # same top word %: reported, not scored
             if cut is not None:
                 for t in TASKS:
                     llama.run("task", model, path, label, task=t, split="selection", n=FIRST[t])
@@ -399,6 +421,20 @@ def score(model: str, a: dict[str, str] | None, label: str, path: Path | None = 
         if built and path:
             path.unlink(missing_ok=True)
     return result(n)
+
+
+def relative(r: dict, base: float) -> dict:
+    """With the score as a share of the preset's on the same questions and text (100: the preset's damage, 0: none)."""
+    return {**r, "relative": 100 * r["score"] / base}
+
+
+def versus(a: dict, b: dict, orig: dict[str, np.ndarray]) -> dict:
+    """a against b (each with "correct", "kl", "kl_se"; the same questions and text): a's relative score (100 = b's
+    damage) and its 95% interval, from the same SE as the GA's. diff and ci are that minus 100 (negative = better
+    than b), so the dashboard draws them around 0 as before."""
+    rel, lo, hi = stats.relative(a["correct"], b["correct"], orig, a["kl"], a["kl_se"], b["kl"], b["kl_se"], KL_WEIGHT)
+    return {"relative": rel, "relative_ci": [lo, hi], "diff": rel - 100, "ci": [lo - 100, hi - 100],
+            "verdict": stats.verdict(lo, hi), "unit": "relative score - 100"}
 
 
 def _score_job(job):
@@ -518,12 +554,13 @@ def ga(model: str) -> None:
         if time.time() - f.stat().st_mtime > 3600:
             f.unlink()
     G, sm = Genes(model, BUDGET), short(model)
+    base = load("preset", model)["score_fit"]  # the preset's score on the GA questions: relative scores
     if not all(llama.find(model, "original", task=t, split="selection", n=FIRST[t]) for t in TASKS):
         with lock(f"{model}-first"), gpu(copy_of(model, "BF16").stat().st_size + 8 * GIB, 3600):  # first look
             for t in TASKS:
                 llama.run("task", model, copy_of(model, "BF16"), "original", task=t, split="selection", n=FIRST[t])
     queue, pop, seen, scored, hist = G.initial(preset_layout(model)), [], set(), [], []
-    best, last_gain, n, dropped = float("inf"), 0, 0, 0
+    best, last_gain, n, dropped, top, se = float("inf"), 0, 0, 0, None, 0.0
     note(f"{sm} GA: {len(queue)} starting genomes")
 
     def child() -> dict[str, str]:
@@ -558,6 +595,7 @@ def ga(model: str) -> None:
             except Exception as e:  # noqa: BLE001  (one failed genome never stops the search)
                 note(f"{sm} GA: genome {n} failed ({e})")
                 r = {"score": float("inf")}
+            r = relative(r, base)
             hist.append({"n": n, "digest": digest(a), **r})
             if r.get("dropped"):
                 dropped += 1
@@ -565,10 +603,14 @@ def ga(model: str) -> None:
                 scored.append((r["score"], a))
                 pop = sorted(pop + [(r["score"], digest(a), a)])[:POP]
             if r["score"] < best and not r.get("dropped"):
-                last_gain, best = (n if r["score"] < best - MIN_GAIN else last_gain), r["score"]
+                if top:  # an improvement only beyond 1 SE of the difference (flips paired on the GA questions)
+                    se = stats.score_se(correct(model, f"v2:{digest(a)}", FIT), correct(model, top[0], FIT),
+                                        correct(model, "original", FIT), r["kl_se"], top[1], KL_WEIGHT)
+                last_gain = n if best - r["score"] > se else last_gain
+                best, top = r["score"], (f"v2:{digest(a)}", r["kl_se"])
                 record("ga", model, "-live").write_text(json.dumps({"n": n, **r, "assignment": a}))
                 note(f"{sm} GA: genome {n}: new best score {best:.2f} (flips {r['flips']:.2f}%, KL {r['kl']:.4f}, "
-                     f"accuracy {r['accuracy']:.2f}, RAM {G.ram(a) / GIB:.3f} GiB)")
+                     f"accuracy {r['accuracy']:.2f}, RAM {G.ram(a) / GIB:.3f} GiB); relative {r['relative']:.1f}")
             elif n % 10 == 0:
                 note(f"{sm} GA: {n} genomes, best score {best:.2f} ({dropped} dropped after a first look)")
             if n + len(running) < MAX_EVALS and (n < MIN_EVALS or n - last_gain < PATIENCE):
@@ -580,25 +622,29 @@ def ga(model: str) -> None:
                         picks = []
                     queue += picks + [G.mutate(p) for p in picks[:2]]
                 submit(queue.pop(0) if queue else child())
-    lst.write_text(json.dumps({f"{sm}:ga{i}": {"assignment": a, "score": s, "ram_gib": G.ram(a) / GIB}
+    lst.write_text(json.dumps({f"{sm}:ga{i}": {"assignment": a, "score": s, "relative": 100 * s / base,
+                                              "ram_gib": G.ram(a) / GIB}
                                for i, (s, _, a) in enumerate(pop[:TOP], 1)}, indent=1))
     record("ga", model, SUFFIX).write_text(json.dumps(hist, indent=1))
-    note(f"{sm} GA done: {n} genomes ({dropped} dropped after a first look); best score {best:.2f}")
+    why = (f"{n - last_gain} genomes without an improvement beyond 1 SE (best {best:.2f}, SE {se:.2f})"
+           if n - last_gain >= PATIENCE else f"{MAX_EVALS} genomes, best score {best:.2f}")
+    note(f"{sm} GA done: {n} genomes ({dropped} dropped after a first look); {why}")
 
 
 # --- the competitor and the final comparison -------------------------------------------------------------------
 
 def preset(model: str) -> None:
-    """llama.cpp's best preset that fits: of the two largest whose RAM fits the budget, the more accurate on the
-    held-out test. If none fits, the smallest preset (it then has more RAM than we do)."""
+    """llama.cpp's best preset that fits: of every preset whose RAM fits the budget, the most accurate on all
+    selection questions (ties: lower KL on the select text); only it takes the held-out test. If none fits, the
+    smallest preset (it then has more RAM than we do). Also its score on the GA's questions: the GA's relative base."""
     pj = record("preset", model)
-    if pj.exists() and json.loads(pj.read_text()).get("test"):
+    if pj.exists() and "score_fit" in json.loads(pj.read_text()):  # a record from before decision 7 is redone
         return
     M, top = Model(model), BUDGET * (1 + WINDOW[1]) * GIB
     room = M.avg_bpw(BUDGET * (1 + WINDOW[1]))
     fit, over = [], []
     for p, b in sorted(PRESETS.items(), key=lambda x: -x[1]):
-        if len(fit) == 2 or (b > room + 0.3 and p != "IQ1_S"):
+        if b > room + 0.3 and p != "IQ1_S":  # clearly too big (nominal bits per weight); IQ1_S is the fallback
             continue
         path = preset_file(model, p)
         if not path.exists():
@@ -610,41 +656,46 @@ def preset(model: str) -> None:
         (fit if ram <= top else over).append((p, path, ram))
         note(f"{short(model)} preset {p}: {ram / GIB:.3f} GiB ({'fits' if ram <= top else 'too big'})")
     fit = fit or [min(over, key=lambda x: x[2])]
-    res = {}
-    for p, path, ram in fit:
-        with gpu(path.stat().st_size + 12 * GIB, 4 * 3600):
-            r = test(model, path, f"preset:{p}")
-        res[p] = {"ram_gib": ram / GIB, "accuracy": stats.acc(r["correct"]), "kl": r["kl"], "ppl": r["ppl"]}
+    res = {p: {"ram_gib": ram / GIB, **score(model, None, f"preset:{p}", path=path, full=True)} for p, path, ram in fit}
     p = max(res, key=lambda x: (round(res[x]["accuracy"], 1), -res[x]["kl"]))
-    pj.write_text(json.dumps({"preset": p, "over_budget": res[p]["ram_gib"] * GIB > top, "test": res[p],
+    with gpu(preset_file(model, p).stat().st_size + 12 * GIB, 4 * 3600):
+        r = test(model, preset_file(model, p), f"preset:{p}")
+    t = {"ram_gib": res[p]["ram_gib"], "accuracy": stats.acc(r["correct"]), "kl": r["kl"], "ppl": r["ppl"]}
+    fs = score(model, None, f"preset:{p}", path=preset_file(model, p))["score"]  # the base of the GA's relative score
+    pj.write_text(json.dumps({"preset": p, "over_budget": t["ram_gib"] * GIB > top, "test": t, "score_fit": fs,
                               "tried": res}, indent=1))
-    for q, path, _ in over:
+    for q, path, _ in fit + over:
         if q != p:
             path.unlink(missing_ok=True)
-    note(f"{short(model)} preset {p}: held-out accuracy {res[p]['accuracy']:.2f}, KL {res[p]['kl']:.4f}")
+    note(f"{short(model)} preset {p}: held-out accuracy {t['accuracy']:.2f}, KL {t['kl']:.4f} (selection accuracy "
+         f"{res[p]['accuracy']:.2f}, best of {len(res)})")
 
 
 def summary(r: dict, orig: dict) -> dict:
     """A held-out test's numbers as the result files store them (flips against the original's answers)."""
-    return {"accuracy": stats.acc(r["correct"]), "kl": r["kl"], "ppl": r["ppl"],
+    return {"accuracy": stats.acc(r["correct"]), "kl": r["kl"], "same_top": r.get("same_top"), "ppl": r["ppl"],
             "flips": stats.flips(r["correct"], orig["correct"]),
             "per_task": {t: 100 * float(np.mean(v)) for t, v in r["correct"].items()}}
 
 
 def final(model: str) -> int:
-    """The GA's top 3, each distilled (the original as teacher) and undistilled, scored on all selection questions:
-    the lowest score wins. Guard: not less accurate than the preset there. Then both on the held-out test, question
-    by question. Overlapped: one distillation at a time (it needs most of the GPU) while everything already built is
-    scored beside it, and the held-out tests run side by side."""
+    """The GA's top 3, each distilled (the original as teacher, on the train text: nothing the finalists are ranked
+    or tested on) and undistilled, scored on all selection questions and the select text: the lowest score wins.
+    Guard: a warning if clearly worse than the preset there (relative score). Then both on the held-out test: the
+    verdict is our relative score there (flips on the held-out questions, KL on the test text) and its interval.
+    Overlapped: one distillation at a time (it needs most of the GPU) while everything already built is scored beside
+    it, and the held-out tests run side by side."""
     from panther.distill import distill
     sm, bf16 = short(model), copy_of(model, "BF16")
     items, p = load("list", model, SUFFIX), load("preset", model)["preset"]
     pf, pl, files, rows, one = preset_file(model, p), f"preset:{p}", {}, {}, threading.Lock()
+    base = load("preset", model)["tried"][p]["score"]  # the preset's score on all selection questions (preset step)
 
     def scored(name: str, label: str, path: Path) -> None:
-        rows[name] = r = score(model, None, label, path=path, full=True)
+        rows[name] = r = relative(score(model, None, label, path=path, full=True), base)
         note(f"{sm} final {name}: score {r['score']:.2f} (flips {r['flips']:.2f}%, KL {r['kl']:.4f}, accuracy "
-             f"{r['accuracy']:.2f}) on all selection questions")
+             f"{r['accuracy']:.2f}) on all selection questions; relative {r['relative']:.1f}; same top word "
+             f"{r['same_top']:.2f}%")
 
     def finalist(k: str, it: dict, ex: ThreadPoolExecutor) -> list:
         dg, plain = digest(it["assignment"]), f"{k} undistilled"  # distillation can hurt near-lossless files
@@ -654,8 +705,7 @@ def final(model: str) -> int:
             if not files[k].exists():
                 try:
                     with gpu(bf16.stat().st_size + 20 * GIB, 3 * 3600):  # student weights + activations
-                        distill(files[plain], bf16, [DATA / "splits/text" / f"answers-{model}.txt",
-                                                     DATA / "splits/calibration.txt"],
+                        distill(files[plain], bf16, [chat_text(model, "train"), WEB["train"]],
                                 files[k], lambda m: note(f"{sm} {k} {m}"))
                 except Exception as e:  # noqa: BLE001  (an architecture transformers cannot load from GGUF)
                     if "out of memory" in str(e).lower():
@@ -672,11 +722,12 @@ def final(model: str) -> int:
     win = min(rows, key=lambda k: rows[k]["score"])
     item = items[win.split()[0]]
     label = label_of(win, item["assignment"])
-    d, lo, hi = stats.compare(correct(model, label), correct(model, pl))
-    note(f"{sm} guard: {win} vs preset {p} on all selection questions: {d:+.2f} pts [{lo:+.2f}, {hi:+.2f}]")
-    if hi < 0:
-        note(f"{sm} guard: WORSE than the preset; not taken as our result")
-        return 2
+    g = versus({**rows[win], "correct": correct(model, label)}, {**jobs[0].result(), "correct": correct(model, pl)},
+               correct(model, "original"))  # the guard: the same rule as the verdict, on selection data
+    note(f"{sm} guard: {win} vs preset {p} on all selection questions: relative {g['relative']:.1f} "
+         f"[{g['relative_ci'][0]:.1f}, {g['relative_ci'][1]:.1f}]")
+    if warn := g["verdict"] == "LOSE":  # reported, not a stop: a contest that would lose still gets its verdict
+        note(f"{sm} guard: WORSE than the preset on selection questions; held-out test run anyway")
 
     def held(path: Path, lab: str) -> dict:
         with gpu(path.stat().st_size + 12 * GIB, 4 * 3600):
@@ -685,9 +736,12 @@ def final(model: str) -> int:
         a, b = ex.submit(held, files[win], label), ex.submit(held, pf, pl)
         orig = test(model, bf16, "original")
         ours, theirs = a.result(), b.result()
-    d, lo, hi = stats.compare(ours["correct"], theirs["correct"])
+    # The verdict: our relative score on held-out data (relative, relative_ci; diff, ci = those - 100, negative =
+    # better than the preset); the accuracy difference (accuracy_diff) is reported, not judged
+    v = versus(ours, theirs, orig["correct"])
     res = {"winner": win, "file": str(files[win]), "assignment": item["assignment"], "ram_gib": item["ram_gib"],
-           "preset": p, "diff": d, "ci": [lo, hi], "verdict": stats.verdict(lo, hi)}
+           "preset": p, **v, "accuracy_diff": stats.acc(ours["correct"]) - stats.acc(theirs["correct"]),
+           "selection": rows[win], "preset_score": base, "guard": {**g, "warning": warn}}
     for k, r in (("ours", ours), ("preset_test", theirs), ("original", orig)):
         res[k] = summary(r, orig)
     record("winner", model, SUFFIX).write_text(json.dumps(res, indent=1))
@@ -695,8 +749,11 @@ def final(model: str) -> int:
         if f != files[win]:
             f.unlink(missing_ok=True)
     note(f"{sm} held-out test vs preset {p}: {res['ours']['accuracy']:.2f} vs {res['preset_test']['accuracy']:.2f} "
-         f"(original {res['original']['accuracy']:.2f}) | our winner {d:+.2f} pts [{lo:+.2f}, {hi:+.2f}] "
-         f"{res['verdict']}, flips {res['ours']['flips']:.2f} vs {res['preset_test']['flips']:.2f}%")
+         f"(original {res['original']['accuracy']:.2f}, ours - preset {res['accuracy_diff']:+.2f} pts) | our winner "
+         f"{v['diff']:+.2f} rel [{v['ci'][0]:+.2f}, {v['ci'][1]:+.2f}] {v['verdict']} (relative score "
+         f"{v['relative']:.1f}, 100 = the preset), flips {res['ours']['flips']:.2f} vs "
+         f"{res['preset_test']['flips']:.2f}%, same top word "
+         f"{res['ours']['same_top']:.2f} vs {res['preset_test']['same_top']:.2f}%")
     return 0
 
 
@@ -742,9 +799,117 @@ def qatupload(model: str) -> None:
     r = load("qat", model)["stage 1 + 2"]
     d = _pack(model, f, f"{SUFFIX}-qat", {"method": "EfficientQAT (Block-AP weights only, then scales end to end)",
                                           "held_out_accuracy": round(r["held_out"]["accuracy"], 2),
-                                          "vs_winner": {k: r["vs_winner"][k] for k in ("diff", "ci", "verdict")}})
+                                          "vs_winner": {k: r["vs_winner"].get(k, "accuracy points")
+                                                        for k in ("diff", "ci", "verdict", "unit")}})
     repo = _push(model, f"{SUFFIX}-qat", d)
     note(f"{short(model)} QAT file uploaded: {repo} (held-out {r['held_out']['accuracy']:.2f})")
+
+
+def words(s: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", s.lower())
+
+
+def strings(x) -> list[str]:
+    """Every string in a parsed JSON record."""
+    vs = x.values() if isinstance(x, dict) else x if isinstance(x, list) else []
+    return [x] if isinstance(x, str) else [y for v in vs for y in strings(v)]
+
+
+def overlapping(prompts: list[str], texts: list[str], n: int = 8) -> set[int]:
+    """The prompts that share a run of n words with any of the texts (one shorter than n words: found inside one),
+    compared lowercased, on letters and digits only."""
+    grams, shorts, hit = {}, {}, set()
+    for k, p in enumerate(prompts):
+        w = words(p)
+        if len(w) < n:
+            shorts[k] = f" {' '.join(w)} "
+        for i in range(len(w) - n + 1):
+            grams.setdefault(" ".join(w[i:i + n]), []).append(k)
+    for t in texts:
+        w = words(t)
+        hit.update(k for i in range(len(w) - n + 1) for k in grams.get(" ".join(w[i:i + n]), ()))
+        joined = f" {' '.join(w)} "
+        hit.update(k for k, s in shorts.items() if s in joined)
+    return hit
+
+
+LABELS = ("id", "task", "source_split", "key", "subject")  # a record's bookkeeping, not its question
+
+
+def questions(group: str) -> dict[str, list[list[str]]]:
+    """A question split's records (tasks/<group>/*.jsonl), each as the strings of its question and answers, by file."""
+    return {f.name: [strings({k: v for k, v in json.loads(x).items() if k not in LABELS})
+                     for x in f.read_text().split("\n") if x]  # not splitlines: questions hold U+2028
+            for f in sorted((DATA / "splits/tasks" / group).glob("*.jsonl"))}
+
+
+def benchmark() -> list[str]:
+    """Every selection and held-out question, one text per file (with the held-out llama.cpp task files)."""
+    qs = ["\n".join(y for r in rs for y in r) for g in ("selection", "test") for rs in questions(g).values()]
+    return qs + [g.read_bytes().decode("utf-8", "ignore")
+                 for g in (DATA / "splits/llama_tasks/poc_test").iterdir() if g.is_file()]
+
+
+def prompts(model: str) -> None:
+    """CPU, with internet; ./panther runs it before a contest's GPU steps. The dataset's chat prompts (made once for
+    every model): people's instructions, chat and everyday maths from a pool no other split uses, deduplicated, any
+    sharing 8 words with a benchmark question dropped, then cut into train / select / test by a fixed seed. Then the
+    check of every split."""
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download
+    with lock("prompts"):
+        if not PROMPT_FILE.exists():
+            f = hf_hub_download(PROMPTS["repo"], PROMPTS["file"], repo_type="dataset", revision=PROMPTS["revision"])
+            cols = ["text", "parent_id", "role", "lang", "deleted", "review_result"]
+            t = pq.read_table(f, columns=cols).to_pydict()
+            pool = {" ".join(words(x)): x for x, up, r, lang, gone, ok in zip(*(t[c] for c in cols))
+                    if up is None and r == "prompter" and lang == "en" and not gone and ok and 20 <= len(x) <= 1000}
+            pool = sorted(pool.values())
+            random.Random(0).shuffle(pool)
+            n = sum(PROMPTS["n"].values())
+            pool = pool[:2 * n]  # checked in this order; the first n clean ones are kept, then cut in that order
+            bad = overlapping(pool, benchmark())
+            keep = [x for k, x in enumerate(pool) if k not in bad][:n]
+            assert len(keep) == n, f"only {len(keep)} clean prompts"
+            cut = [sp for sp, m in PROMPTS["n"].items() for _ in range(m)]
+            PROMPT_FILE.write_text(json.dumps({**PROMPTS, "checked": len(pool), "dropped": len(bad),
+                                               "prompts": [{"split": sp, "text": x} for sp, x in zip(cut, keep)]},
+                                              indent=1))
+            note(f"chat prompts: {n} from {PROMPTS['repo']} ({PROMPTS['n']}); {len(bad)} of {len(pool)} dropped as "
+                 f"overlapping a benchmark question")
+    check()
+
+
+def check() -> None:
+    """Decision 3: the splits share no question or text and are the files their manifests record; else the contest
+    stops. Web: no document in two splits. Questions: no selection question among the held-out ones. Chat: no prompt
+    in two splits, none sharing 8 words with a benchmark question."""
+    s, bad = DATA / "splits", []
+    want = json.loads((s / "manifest.json").read_text())["files"]
+    tasks = json.loads((s / "llama_tasks/manifest.json").read_text())["files"].values()
+    want |= {e["file"]: e["sha256"] for e in tasks}
+    used = [*WEB.values(), *(s / "tasks/selection").glob("*.jsonl"), *(s / "tasks/test").glob("*.jsonl")]
+    bad += [f"{f.relative_to(s)}: not in the manifest" for f in used if str(f.relative_to(s)) not in want]
+    bad += [f"{e['file']}: missing" for e in tasks if not (s / e["file"]).exists()]
+    bad += [f"{f}: hash differs" for f, h in want.items() if (s / f).exists() and digest_file(s / f) != h]
+    ids = {sp: set(json.loads((s / "text" / f"{p.stem}.ids.json").read_text())) for sp, p in WEB.items()}
+    bad += [f"web {a} and {b}: {n} documents in both" for a, b in combinations(SPLITS, 2)
+            if (n := len(ids[a] & ids[b]))]
+    key = lambda r: " ".join(words(" ".join(r)))  # noqa: E731  (the whole question: stem, choices, answer)
+    held = questions("test")
+    for f, rs in questions("selection").items():
+        if n := len({key(r) for r in rs} & {key(r) for r in held.get(f, [])}):
+            bad.append(f"{f}: {n} selection questions also held out")
+    ps = json.loads(PROMPT_FILE.read_text())["prompts"]
+    if (n := len(ps) - len({" ".join(words(x["text"])) for x in ps})):
+        bad.append(f"chat: {n} prompts twice")
+    if hit := overlapping([x["text"] for x in ps], benchmark()):
+        bad.append(f"chat: {len(hit)} prompts share 8 words with a benchmark question")
+    if bad:
+        note("split check FAILED: " + "; ".join(bad))
+        raise SystemExit(1)
+    note(f"split check: {sum((s / f).exists() for f in want)} files match their hashes; web documents, questions and "
+         f"chat prompts share nothing")
 
 
 def prep(model: str) -> None:
@@ -894,7 +1059,7 @@ def qatcontrol(model: str) -> None:
 
 def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
     """Each file as the final step tests the winner: all selection questions, the guard against the preset, the
-    held-out test; then question by question against the current winner and the preset."""
+    held-out test; then its relative score there against the current winner and the preset (as the verdict)."""
     sm, bf16 = short(model), copy_of(model, "BF16")
     p, win, rj = load("preset", model)["preset"], load("winner", model, SUFFIX), record("qat", model)
     pf, pl, wf, wl = preset_file(model, p), f"preset:{p}", Path(win["file"]), label_of(win["winner"], win["assignment"])
@@ -905,29 +1070,28 @@ def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
         if rj.exists() and json.loads(rj.read_text()).get(name, {}).get("label") == label:
             continue
         sel = score(model, None, label, path=path, full=True)
-        score(model, None, pl, path=pf, full=True)
-        g = stats.compare(correct(model, label), correct(model, pl))
+        g = versus({**sel, "correct": correct(model, label)},
+                   {**score(model, None, pl, path=pf, full=True), "correct": correct(model, pl)},
+                   correct(model, "original"))
         with gpu(max(path.stat().st_size, wf.stat().st_size, bf16.stat().st_size) + 12 * GIB, 4 * 3600):
             ours, theirs, winner, orig = (test(model, path, label), test(model, pf, pl), test(model, wf, wl),
                                           test(model, bf16, "original"))
-        vw, vp = stats.compare(ours["correct"], winner["correct"]), stats.compare(ours["correct"], theirs["correct"])
+        vw, vp = versus(ours, winner, orig["correct"]), versus(ours, theirs, orig["correct"])
         r = {"file": str(path), "label": label, "selection": sel, "guard_vs_preset": g, "held_out": summary(ours, orig),
-                     "vs_winner": {"diff": vw[0], "ci": vw[1:], "verdict": stats.verdict(*vw[1:]),
-                                   "winner_accuracy": stats.acc(winner["correct"])},
-                     "vs_preset": {"diff": vp[0], "ci": vp[1:], "verdict": stats.verdict(*vp[1:]), "preset": p,
-                                   "preset_accuracy": stats.acc(theirs["correct"])},
-                     "original_accuracy": stats.acc(orig["correct"])}
+             "vs_winner": {**vw, "winner_accuracy": stats.acc(winner["correct"])},
+             "vs_preset": {**vp, "preset": p, "preset_accuracy": stats.acc(theirs["correct"])},
+             "original_accuracy": stats.acc(orig["correct"])}
         with lock(f"{model}-qateval"):  # the main job and the control write the same file
             res = json.loads(rj.read_text()) if rj.exists() else {}
             rj.write_text(json.dumps({**res, name: r}, indent=1, default=float))
         note(f"{sm} QAT {name}: held-out {r['held_out']['accuracy']:.2f} (winner {stats.acc(winner['correct']):.2f}, "
              f"preset {p} {stats.acc(theirs['correct']):.2f}, original {stats.acc(orig['correct']):.2f}) | vs winner "
-             f"{vw[0]:+.2f} [{vw[1]:+.2f}, {vw[2]:+.2f}] {stats.verdict(*vw[1:])}, vs preset {vp[0]:+.2f} "
-             f"[{vp[1]:+.2f}, {vp[2]:+.2f}] {stats.verdict(*vp[1:])}")
+             f"{vw['diff']:+.2f} rel [{vw['ci'][0]:+.2f}, {vw['ci'][1]:+.2f}] {vw['verdict']}, vs preset "
+             f"{vp['diff']:+.2f} rel [{vp['ci'][0]:+.2f}, {vp['ci'][1]:+.2f}] {vp['verdict']}")
 
 
 STEPS = {"store": store, "error": error, "refs": refs, "preset": preset, "ga": ga, "final": final, "bundle": bundle}
-ALONE = {"fetch": fetch, "upload": upload, "save": save, "prep": prep, "qatdata": qatdata, "qatcontrol": qatcontrol,
+ALONE = {"fetch": fetch, "prompts": prompts, "upload": upload, "save": save, "prep": prep, "qatdata": qatdata, "qatcontrol": qatcontrol,
          "qatupload": qatupload, "qat": lambda model: qat(model, lean="lean" in sys.argv[4:]),
          "clean": lambda model: drop_copies(model, refs=True)}  # not timed, no lock
 
@@ -943,8 +1107,7 @@ def main() -> int:
         t0 = time.time()
         note(f"{short(model)} step {s}: start")
         with lock(step_lock(model, s)):
-            if STEPS[s](model) == 2:
-                return 2
+            STEPS[s](model)
         note(f"{short(model)} step {s}: done in {(time.time() - t0) / 60:.0f} min")
     return 0
 

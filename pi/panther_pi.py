@@ -91,6 +91,12 @@ def serving(server, d: Path, m: dict, opts: list[str], log: str):
         srv.wait(60)
 
 
+def fits(ram: float, m: dict) -> str:
+    """Whether the real peak RAM is within the bundle's budget (reported; the verdict does not depend on it)."""
+    b = m.get("budget_gib")
+    return "budget unknown" if b is None else f"{'FITS' if ram <= b else 'OVER'} {b} GiB"
+
+
 def write(d: Path, name: str, line: str) -> str:
     line = f"{time.strftime('%H:%M:%S')} {line}"
     (d / "results").mkdir(exist_ok=True)
@@ -112,7 +118,7 @@ def check(d: Path, label: str = "Q", server: str | Path = LLAMA, opts: list[str]
     return write(d, "queue" if queue else "runtimes",
                  f"{label} {m['file']} t={THREADS} ({PROMPT}, {GEN}){'' if queue else ' ' + ' '.join(opts)}: decode "
                  f"{t['predicted_per_second']:.2f} t/s, prefill {t['prompt_per_second']:.2f} t/s, peak RAM {ram:.3f} "
-                 f"GiB (predicted {m['predicted_ram_gib']:.3f}), throttled: {t0} -> {throttled()}")
+                 f"GiB (predicted {m['predicted_ram_gib']:.3f}), {fits(ram, m)}, throttled: {t0} -> {throttled()}")
 
 
 def spec(d: Path, label: str, server: str, opts: list[str]) -> str:

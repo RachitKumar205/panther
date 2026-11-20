@@ -1,8 +1,8 @@
 """Distillation of a finished quantized file: the original is the teacher, the quantized model the student. Only
 the per-block scales (one multiplier per 256 weights of a row: every K and IQ type stores one fp16 scale `d` per
-block, and a block's values are linear in it) and the norm weights are trained, on the original's own answers,
-to match the teacher's next-word probabilities (KL on its top 64). Whole numbers stay frozen: same file, same size,
-same speed. The new scales are written into a copy of the file."""
+block, and a block's values are linear in it) and the norm weights are trained, on the train text (the original's
+own chat answers and web text), to match the teacher's next-word probabilities (KL on its top 64). Whole numbers stay
+frozen: same file, same size, same speed. The new scales are written into a copy of the file."""
 
 from __future__ import annotations
 

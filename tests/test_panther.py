@@ -1,4 +1,4 @@
-"""Checks that need no GPU: llama.cpp output parsing, the RAM model, the GA's operators, the bootstrap."""
+"""Checks that need no GPU: llama.cpp output parsing, the RAM model, the GA's operators, the relative score."""
 
 import json
 import sys
@@ -58,10 +58,13 @@ def test_solver_proposals(genes):
     assert all(genes.fits(a) for a in genes.proposals(scored, 2))
 
 
-def test_bootstrap():
+def test_relative():
     rng = np.random.default_rng(1)
-    a = {"t": (rng.random(2000) < 0.7).astype(np.int8)}
-    b = {"t": (rng.random(2000) < 0.6).astype(np.int8)}
-    d, lo, hi = stats.compare(a, b)
-    assert 5 < d < 15 and lo > 0 and stats.verdict(lo, hi) == "WIN"
+    o = {"t": (rng.random(2000) < 0.7).astype(np.int8)}
+    a = {"t": np.where(rng.random(2000) < 0.05, 1 - o["t"], o["t"])}  # ~5% flips
+    b = {"t": np.where(rng.random(2000) < 0.10, 1 - o["t"], o["t"])}  # ~10% flips
+    rel, lo, hi = stats.relative(a, b, o, 0.1, 0.005, 0.2, 0.005, 10)
+    assert 40 < rel < 60 and hi < 100 and stats.verdict(lo, hi) == "WIN"
+    assert stats.verdict(*stats.relative(b, a, o, 0.2, 0.005, 0.1, 0.005, 10)[1:]) == "LOSE"
+    assert stats.verdict(*stats.relative(a, a, o, 0.1, 0.005, 0.1, 0.005, 10)[1:]) == "TIE"
     assert stats.flips(a, a) == 0

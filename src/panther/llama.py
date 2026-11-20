@@ -29,7 +29,8 @@ class ParseError(ValueError):
 
 
 def parse_kl(text: str) -> dict:
-    rx = {"kl_mean": r"Mean\s+KLD:\s*(-?[0-9.]+)", "top1_pct": r"Same top p:\s*([0-9.]+)"}
+    rx = {"kl_mean": r"Mean\s+KLD:\s*(-?[0-9.]+)", "kl_se": r"Mean\s+KLD:\s*-?[0-9.]+\s*±\s*([0-9.]+)",
+          "top1_pct": r"Same top p:\s*([0-9.]+)"}
     out = {k: re.search(r, text) for k, r in rx.items()}
     if not all(out.values()):
         raise ParseError("KL output incomplete")
@@ -125,15 +126,19 @@ def gsm8k_correct(completion: str, answer: str) -> bool:
     return m is not None and norm(m.group(1)) == norm(answer)
 
 
-def complete(gguf: Path, prompts: list[str], max_tokens: int = 256, log: Path | None = None) -> list[str]:
-    """Greedy completions from llama-server on a free local port, 8 at a time."""
+def complete(gguf: Path, prompts: list[str], max_tokens: int = 256, log: Path | None = None,
+             chat: bool = False) -> list[str]:
+    """Greedy completions from llama-server on a free local port, 8 at a time. With chat, each prompt is a user's
+    message put in the model's own chat template (the GGUF's, by /apply-template), and the whole exchange is
+    returned: the templated prompt, then the answer (to its end of turn or max_tokens)."""
     import socket
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     url = f"http://127.0.0.1:{port}"
     srv = subprocess.Popen([str(BIN / "llama-server"), "-m", str(gguf), "--port", str(port), "-np", "8", "-c",
-                            str(8 * 2048), "-t", str(THREADS), "-ngl", "99", "--no-webui"],
+                            str(8 * 2048), "-t", str(THREADS), "-ngl", "99", "--no-webui"]
+                           + (["--jinja"] if chat else []),
                            stdout=open(log or os.devnull, "w"), stderr=subprocess.STDOUT)
     try:
         for _ in range(1800):  # a large model loads slowly while the disk is busy
@@ -145,12 +150,16 @@ def complete(gguf: Path, prompts: list[str], max_tokens: int = 256, log: Path | 
         else:
             raise TimeoutError("llama-server did not start")
 
+        def post(path: str, body: dict) -> dict:
+            req = urllib.request.Request(url + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
+            return json.loads(urllib.request.urlopen(req, timeout=1800).read())
+
         def one(prompt: str) -> str:
-            body = {"prompt": prompt, "n_predict": max_tokens, "stop": STOP, "temperature": 0, "top_k": 1,
-                    "seed": 1, "cache_prompt": False}
-            req = urllib.request.Request(url + "/completion", json.dumps(body).encode(),
-                                         {"Content-Type": "application/json"})
-            return json.loads(urllib.request.urlopen(req, timeout=1800).read())["content"]
+            if chat:
+                prompt = post("/apply-template", {"messages": [{"role": "user", "content": prompt}]})["prompt"]
+            body = {"prompt": prompt, "n_predict": max_tokens, "stop": [] if chat else STOP, "temperature": 0,
+                    "top_k": 1, "seed": 1, "cache_prompt": False}  # chat: no stop words, the end of turn stops it
+            return (prompt if chat else "") + post("/completion", body)["content"]
         with ThreadPoolExecutor(8) as ex:
             return list(ex.map(one, prompts))
     finally:
@@ -163,7 +172,7 @@ def gsm8k(model: str, gguf: Path, label: str, questions: Path, n: int = 0) -> np
     rec = DATA / "results" / model / "gsm8k" / f"{label.replace(':', '_')}-{questions.parent.name}-{n}.json"
     if rec.exists():
         return np.array(json.loads(rec.read_text()), dtype=np.int8)
-    jl = lambda p: [json.loads(x) for x in p.read_text().splitlines() if x]  # noqa: E731
+    jl = lambda p: [json.loads(x) for x in p.read_text().split("\n") if x]  # noqa: E731
     items = jl(questions)[: n or None]
     shots = jl(DATA / "splits/tasks/fewshot/gsm8k.jsonl")
     outs = complete(gguf, [gsm8k_prompt(it["question"], shots) for it in items])

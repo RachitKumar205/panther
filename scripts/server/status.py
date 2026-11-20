@@ -30,8 +30,8 @@ DESCRIBE = {
     "ga": "genetic search: genomes (one type per matrix, inside the RAM budget) scored by flips + 10 x drift on the"
           " original's answers, 4 at a time; mutation, crossover and solver proposals; stops on a plateau (30-70)",
     "final": "the top 3 are distilled (block scales and norms trained to match the original), scored on all 4,500"
-             " selection questions; the best must not be less accurate than the preset (guard); then winner vs"
-             " preset vs original on the held-out test: the verdict",
+             " selection questions; a warning if the best is clearly worse than the preset (guard); then winner"
+             " vs preset vs original on the held-out test: the verdict (relative score)",
     "bundle": "the winning file packed for the Pi, which downloads it and posts its real RAM and speed here"}
 PI: dict[str, str] = {}
 
@@ -114,7 +114,10 @@ def results(b: int, sm: str) -> list[str]:
         rows.append(("Ours, first method", {"accuracy": r["mean_accuracy_pct"], "kl": r["kl"], "ppl": r["ppl"],
                                              "flips": None, "per_task": r["per_task_pct"]}, float("nan")))
     n = lambda x, f=".2f": "–" if x is None or x != x else format(x, f)  # noqa: E731
-    out = [f"### Result: {w['verdict']}, ours − preset {w['diff']:+.2f} points [{w['ci'][0]:+.2f}, {w['ci'][1]:+.2f}]",
+    out = [f"### Result: {w['verdict']}, " + (  # relative: decision 13; before it, the accuracy difference
+        f"relative score {w['relative']:.1f} [{w['relative_ci'][0]:.1f}, {w['relative_ci'][1]:.1f}] (100 = the "
+        f"preset's damage, lower is better)" if "relative" in w else
+        f"ours − preset {w['diff']:+.2f} points [{w['ci'][0]:+.2f}, {w['ci'][1]:+.2f}]"),
            "", "| held-out test | accuracy | MMLU | HellaSwag | ARC | WinoGrande | GSM8K | points lost vs original | "
            "% of original kept | KL | perplexity | flips | file GB | % of original size |", "|---" * 14 + "|"]
     for name, r, size in rows:
@@ -201,9 +204,10 @@ def render() -> str:
     head = [f"# Panther: live progress", "", f"Updated {time.strftime('%d %b %H:%M', time.gmtime(time.time() + 19800))}"
             " IST, every 30 s. Each contest: one model at one RAM budget on the Raspberry Pi 5; our quantization (every"
             " matrix its own type, smarter rounding, genetic search, distillation) against llama.cpp's best preset that"
-            " fits the same budget, on held-out questions. WIN / LOSE: the 95% interval of the accuracy difference is "
-            "all above / below 0, otherwise TIE. Every term: [How it works](https://github.com/RachitKumar205/panther#how-it-works).",
-            "", "## Verdicts", "", "| contest | verdict | ours - preset, points [95% interval] | flips ours / preset |",
+            " fits the same budget, on held-out data. Relative score: our score (flips % + 10 × KL) as a % of the preset's"
+            " (100 = the preset's damage, lower is better). WIN / LOSE: its 95% interval is all below / above 100,"
+            " otherwise TIE. Every term: [How it works](https://github.com/RachitKumar205/panther#how-it-works).",
+            "", "## Verdicts", "", "| contest | verdict | relative score [95% interval] | flips ours / preset |",
             "|---|---|---|---|"]
     log = (DATA / "logs/panther.log").read_text().splitlines() if (DATA / "logs/panther.log").exists() else []
     state = {}
@@ -214,7 +218,8 @@ def render() -> str:
         sz, b = k.split("-b")
         w = winner(int(b), sz.upper())
         if w:
-            state[k] = f"done: **{w['verdict']}** {w['diff']:+.2f} points vs preset {w['preset']}"
+            state[k] = f"done: **{w['verdict']}** " + (f"relative score {w['relative']:.1f}" if "relative" in w
+                                                         else f"{w['diff']:+.2f} points") + f" vs preset {w['preset']}"
         elif not searched(int(b), sz.upper()):
             state[k] = "dropped (see the project README)"
     paused = [f"**PAUSED** ({w})" for f, w in (("PAUSED", "by the user"), ("PAUSED.guard", "GitLab unhealthy"))
@@ -232,11 +237,13 @@ def render() -> str:
         if not winner(b, sm) and not searched(b, sm):
             continue  # a dropped contest
         v = next((x for x in reversed(ls) if "our winner" in x), None)
-        if v and (m := re.search(r"our winner ([+-][\d.]+) pts \[([+-][\d.]+), ([+-][\d.]+)\]", v)):
-            d, lo, hi = map(float, m.groups())
-            word = "WIN" if lo > 0 else "LOSE" if hi < 0 else "TIE"
+        # "rel": relative score - 100 (decision 13); "pts": the accuracy difference, before it
+        if v and (m := re.search(r"our winner ([+-][\d.]+) (pts|rel) \[([+-][\d.]+), ([+-][\d.]+)\] (\w+)", v)):
+            d, lo, hi, word = float(m[1]), float(m[3]), float(m[4]), m[5]
+            shown = (f"{100 + d:.1f} [{100 + lo:.1f}, {100 + hi:.1f}]" if m[2] == "rel" else
+                     f"{d:+.2f} pts [{lo:+.2f}, {hi:+.2f}]")
             fl = re.search(r"flips ([\d.]+) vs ([\d.]+)", v)
-            head.append(f"| {sm} @ {b} GiB | **{word}** | {d:+.2f} [{lo:+.2f}, {hi:+.2f}] | "
+            head.append(f"| {sm} @ {b} GiB | **{word}** | {shown} | "
                         f"{fl.group(1) + ' / ' + fl.group(2) if fl else ''} |")
         else:
             head.append(f"| {sm} @ {b} GiB | running | | |")

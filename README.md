@@ -85,35 +85,42 @@ MXFP4 and TQ2_0 do not work for normal models and Q4_0/Q5_0 lose to the K types 
 | **Accuracy** | % of questions answered right: MMLU (knowledge), ARC (science), HellaSwag (common sense), WinoGrande (pronouns), GSM8K (math word problems, answered in writing) | higher |
 | **Drift (KL)** | how differently our model predicts the next word than the original; 0 = identical | lower |
 | **Flips** | % of questions whose right/wrong differs from the original's | lower |
+| **Same top word** | % of words where our model's most likely next word is the original's; reported next to drift, not scored | higher |
 | **Perplexity** | how surprised the model is by real text | lower |
 
-The questions are split once and never mixed: **calibration** (importance matrix, rounding, distillation),
-**selection** (the search scores candidates on it), **held-out test** (used once, at the end, for the reported
+The data is split once and never mixed ([the dataset](#the-dataset-decision-6)): text in **train** (importance
+matrix, rounding, distillation), **select** (the search and the final ranking) and **test** (used once, at the end);
+benchmark questions in **selection** (the search and the final ranking) and **held-out** (used once, for the reported
 result). Accuracy on a few hundred questions is noisy and rewards lucky candidates; flips and drift measure the damage
-directly ("Accuracy is Not All You Need", NeurIPS 2024). So the search's **score** is **flips + 10 × drift on the
-original's own answers** (lower is better): the original writes its answers once, math solutions included, and every
-candidate's drift is measured on exactly that text.
+directly ("Accuracy is Not All You Need", NeurIPS 2024). So the search's **score** is **flips on selection questions
++ 10 × drift on the select text** (lower is better), reported relative to the preset: 100 = the preset's damage,
+0 = none. The **verdict** is the same relative score on held-out data (flips on the held-out questions, drift on the
+test text): **WIN** if its whole 95 % interval is below 100, **LOSE** if all above, **TIE** otherwise. Accuracy,
+perplexity and same top word % are reported next to it and decide nothing.
 
 ## 5. The steps of one contest
 
-1. **fetch** (container with internet): the original model, at a pinned version.
-2. **store** (GPU): convert to a 16-bit **GGUF** (llama.cpp's file format), compute the importance matrix, build the
+1. **prompts** (container with internet): the dataset's chat prompts (made once, shared by all models), then the
+   split check (decision 3); if the check fails, the contest does not start.
+2. **fetch** (container with internet): the original model, at a pinned version.
+3. **store** (GPU): convert to a 16-bit **GGUF** (llama.cpp's file format), compute the importance matrix, build the
    14 **type copies** (the whole model in each type, every matrix with smarter rounding; each copy's file is written
    directly, its layer matrices quantized only once, by the rounding), delete the download. A
    candidate is later assembled in seconds by picking each matrix from the right copy. Contests of the same model
    share one store.
-3. **error**: for every matrix and type, a cheap estimate of the damage (for repairs and the solver).
-   Steps 4 and 5 start on the GPU as soon as the 16-bit original and its importance matrix exist, while the type
+4. **error**: for every matrix and type, a cheap estimate of the damage (for repairs and the solver).
+   Steps 5 and 6 start on the GPU as soon as the 16-bit original and its importance matrix exist, while the type
    copies are still being built on the CPU.
-4. **refs**: the original writes its GSM8K answers; its next-word probabilities on them and on the selection text,
-   and which questions it gets right, are recorded.
-5. **preset**: llama.cpp's presets near the budget are built and tested on the held-out questions: of the two largest
-   that fit, the better one is the **competitor** (if none fits, the smallest, with more RAM than we get).
-6. **ga**: the genetic search (below); keeps the top 3.
-7. **final**: distill the top 3, score them on all 4,500 selection questions (lowest score wins), **guard** (not less
-   accurate than the preset), then winner vs preset vs original on the **held-out test**: **WIN / TIE / LOSE**.
-8. **bundle**, **upload**: the winning file to a public Hugging Face repo.
-9. **The Pi** downloads it, measures real peak RAM and speed, and posts them to the page. Only our winners run on
+5. **refs**: the original answers every chat prompt (the dataset's chat part); its next-word probabilities on the
+   select and test text, and which questions it gets right, are recorded.
+6. **preset**: every llama.cpp preset that fits the budget is scored on all selection questions; the most accurate is
+   the **competitor** (if none fits, the smallest, with more RAM than we get). Only it takes the held-out test.
+7. **ga**: the genetic search (below); keeps the top 3.
+8. **final**: the top 3, distilled and undistilled (6 files), scored on all ~4,500 selection questions and the select
+   text (lowest score wins); **guard** (a warning if clearly worse than the preset there), then winner vs preset vs
+   original on the **held-out test**: **WIN / TIE / LOSE** by the relative score, in every contest.
+9. **bundle**, **upload**: the winning file to a public Hugging Face repo.
+10. **The Pi** downloads it, measures real peak RAM and speed, and posts them to the page. Only our winners run on
    the Pi.
 
 ## 6. In depth: every number and formula
@@ -152,9 +159,14 @@ importance_c the mean squared input of column c. Used only to repair genomes and
   questions every time), the share whose right/wrong differs from the original's, averaged over the 4 tasks.
   6 % flips → 6.
 - **Drift**: average KL divergence per token between the genome's and the original's next-word probabilities, on
-  the original's own answers: its 200 GSM8K solutions (5 worked examples in the prompt, greedy, up to 256 tokens)
-  interleaved with multiple-choice questions and their answers, 16 chunks of 2,048 tokens. 0.15 → 1.5.
+  the select text: the original's greedy answers (up to 256 tokens, in its chat template) to the 150 select prompts,
+  then the select web text; the first 48 chunks of 2,048 tokens (all of the chat part, then the start of the web
+  part). 0.15 → 1.5.
 - Example total: **7.5**. Accuracy is recorded, never optimized directly.
+- **Same top word %**, from the same drift run, is reported next to drift and is not in the score.
+- **Relative score** = score ÷ the preset's score × 100, the preset scored the same way on the same questions and
+  text (in the search the 900, in the final step all selection questions): 100 = the preset's damage, 0 = none,
+  above 100 = worse. Dividing by one number does not change which genome is best.
 
 ### The genetic search
 
@@ -185,14 +197,20 @@ importance_c the mean squared input of column c. Used only to repair genomes and
   others 66) plus the full drift. If that score is already more than 3 above the worst of the 16 (about 2 standard
   errors of the flips on that many questions), it is **dropped** without finishing; it would almost surely not
   enter the 16. Otherwise it is scored on all 900 as usual. Dropped genomes count toward the stop rule.
-- **Stop**: after at least 30 genomes, once 15 in a row improve the best by less than 0.2; at most 70. The 3 lowest
-  scores go to the final step.
+- **Stop** (early stopping, decision 9): a new best counts as an **improvement** only if it is lower than the
+  previous best by more than **1 standard error of the difference**: flips paired over the same 900 questions (per
+  task the standard error of the mean difference of the two genomes' flips, so only questions where they disagree
+  add to it; averaged over the 4 tasks), combined with 10 × both drift runs' own standard errors (llama.cpp's, over
+  the chunks). A smaller gain still becomes the best, but does not count. Stop after 15 genomes in a row without an
+  improvement; at least 30, at most 70. The 3 lowest scores go to the final step, where all selection questions
+  score them again (the best of many noisy scores looks better than it is).
 
 ### Distillation (in the final step, `src/panther/distill.py`)
 
 - **Teacher**: the 16-bit original. **Student**: our file, loaded into PyTorch with every weight at its quantized value.
-- **Data**: the original's answers + the calibration text, in sequences of 512 tokens (up to 256). For every position
-  the teacher's **64 most likely next words** and their probabilities are stored.
+- **Data**: the train split only: the original's chat answers to the 300 train prompts, then the train web text
+  (the calibration text), in sequences of 512 tokens (the first 256). No selection or held-out question or text. For
+  every position the teacher's **64 most likely next words** and their probabilities are stored.
 - **Trained**: for every matrix, one number **θ per block of 256 weights of a row**, effective weights
   **W × exp(θ)** (θ starts at 0, so the student starts as the file; exp keeps scales positive); plus every **norm
   weight**. The whole numbers never change.
@@ -208,8 +226,8 @@ importance_c the mean squared input of column c. Used only to repair genomes and
 - **Not tuned**: IQ1_M blocks (no single scale).
 - **InternLM2.5 20B was dropped** (2026-11-14) for Mistral Small 22B: its model code, written for an older
   transformers library, does not run with the current one, so it could get neither smarter rounding nor
-  distillation. Its two contests (search only) ended in TIEs, +0.46 at 5 GiB and +0.89 at 7 GiB; their logs and
-  results are kept.
+  distillation. Its two contests (search only, before the pipeline review) ended in TIEs, +0.46 at 5 GiB and +0.89
+  at 7 GiB; their logs and results are kept.
 - **Qwen2.5 32B was dropped** (2026-11-15): loading its 16-bit weights (65.5 GB) for the rounding needs more RAM
   than a container gets (64 GB). Its contest (32b@7) has no result (its competitor would have been IQ1_S, 54.43 %
   held-out, 7.70 GiB); the model and all its files were removed.
@@ -217,25 +235,37 @@ importance_c the mean squared input of column c. Used only to repair genomes and
 ### The final step and the verdict
 
 1. Each of the top 3 distilled; the distilled and the undistilled version of each (6 files) scored with the same
-   formula on all 4,502 selection questions; lowest wins (distillation can hurt files that are already near-lossless).
+   formula on all 4,502 selection questions and the select text; lowest wins (distillation can hurt files that are
+   already near-lossless). Each is also reported relative to the preset's score there, with its same top word %.
    Overlapped: one distillation at a time (it needs most of the GPU), while every file already built (the
    undistilled ones, finished distillations, the preset) is scored beside it.
-2. **Guard**: the winner vs the real preset file on those questions (paired bootstrap, below); if the whole 95 %
-   interval is below 0, the winner is rejected and the contest ends without a result.
+2. **Guard**: the winner's relative score and its 95 % interval (as in 4) on all selection questions and the select
+   text; if the whole interval is above 100, a warning is logged and stored with the result. The held-out test runs
+   anyway, so every contest ends in a WIN, TIE or LOSE.
 3. **Held-out test**, never seen before: MMLU 1,000, HellaSwag 2,000, ARC 1,172, WinoGrande 1,267, and GSM8K (written
-   answers, 5 worked examples, the final number must match exactly). **Accuracy = mean of the 5 task accuracies.**
-   Also drift on the selection text, perplexity on web text, flips against the original. Ours and the preset are tested
-   side by side; the original's results were recorded in step 4.
-4. **Paired bootstrap**: 10,000 random resamples of the questions within each task, the same questions for both
-   files; ours − preset each time; the middle 95 % is the **95 % interval**. **WIN** if all of it is above 0,
-   **LOSE** if all below, **TIE** otherwise.
+   answers, 5 worked examples, the final number must match exactly). Flips against the original's answers to the same
+   questions, the mean over the 5 tasks. Drift and same top word % on the test text (the original's answers to the
+   150 test prompts, then the test web text, all of it), perplexity on the same text. Ours, the preset and the
+   original are tested side by side.
+4. **The verdict**: score = flips % (the 5 held-out tasks) + 10 × drift (test text), for ours and for the preset.
+   **Relative score** = 100 × ours ÷ preset's (100 = the preset's damage, lower is better). Its **95 % interval** =
+   100 × (ours ± 1.96 SE) ÷ preset's, where SE is the standard error of ours − preset, the same one the search uses:
+   flips paired question by question (per task, the SE of the mean difference of the two files' flips; the mean over
+   the 5 tasks), combined with the two drift runs' own SEs (× 10). **WIN** if the whole interval is below 100,
+   **LOSE** if all above, **TIE** otherwise. At 95 %, about 1 contest in 20 where the two files are truly equal still
+   comes out WIN or LOSE by chance.
+5. **Reported, deciding nothing**: accuracy (the mean of the 5 task accuracies) and ours − preset in accuracy points,
+   perplexity, same top word %. The result file stores `relative` and `relative_ci`, `diff` and `ci` (the same minus
+   100: negative is better than the preset), `verdict`, and `accuracy_diff`.
 
 ### The competitor (preset step)
 
 llama.cpp's own mixed presets (IQ1_S … Q8_0) from the same original and importance matrix; real RAM = the file's
-actual bytes + KV cache + overhead. Of the **two largest that fit** (≤ 1.005 × B), the one with the **higher held-out
-accuracy** competes (choosing on the held-out test can only favor the competitor, never us). None fits → the
-smallest competes, with more RAM than we are allowed.
+actual bytes + KV cache + overhead. **Every preset that fits** (≤ 1.005 × B) is scored like a finalist, on all
+selection questions and the select text; the **most accurate** there competes (accuracy to 0.1 point; ties: lower
+drift). Only it takes the held-out test, which no longer helps choose it. None fits → the smallest competes, with
+more RAM than we are allowed. Its scores on the search's 900 questions and on all selection questions are the bases
+of the relative score.
 
 ### The Pi
 
@@ -274,6 +304,8 @@ than on the 14B (+78 % writing against +25 %).
 - From your machine it syncs the code to the server (anton) and runs the same command there; every step runs in a
   locked-down container ([deploy/server](deploy/server/README.md) has the one-time setup). Every step skips work
   already done, so nothing is lost by stopping.
+- **Before every contest** a CPU job (`pipeline.py prompts`) makes the dataset's chat prompts, once for all models,
+  and runs the split check; if it fails, that contest stops.
 - **Built once**: each model's type copies (with its 16-bit original, importance matrix and presets) are saved to
   a public Hugging Face repo, `panther-store-<model>`; a later contest downloads them instead of rebuilding.
 - **Packed**: all contests start at once. Only downloading and building type copies take turns (one model at a time:
@@ -304,6 +336,14 @@ was picked, and whether the guard was passed, may have been affected.
 | 4 | Store | The importance matrix and our error-compensated rounding stay on the calibration web text alone (the preset uses the same importance matrix). |
 | 5 | Error | The offline error estimate stays as it is: it reads only the type copies and the importance matrix, and only guides the search (repair, solver proposals); every genome is still measured. |
 | 6 | Data | One dataset, split into train, select and test (below). KL and perplexity are measured only on its splits; flips and accuracy only on the benchmark questions. Nothing trains on anything but the train split. |
+| 7 | Preset | The competitor is the most accurate on the selection questions of every llama.cpp preset that fits the budget, whatever its size (ties: lower KL on the select text). The held-out questions are no longer used to choose it, only for the verdict. If none fits, the smallest preset, as before. |
+| 8 | Search | The score stays flips % + 10 × KL (flips on the 900 search questions, KL on the select text). It is reported relative to the preset, scored the same way: our score ÷ the preset's × 100 (100 = the preset's damage, 0 = none, above 100 = worse). The search itself is unchanged: dividing by one number does not change which genome is best. |
+| 9 | Search | Early stopping as in ML training, with the minimum improvement set by the measurement's own noise: a genome counts as an improvement only if it beats the best by more than 1 standard error of the difference (paired over the same questions, from the questions where the two disagree; plus KL's uncertainty over its chunks). Stop after 15 genomes in a row without one (patience); at least 30, at most 70. The best 3 are re-scored on all selection questions in the final step, which corrects for the best of many noisy scores looking better than it is. Replaces the hand-set 0.2. |
+| 10 | Search | **The fitness**, used by the search and to pick the winner: **score = flips % + 10 × KL** (as in 8), lower is better, reported relative to the preset. **Flips %** on benchmark selection questions (a flip needs a correct answer, which only benchmarks have): the search uses the same 900 (MMLU 300; ARC, HellaSwag, WinoGrande 200 each) with the first look (a third first; dropped if already ~2 standard errors worse than the 16th best), no GSM8K (measured in the held-out verdict). **KL** on our dataset's select split (chat and web). **Same top word %** (the share of words where the file's most likely next word is the original's), from the same KL run at no cost, is reported next to KL, in the search and the held-out test, and is not in the score. A "kept %" term (how far each answer stays identical) was considered and dropped: KL already measures it (a top word only changes where the probabilities move), it would add noise, and it needed an image rebuild or generation. |
+| 11 | Final | The search's best 3 genomes are each built twice, distilled and undistilled (distillation helps most at tight budgets and can hurt near-lossless files, so the measurement decides). The 6 files are scored with the fitness (10) on all ~4,500 selection questions and the select split; the lowest score wins. Clean under 1 and 6: distillation trains only on the train split. |
+| 12 | Final | The guard no longer stops a contest. The winner is compared with the preset on all selection questions as before; if ours is clearly worse (the 95 % interval entirely below 0) that is logged as a warning, and the held-out test runs anyway, so every contest ends in a reported WIN, TIE or LOSE. Before, a contest that would lose ended with no verdict, so the record showed only the contests that passed. |
+| 13 | Final | **The verdict is the relative score on held-out data**: our fitness ÷ the preset's × 100, with flips on the held-out questions and KL on the test split (100 = the preset's damage, lower is better). Its 95 % interval comes from the same standard error the search uses (9): ±1.96 standard errors of the difference, from the per-question flips (paired) and the two KL runs. WIN if the whole interval is below 100, LOSE if it is all above, TIE otherwise. Accuracy, its difference from the preset, perplexity and same top word % are reported next to it and decide nothing. One rule throughout: the search, picking the winner, the guard and the verdict all use the same relative fitness (the guard on selection data, the verdict on held-out data). Replaces the accuracy difference with a bootstrap interval. At 95 %, about 1 contest in 20 where the two files are truly equal still comes out WIN or LOSE by chance. |
+| 14 | Pi | The Pi's result line says FITS or OVER: whether the real peak RAM is within the bundle's budget. Reported on the page next to the verdict; it does not change the verdict. |
 
 ### The dataset (decision 6)
 
@@ -346,13 +386,14 @@ The GSM8K few-shot examples stay as part of how a GSM8K question is asked.
 
 **Where it is built and stored:** on the server under `data/splits/text/`.
 
-1. `prompts` (a CPU job, the only step with network): downloads OpenAssistant at the pinned revision, filters, splits,
+1. `prompts` (a CPU job with network, before every contest): downloads OpenAssistant at the pinned revision, filters, splits,
    and writes `prompts.json` (each prompt's split, how many were dropped). Made once, shared by all models.
 2. `refs` (GPU, no network): the original answers every prompt, written as `chat-<model>-train.txt`, `-select.txt`
    and `-test.txt`; then the original's probabilities on the select and test text (chat and web) are recorded in
    `reference/<model>/select.kld` and `test.kld`.
-3. The check (decision 3): before a contest, all six text files and both question splits share nothing and match
-   their recorded hashes.
+3. The check (decision 3), run by `prompts`: the three web files and both question splits match their manifests'
+   hashes; no web document, question or chat prompt is in two splits; no prompt shares 8 words with a benchmark
+   question.
 
 **Archived, not deleted:** `bench.txt`, `answers-<model>.txt`, the sensitivity and agreement text,
 `gen_prompts.json`, WikiText, the MMLU few-shot examples.
@@ -367,7 +408,7 @@ About 1,430 lines (blank and comment lines excluded):
 | Module | What |
 |---|---|
 | `panther` | the one command |
-| [scripts/server](scripts/server/README.md) | `pipeline.py` (every step, the search), `status.py` (the page) |
+| [scripts/server](scripts/server/README.md) | `pipeline.py` (every step, the search, the chat prompts and the split check), `status.py` (the page) |
 | [src/panther](src/panther/README.md) | `rounding.py`, `distill.py`, `llama.py` (runs llama.cpp, checks its output), `model.py` (RAM model, types), `stats.py`, `solver.py`, `fakequant.py` (fake quantizers, for the EfficientQAT experiment) |
 | [deploy/server](deploy/server/README.md) | container image, server setup and removal |
 | [pi](pi/README.md) | the Pi's check |
