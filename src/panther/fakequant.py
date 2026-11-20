@@ -20,6 +20,8 @@ import numpy as np
 import torch
 import gguf.quants as gq
 
+torch.set_float32_matmul_precision("highest")  # code picking's distances are an fp32 matmul: never TF32
+
 QK = 256
 CHUNK = 1 << 18  # groups searched at once against a grid (256k groups x 2048 patterns x 4 bytes = 2 GiB)
 KSIGNS = np.frombuffer(gq.IQ2_XXS.ksigns, np.uint8)  # 7-bit sign index -> 8 sign bits (bit 7 = parity)

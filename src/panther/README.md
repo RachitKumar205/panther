@@ -221,13 +221,13 @@ Parts 1 and 2 stop a mismatch, 3 and 4 catch one. Blocks 14–16 of the 14B @ 7,
 exactly their best checks (0.03740, 0.04035, 0.04163). The `15199b3` version restored here has not yet run on a
 real model.
 
-**Open (no result changes):**
-- Codes are re-picked every 16 forward passes, validation passes included; a check validates with codes from the
-  current weights only because the check interval (512) and the validation batches (32) are multiples of 16. With 60
-  validation samples 1 check in 8 would, with 66 none: a check would score with codes up to 15 steps old and the best
-  point be chosen on scores the save does not reproduce. Clearing the codes before validating removes the dependence.
-- The code search's distances are an fp32 matrix product. TF32 is off (PyTorch's default; neither this code nor
-  transformers turns it on), but nothing pins it; under TF32 they would have a 10-bit mantissa, the same kind of loss.
+**Hardened (22 Nov; no result changes):**
+- A check validates with codes picked afresh from the weights it snapshots (`val_loss` clears them first). Before,
+  that held only because the check interval (512) and the validation batches (32) are multiples of the re-pick
+  interval (16): with 60 validation samples 1 check in 8 would have started fresh, with 66 none, scoring with codes
+  up to 15 steps old and choosing the best point on scores the save does not reproduce.
+- `fakequant` pins float32 matrix products at full precision (`torch.set_float32_matmul_precision("highest")`, the
+  default): the code search's distances are one, and under TF32 they would have a 10-bit mantissa.
 
 **Not a bug:** Block-AP and distillation run the decoded weights in bf16, llama.cpp exactly: 0.14 % mean, 0.39 %
 largest relative difference per weight, for every type. It costs training some accuracy, not honesty: the winner,

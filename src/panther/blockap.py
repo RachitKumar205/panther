@@ -221,6 +221,9 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
             opt, lambda s: MIN_LR + (1 - MIN_LR) * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps)))
 
         def val_loss(layer=None):  # of the block in training, or of another version of it
+            if layer is None:  # codes picked afresh from the weights as they are: what a save from here holds
+                for q in qlin.values():
+                    q.codes = None
             with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                 return sum(torch.nn.functional.mse_loss(_run(layer or ql, vq[i:i + BATCH].cuda(), rope).float(),
                                                         _run(orig, vfp[i:i + BATCH].cuda(), rope).float()).item()
