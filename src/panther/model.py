@@ -93,6 +93,13 @@ class Model:
                 for m in self.matrices}
 
 
+def trained(model: str) -> tuple[int, int]:
+    """GPU and RAM of the 16-bit model loaded by transformers (rounding, distillation): on the GPU the model and its
+    activations, b16 + 20 GiB; in RAM the model before it moves to the GPU and one tensor's fp32 copy, b16 + 8 GiB."""
+    b16 = 2 * Model(model).params
+    return b16 + 20 * GIB, b16 + 8 * GIB
+
+
 def short(model: str) -> str:
     return model.split("-")[1]
 

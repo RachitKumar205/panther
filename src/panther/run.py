@@ -14,11 +14,11 @@ import traceback
 from pathlib import Path
 
 from panther import data, final, measure, search, store
-from panther.model import DATA, GIB, RUN, Model, clock, done, hold, lock, named, note, put, record, short
+from panther.model import DATA, GIB, RUN, clock, done, hold, lock, named, note, put, record, short, trained
 
 CAP_GPU, CAP_RAM = 94 * GIB, 100 * GIB  # all runs' claims: of 96 GiB GPU and the host's ~125 GiB, the rest for GitLab
 GENOMES = 8  # genomes scored at once that a claim is sized for (fewer if the caps do not hold them)
-SIDE = 2  # runs a claim is sized to fit beside each other: each run's genomes fit in 1 / SIDE of the caps
+SIDE = 1  # runs at once: each claims 1 / SIDE of the caps (one: a run has the whole machine, the next waits)
 RESERVE = 20 * GIB  # measured 20 Nov: ~19 GB on the 1.5B; the run's own processes outside its bookings: the orchestrator (torch, mapped type copies, records) and the genome builders
 CLAIMS = DATA / "locks/claims.json"
 _HELD = []  # this process's own run lock, when no ./panther holds it
@@ -49,14 +49,13 @@ class Refused(SystemExit):
 
 
 def sizes(model: str, budget: int) -> tuple[int, int, int]:
-    """The run's GPU and RAM claim, and how many genomes it scores at once: as many as fit in half the caps (at most
-    GENOMES), so two runs fit side by side. GPU: distillation's peak (the 16-bit model + 20 GiB) or k genomes' llama.cpp
-    runs, whichever is more. RAM: RESERVE + k genomes' runs, or the transformers load of the 16-bit model in rounding
-    and distillation (they book the whole claim, so run alone): the model in host RAM before it moves to the GPU, one
-    tensor's fp32 copy and the orchestrator, b16 + 8 GiB."""
-    b16, (g, m) = 2 * Model(model).params, measure.need(budget * GIB, model=model)
-    k = max(1, min(GENOMES, (CAP_RAM // SIDE - RESERVE) // m, CAP_GPU // SIDE // g))
-    return max(b16 + 20 * GIB, k * g), max(b16 + 8 * GIB, RESERVE + k * m), k
+    """The run's GPU and RAM claim (1 / SIDE of the caps) and how many genomes it scores at once (as many llama.cpp
+    runs as fit in it less RESERVE, at most GENOMES); a model whose transformers load does not fit is refused."""
+    gpu, ram, (g, m) = CAP_GPU // SIDE, CAP_RAM // SIDE, measure.need(budget * GIB, model=model)
+    if trained(model)[0] > gpu or trained(model)[1] > ram - RESERVE:
+        raise Refused(f"{model}: its 16-bit load needs {trained(model)[0] / GIB:.0f} GiB of GPU and "
+                      f"{trained(model)[1] / GIB:.0f} GiB of RAM; a claim is {gpu / GIB:.0f} and {ram / GIB:.0f}")
+    return gpu, ram, max(1, min(GENOMES, (ram - RESERVE) // m, gpu // g))
 
 
 def claim(new: bool = False) -> int:

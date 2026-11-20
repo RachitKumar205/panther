@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from panther import measure
+from panther import measure, run
 from panther.model import GIB, hold, sha
 
 ENV = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
@@ -30,12 +30,12 @@ def test_claims(tmp_path):
         assert re.fullmatch(r"\d\d:\d\d 24b-b7: refused: 24b-b7 does not fit: .* 14b-b5 \(\d+ GiB GPU.*\n",
                             (tmp_path / "logs/panther.log").read_text())
         assert not (tmp_path / "logs/progress-b7.log").exists()
-        assert py(tmp_path, "claim", "1.5b", "1").returncode == 0  # a second run fits beside it
+        assert py(tmp_path, "claim", "1.5b", "1").returncode == 3  # one run at a time: the next waits
     finally:
         holder.kill()
         holder.wait()
     r = py(tmp_path, "claim", "24b", "7")  # the holder ended: its claim lapsed
-    assert r.returncode == 0 and 48 * GIB < int(r.stdout.split()[-1]) <= 60 * GIB
+    assert r.returncode == 0 and int(r.stdout.split()[-1]) == run.CAP_RAM // run.SIDE
 
 
 def test_a_failed_step_is_loud(tmp_path):

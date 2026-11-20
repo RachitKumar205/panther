@@ -10,7 +10,8 @@ from pathlib import Path
 
 from panther import measure as ms
 from panther.data import WEB, chat_text
-from panther.model import CFG, DATA, RULES, consts, digest, done, hold, note, path, put, record, sha, short
+from panther.model import (CFG, DATA, RULES, consts, digest, done, hold, lock, note, path, put, record, sha, short,
+                           trained)
 from panther.search import build, label
 from panther.store import copy_of, preset_file
 
@@ -27,8 +28,8 @@ def teach(model: str) -> list[Path]:
 
 
 def final(model: str, budget: int) -> None:
-    """Overlapped: everything built is scored at once, one distillation at a time (it needs the whole claim), and
-    the held-out tests run side by side."""
+    """Overlapped: everything built is scored at once, also while a distillation runs (one at a time, booked at its
+    own size), and the held-out tests run side by side."""
     from panther.distill import distill
     lst, pr, win = json.loads(record("list").read_text()), json.loads(record("preset", "").read_text()), record("winner")
     (ins, dins), bf16 = final_ins(model), copy_of(model, "BF16")
@@ -53,8 +54,9 @@ def final(model: str, budget: int) -> None:
             plain = files[f"{k} undistilled"]
             files[k] = path(model, "tuned", f"{budget}-{digest([sha(plain), dins])}.gguf")
             if not files[k].exists():
-                with hold(*hold.total):  # student weights and activations: the run's whole claim
-                    distill(plain, bf16, teach(model), files[k], lambda m, k=k: note(f"{k} {m}"))
+                with lock(f"distill-{model}"), hold(*trained(model)):  # the 16-bit load; files built are scored
+                    distill(plain, bf16, teach(model), files[k], DATA / "reference" / model / "teacher-top64.pt",
+                            lambda m, k=k: note(f"{k} {m}"))
             labels[k] = f"d:{sha(files[k])[:12]}"
             jobs.append(ex.submit(scored, k))
         preset_sel = jobs[0].result()

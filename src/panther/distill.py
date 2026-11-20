@@ -4,10 +4,13 @@ per 256 weights) and norms are trained, and written into a copy: same file size 
 from __future__ import annotations
 
 import gc
+import os
 import shutil
 from pathlib import Path
 
 import numpy as np
+
+from panther.model import RULES, digest, made, sha, stamp
 
 # byte offsets of the fp16 block scale d (and dmin, for types with a minimum) inside one block
 D_OFF = {"Q2_K": (80, 82), "Q3_K": (108,), "Q4_K": (0, 2), "Q5_K": (0, 2), "Q6_K": (208,), "Q8_0": (0,),
@@ -59,9 +62,10 @@ def passes(n: int, batch: int, steps: int, rng) -> list:
     return [order[k * batch:(k + 1) * batch] for k in range(steps)]
 
 
-def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=print) -> Path:
+def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, tops: Path, log=print) -> Path:
     """The final step's distillation: STEPS batches of BATCH sequences of the whole texts (every sequence once, in a
-    random order, before any repeats); scales at a rate of LR_SCALE, norms at LR_NORM."""
+    random order, before any repeats); scales at a rate of LR_SCALE, norms at LR_NORM. The teacher's top TOPK are
+    computed once for these texts and kept in tops."""
     import gguf
     import torch
     import torch.nn.utils.parametrize as P
@@ -69,7 +73,11 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
     tok = AutoTokenizer.from_pretrained(str(teacher.parent), gguf_file=teacher.name)
     ids = torch.cat([tok(t.read_text(), return_tensors="pt").input_ids[0] for t in texts])
     ids = ids[: len(ids) // SEQ * SEQ].view(-1, SEQ)  # the whole train text
-    tv, ti = teacher_tops(teacher, ids)
+    if not made(tops, ins := digest([sha(teacher), [sha(t) for t in texts], SEQ, TOPK, RULES["final"]])):
+        torch.save(dict(zip("vi", teacher_tops(teacher, ids))), f"{tops}.part")
+        os.rename(f"{tops}.part", tops)
+        stamp(tops, ins)
+    tv, ti = torch.load(tops).values()
     m = _load(student).train()  # checkpointing only applies in training mode: without it every rescaled weight
     m.gradient_checkpointing_enable()  # is kept for the backward pass, a second copy of the model (24B: 95 GB)
     sr = gguf.GGUFReader(student)

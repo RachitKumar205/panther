@@ -271,30 +271,38 @@ def preset_ins(model: str, budget: int) -> str:
 def preset(model: str, budget: int) -> None:
     """Of the presets that fit, the most accurate on all selection questions (ties: lower KL); none fits: the smallest.
     Only it takes the held-out test; its score on the GA's questions is the GA's relative base. The preset files are
-    the model's, shared by its budgets: each made once (under a lock), the unchosen removed by run.unpreset."""
+    the model's, shared by its budgets: each made once (under a lock) and scored as soon as it is made, the unchosen
+    removed by run.unpreset."""
     pj, M, top, ins = record("preset", ""), Model(model), budget * (1 + WINDOW[1]) * GIB, preset_ins(model, budget)
     if done(pj, ins):
         return
-    fit, over, room = [], [], 8 * (top - M.runtime() - M.fixed) / M.params  # bits per weight that fit
-    for p, b in sorted(PRESETS.items(), key=lambda x: -x[1]):
-        if b > room + 0.3 and p != "IQ1_S":  # clearly too big (nominal bits per weight); IQ1_S is the fallback
-            continue
-        f = preset_file(model, p)
-        with lock(f"preset-{model}-{p}"):  # made anew when what made it changed
-            fins = digest([sha(copy_of(model, "BF16")), sha(imatrix(model)), llama_commit(), p])
-            if not made(f, fins):
-                q = subprocess.run([str(BIN / "llama-quantize"), "--imatrix", str(imatrix(model)),
-                                    str(copy_of(model, "BF16")), f"{f}.part", p, str(THREADS)], capture_output=True, text=True)
-                if q.returncode:
-                    raise RuntimeError(f"llama-quantize {p} exited {q.returncode}: {q.stderr[-600:]}")
-                os.rename(f"{f}.part", f)
-                stamp(f, fins)
-        ram = sum(int(t.n_bytes) for t in tensors(f).values()) + M.runtime()
-        (fit if ram <= top else over).append((p, f, ram))
-        note(f"preset {p}: {ram / GIB:.3f} GiB ({'fits' if ram <= top else 'too big'})")
-    fit = fit or [min(over, key=lambda x: x[2])]
-    scores = ms.parallel([lambda p=p, f=f: ms.score(model, preset_label(model, p), f, full=True) for p, f, _ in fit])
-    res = {p: {"ram_gib": ram / GIB, **r} for (p, _, ram), r in zip(fit, scores)}
+    fit, over, room = {}, [], 8 * (top - M.runtime() - M.fixed) / M.params  # bits per weight that fit
+    with ThreadPoolExecutor(len(PRESETS)) as ex:
+        start = lambda p, f: ex.submit(ms.score, model, preset_label(model, p), f, full=True)  # noqa: E731
+        for p, b in sorted(PRESETS.items(), key=lambda x: -x[1]):
+            if b > room + 0.3 and p != "IQ1_S":  # clearly too big (nominal bits per weight); IQ1_S is the fallback
+                continue
+            f = preset_file(model, p)
+            with lock(f"preset-{model}-{p}"):  # made anew when what made it changed
+                fins = digest([sha(copy_of(model, "BF16")), sha(imatrix(model)), llama_commit(), p])
+                if not made(f, fins):
+                    q = subprocess.run([str(BIN / "llama-quantize"), "--imatrix", str(imatrix(model)),
+                                        str(copy_of(model, "BF16")), f"{f}.part", p, str(THREADS)],
+                                       capture_output=True, text=True)
+                    if q.returncode:
+                        raise RuntimeError(f"llama-quantize {p} exited {q.returncode}: {q.stderr[-600:]}")
+                    os.rename(f"{f}.part", f)
+                    stamp(f, fins)
+            ram = sum(int(t.n_bytes) for t in tensors(f).values()) + M.runtime()
+            if ram <= top:  # scored while the next is made
+                fit[p] = ram, start(p, f)
+            else:
+                over.append((p, f, ram))
+            note(f"preset {p}: {ram / GIB:.3f} GiB ({'fits' if ram <= top else 'too big'})")
+        if not fit:  # none fits: the smallest competes
+            p, f, ram = min(over, key=lambda x: x[2])
+            fit[p] = ram, start(p, f)
+        res = {p: {"ram_gib": ram / GIB, **job.result()} for p, (ram, job) in fit.items()}
     p = max(res, key=lambda x: (round(res[x]["accuracy"], 1), -res[x]["kl"]))
     r, fs = ms.parallel([lambda: ms.test(model, preset_file(model, p), preset_label(model, p)),
                          lambda: ms.score(model, preset_label(model, p), preset_file(model, p))])

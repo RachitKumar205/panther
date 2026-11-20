@@ -57,14 +57,17 @@ importance-matrix data, which the word table never has and the output layer has 
 
 ### The claim
 
-A run claims, for its whole length, GPU memory of max(2 × parameters + 20 GiB (distillation's peak), k genomes) and
-RAM of max(2 × parameters + 8 GiB (the transformers load of the 16-bit model), 20 GiB + k genomes), k = up to 8
-genomes at once within half the caps, so two runs fit side by side (`run.sizes`). All claims together stay within
-94 GiB of GPU and 100 GiB of RAM (`run.CAP_GPU`, `run.CAP_RAM`; the host has ~125 GiB, the rest stays for GitLab). A
-claim counts while its `data/locks/run-<id>.lock` is held. Inside the run every llama.cpp process, rounding pass and
+All claims together stay within 94 GiB of GPU and 100 GiB of RAM (`run.CAP_GPU`, `run.CAP_RAM`; the host has
+~125 GiB, the rest stays for GitLab). A run claims 1 / `run.SIDE` of them for its whole length; `SIDE` is 1, so a run
+has the whole machine and the next waits (two 14B runs could not share the GPU anyway). A model whose transformers
+load (2 × parameters + 20 GiB of GPU, + 8 GiB of RAM: `model.trained`) does not fit a claim is refused. A claim
+counts while its `data/locks/run-<id>.lock` is held. Inside the run every llama.cpp process, rounding pass and
 distillation waits for its share of the claim less 20 GiB kept for the run's own processes (`run.RESERVE`,
 `model.hold`): a file's llama.cpp runs take one booking, 1.1 × its file + 4 GiB of GPU and 5 × 4,096 × the
-vocabulary × 4 bytes (multiple choice's buffer) + its file + 1 GiB of RAM, and run one after another. A run refused at its claim never started: a "refused" line, not a FAILED one.
+vocabulary × 4 bytes (multiple choice's buffer) + its file + 1 GiB of RAM, and run one after another; as many
+genomes are scored at once as such bookings fit (at most 8: about 4 for a 14B). Rounding books the whole claim;
+distillation books the transformers load, so files already built are scored beside it.
+A run refused at its claim never started: a "refused" line, not a FAILED one.
 
 ### Error-compensated rounding (`rounding.py`)
 
@@ -167,7 +170,8 @@ on the search's 900 questions (`score_fit`) and on all selection questions are t
   value.
 - **Data**: the train split only: the original's chat answers to the 300 train prompts, then all of the train web
   text, in sequences of 512 tokens. For every position the teacher's 64 most likely next words and their
-  probabilities are stored.
+  probabilities are stored, once per model and train text (`reference/<model>/teacher-top64.pt`), for every
+  distillation of that model.
 - **Trained**: for every layer matrix, one number **θ per 256 weights of a row**, effective weights **W × exp(θ)**
   (θ starts at 0; computed in fp32); plus every norm weight. The codes never change; the word table and output layer
   are not tuned.
@@ -184,7 +188,7 @@ on the search's 900 questions (`score_fit`) and on all selection questions are t
 ### The final step and the verdict (`final.py`)
 
 1. Each of the best 3 genomes is built undistilled (the same file the search scored, so its results are reused) and
-   distilled (one distillation at a time, with the whole claim, while the files already built are scored). The 6
+   distilled (one distillation at a time, while the files already built are scored beside it). The 6
    files are scored on all selection questions and the select text; the lowest score wins.
 2. **Guard**: the winner's relative score against the preset on all selection questions and the select text, with
    its 95 % interval; if the whole interval is above 100, a warning is logged and stored (`guard.warning`). The
