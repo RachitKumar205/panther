@@ -16,8 +16,8 @@ def test_verdict_wins_when_clearly_better() -> None:
     ours = make([True] * 100, (0.1, 0.1))
     preset = make([True] * 50 + [False] * 50, (0.4, 0.4))
     result = versus(ours, preset, original)
-    assert result["verdict"] == "WIN"
-    assert result["relative"] < 100
+    assert result.verdict == "WIN"
+    assert result.relative < 100
 
 
 def test_verdict_ties_when_the_interval_crosses_100() -> None:
@@ -25,8 +25,8 @@ def test_verdict_ties_when_the_interval_crosses_100() -> None:
     ours = make([True] * 100, (0.1, 0.3))  # KL mean 0.2 with a nonzero chunk SE
     preset = make([True] * 100, (0.2, 0.2))  # same KL mean, zero SE
     result = versus(ours, preset, original)
-    assert result["verdict"] == "TIE"
-    assert result["ci"][0] < 100 < result["ci"][1]
+    assert result.verdict == "TIE"
+    assert result.ci[0] < 100 < result.ci[1]
 
 
 def test_score_is_flips_plus_weighted_kl() -> None:
