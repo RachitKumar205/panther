@@ -59,10 +59,8 @@ def quant(w: np.ndarray, imp: np.ndarray | None, qtype, threads: int = THREADS, 
 
 def f32(t) -> np.ndarray:
     """A tensor of the 16-bit GGUF as float32, rows x columns."""
-    d = np.asarray(t.data)
-    if t.tensor_type.name == "BF16":
-        d = (d.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
-    return d.astype(np.float32).reshape(t.shape[::-1].tolist())
+    from gguf.quants import dequantize
+    return dequantize(t.data, t.tensor_type).reshape(t.shape[::-1].tolist())
 
 
 def blank(bf16: Path, imat: Path, qtype: str, ftype: str, emb: str, head: str, dst: Path) -> None:

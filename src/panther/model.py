@@ -3,20 +3,25 @@ the run's GPU and RAM budget)."""
 
 from __future__ import annotations
 
+import ast
 import fcntl
 import hashlib
 import json
+import math
 import os
+import re
 import threading
-import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import lru_cache
+from datetime import datetime
+from functools import cache, lru_cache
+from importlib import import_module
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
-from gguf import GGML_QUANT_SIZES, GGMLQuantizationType
+from gguf import GGML_QUANT_SIZES, GGMLQuantizationType, quant_shape_to_byte_shape
 
 REPO = Path(__file__).resolve().parents[2]
 GIB = 1024**3
@@ -29,6 +34,8 @@ LLAMA = Path(os.environ.get("PANTHER_LLAMA", "/opt/llama.cpp"))
 BIN = LLAMA / "build-cuda/bin"
 THREADS = int(os.environ.get("PANTHER_THREADS", "16"))
 RUN = {"model": "", "budget": 0, "step": ""}  # this process's run (panther.run sets it)
+# Each step's rule number, in its inputs: raised whenever that step's logic changes, so its results are made anew
+RULES = {"refs": 1, "measure": 2, "preset": 1, "ga": 2, "final": 2, "error": 2}
 
 
 def bpw(t: str) -> float:
@@ -45,8 +52,7 @@ class Matrix:
     role: str   # attn_q ... ffn_down, token_embd, output
 
     def nbytes(self, t: str) -> int:
-        block, size = GGML_QUANT_SIZES[GGMLQuantizationType[t]]
-        return self.rows * (self.cols // block) * size
+        return math.prod(quant_shape_to_byte_shape((self.rows, self.cols), GGMLQuantizationType[t]))
 
 
 @lru_cache(maxsize=None)
@@ -99,7 +105,7 @@ def named(size: str) -> str:  # 14b, or the full name
 
 
 def clock() -> str:
-    return time.strftime("%H:%M", time.gmtime(time.time() + 19800))  # IST
+    return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%H:%M")
 
 
 def note(msg: str) -> None:  # `HH:MM <SIZE> msg` in data/logs/progress-b<budget>.log, which the dashboard reads
@@ -120,7 +126,27 @@ def record(kind: str, suffix: str = "-v2") -> Path:
 
 
 def digest(x) -> str:
-    return hashlib.sha256(json.dumps(x, sort_keys=True).encode()).hexdigest()[:12]
+    return hashlib.sha256(json.dumps(x, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+
+def consts(*mods: str) -> dict:
+    """Every constant (UPPERCASE name) the named panther modules assign, not import: a step's inputs hold them all,
+    so none can be left out by hand."""
+    out = {}
+    for m in mods:
+        x = import_module(f"panther.{m}")
+        out |= {f"{m}.{t.id}": getattr(x, t.id) for n in ast.parse(Path(x.__file__).read_text()).body
+                if isinstance(n, (ast.Assign, ast.AnnAssign)) for t in ast.walk(n)
+                if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store) and t.id.isupper() and t.id[0] != "_"}
+    return out
+
+
+@cache
+def llama_commit() -> str:
+    """The llama.cpp commit every llama.cpp result comes from (the image checks out a detached commit)."""
+    if not re.fullmatch(r"[0-9a-f]{40}", c := (LLAMA / ".git/HEAD").read_text().strip()):
+        raise RuntimeError(f"{LLAMA}/.git/HEAD holds {c[:60]!r}, not a commit")
+    return c
 
 
 def put(f: Path, text: str) -> None:
@@ -135,17 +161,27 @@ def done(f: Path, inputs: str) -> bool:  # a step's output exists and was made f
     return f.exists() and json.loads(f.read_text()).get("inputs") == inputs
 
 
-def sha(f: Path) -> str:  # kept beside the file (<file>.sha256) while its size and time are unchanged
-    side, st = Path(f"{f}.sha256"), f.stat()
-    key = [str(st.st_size), str(st.st_mtime_ns)]
-    if side.exists() and (old := side.read_text().split())[:2] == key:
-        return old[2]
-    h = hashlib.sha256()
+def _sig(f: Path) -> str:  # a sidecar holds for f while f's size and time are unchanged
+    return f"{f.stat().st_size} {f.stat().st_mtime_ns} "
+
+
+def made(f: Path, inputs: str) -> bool:  # f exists and <f>.inputs says it was made from these inputs
+    s = Path(f"{f}.inputs")
+    return f.exists() and s.exists() and s.read_text() == _sig(f) + inputs
+
+
+def stamp(f: Path, inputs: str) -> None:  # records what f was made from
+    put(Path(f"{f}.inputs"), _sig(f) + inputs)
+
+
+def sha(f: Path) -> str:  # kept beside the file (<file>.sha256)
+    side, sig = Path(f"{f}.sha256"), _sig(f)
+    if side.exists() and (old := side.read_text()).startswith(sig):
+        return old[len(sig):]
     with open(f, "rb") as fh:
-        while b := fh.read(1 << 24):
-            h.update(b)
-    put(side, " ".join(key + [h.hexdigest()]))
-    return h.hexdigest()
+        h = hashlib.file_digest(fh, "sha256").hexdigest()
+    put(side, sig + h)
+    return h
 
 
 @contextmanager

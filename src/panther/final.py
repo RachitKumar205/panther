@@ -10,16 +10,15 @@ from pathlib import Path
 
 from panther import measure as ms
 from panther.data import WEB, chat_text
-from panther.model import CFG, DATA, digest, done, hold, note, path, put, record, sha, short
+from panther.model import CFG, DATA, RULES, consts, digest, done, hold, note, path, put, record, sha, short
 from panther.search import build, label
 from panther.store import copy_of, preset_file
 
 
 def final_ins(model: str) -> tuple[str, list]:
-    """The step's inputs, and what a distilled file is made from."""
-    from panther.distill import BATCH, SEQ, STEPS, TOPK
+    """The step's inputs (the list's and the preset's carry measure's), and what a distilled file is made from."""
     lst, pr = json.loads(record("list").read_text()), json.loads(record("preset", "").read_text())
-    dins = [sha(copy_of(model, "BF16"))] + [sha(f) for f in teach(model)] + [SEQ, BATCH, TOPK, STEPS]
+    dins = [sha(copy_of(model, "BF16"))] + [sha(f) for f in teach(model)] + [consts("distill"), RULES["final"]]
     return digest([lst["inputs"], pr["inputs"], dins]), dins
 
 
@@ -64,13 +63,13 @@ def final(model: str, budget: int) -> None:
     w = min(rows, key=lambda k: rows[k]["score"])
     item = items[w.split()[0]]
     g = ms.versus({**rows[w], "correct": ms.correct(model, labels[w])}, {**preset_sel, "correct": ms.correct(model, pl)},
-                  ms.correct(model, "original"))  # the guard: the same rule as the verdict, on selection data
+                  ms.correct(model, ms.original(model)))  # the guard: the same rule as the verdict, on selection data
     note(f"guard: {w} vs preset {p} on all selection questions: relative {g['relative']:.1f} "
          f"[{g['relative_ci'][0]:.1f}, {g['relative_ci'][1]:.1f}]")
     if warn := g["verdict"] == "LOSE":  # reported, not a stop: a run that would lose still gets its verdict
         note("guard: WORSE than the preset on selection questions; held-out test run anyway")
     ours, theirs, orig = ms.parallel([lambda: ms.test(model, files[w], labels[w]), lambda: ms.test(model, pf, pl),
-                                      lambda: ms.test(model, bf16, "original")])
+                                      lambda: ms.test(model, bf16, ms.original(model))])
     # the verdict: our relative score on held-out data (relative, relative_ci; diff, ci = those - 100, negative =
     # better than the preset); the accuracy difference is reported, not judged
     v = ms.versus(ours, theirs, orig["correct"])

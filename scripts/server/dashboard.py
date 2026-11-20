@@ -51,8 +51,8 @@ DESCRIBE = {
     "preset": "every llama.cpp preset that fits the budget is scored on the selection questions; the most accurate"
               " is the competitor (none fits: the smallest)",
     "ga": "genetic search: genomes (one type per matrix, inside the RAM budget) scored by flips % + 10 × KL (flips on"
-          " 900 selection questions, KL on the select split), relative to the preset; stops after 15 genomes without"
-          " a gain beyond the measurement's noise (at least 30, at most 70)",
+          " 900 selection questions, KL on the select split), relative to the preset; 70 genomes, each recorded with"
+          " its origin (start, mutation, crossover, solver)",
     "final": "the best 3 built distilled and undistilled (6 files), scored on all selection questions and the select"
              " split, the lowest score wins; a warning if it is clearly worse than the preset (guard); then the"
              " verdict on held-out data: relative score (100 = the preset's damage, lower is better), WIN, TIE or LOSE",

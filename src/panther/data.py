@@ -72,10 +72,13 @@ def overlapping(prompts: list[str], texts: list[str], n: int = 8) -> set[int]:
     return hit
 
 
+def jsonl(f: Path) -> list[dict]:  # not splitlines: questions hold U+2028
+    return [json.loads(x) for x in f.read_text().split("\n") if x]
+
+
 def questions(group: str) -> dict[str, list[list[str]]]:
     """A question split's records (tasks/<group>/*.jsonl), each as the strings of its question and answers, by file."""
-    return {f.name: [strings({k: v for k, v in json.loads(x).items() if k not in LABELS})
-                     for x in f.read_text().split("\n") if x]  # not splitlines: questions hold U+2028
+    return {f.name: [strings({k: v for k, v in r.items() if k not in LABELS}) for r in jsonl(f)]
             for f in sorted((DATA / "splits/tasks" / group).glob("*.jsonl"))}
 
 
@@ -115,15 +118,23 @@ def prompts() -> None:
 
 
 def check() -> None:
-    """Decision 3: the splits are their manifests' files and share no document, question or prompt; no prompt shares 8 words with a benchmark question. Else the run stops."""
+    """Decision 3: the splits are their manifests' files and share no document, question or prompt; the files measured
+    hold exactly the checked questions; no prompt shares 8 words with a benchmark question. Else the run stops."""
     s, bad = DATA / "splits", []
     want = json.loads((s / "manifest.json").read_text())["files"]
-    tasks = json.loads((s / "llama_tasks/manifest.json").read_text())["files"].values()
-    want |= {e["file"]: e["sha256"] for e in tasks}
+    tasks = json.loads((s / "llama_tasks/manifest.json").read_text())["files"]
+    want |= {e["file"]: e["sha256"] for e in tasks.values()}
     used = [*WEB.values(), *(s / "tasks/selection").glob("*.jsonl"), *(s / "tasks/test").glob("*.jsonl")]
     bad += [f"{f.relative_to(s)}: not in the manifest" for f in used if str(f.relative_to(s)) not in want]
-    bad += [f"{e['file']}: missing" for e in tasks if not (s / e["file"]).exists()]
-    bad += [f"{f}: hash differs" for f, h in want.items() if (s / f).exists() and sha(s / f) != h]
+    bad += [f"{f}: missing" if not (s / f).exists() else f"{f}: hash differs" for f, h in want.items()
+            if not (s / f).exists() or sha(s / f) != h]
+    for t in ("mmlu", "hellaswag", "arc_challenge", "winogrande"):  # llama.cpp's files: their questions' ids
+        sel, held = ({r["id"] for r in jsonl(s / f"tasks/{sp}/{t}.jsonl")} for sp in ("selection", "test"))
+        if set(tasks[f"selection/{t}"]["ids"]) != sel or not set(tasks[f"poc_test/{t}"]["ids"]) <= held - sel:
+            bad.append(f"llama_tasks {t}: not the selection questions, or held-out ones not only from the test split")
+    test = {json.dumps(r, sort_keys=True) for r in jsonl(s / "tasks/test/gsm8k.jsonl")}
+    if any(json.dumps(r, sort_keys=True) not in test for r in jsonl(s / "llama_tasks/poc_test/gsm8k.jsonl")):
+        bad.append("llama_tasks/poc_test/gsm8k.jsonl: questions not in the test split")
     ids = {sp: set(json.loads(ids_of(p).read_text())) for sp, p in WEB.items()}
     bad += [f"web {a} and {b}: {n} documents in both" for a, b in combinations(SPLITS, 2)
             if (n := len(ids[a] & ids[b]))]

@@ -54,16 +54,34 @@ def test_nothing_twice(tmp_path, monkeypatch):
     fake.chmod(0o755)
     monkeypatch.setattr(measure, "DATA", tmp_path)
     monkeypatch.setattr(measure, "BIN", tmp_path)
+    monkeypatch.setattr(measure, "llama_commit", lambda: "a" * 40)
     hold.set(10 * GIB, 10 * GIB)
+    measure.kld("Qwen2.5-1.5B-Instruct", "select").parent.mkdir(parents=True)
+    measure.kld("Qwen2.5-1.5B-Instruct", "select").write_bytes(b"ref")
     f = tmp_path / "x.gguf"
     f.write_bytes(b"gguf")
-    first = measure.run("kl", "Qwen2.5-1.5B-Instruct", f, "x:1", reference="select100k")
-    assert measure.run("kl", "Qwen2.5-1.5B-Instruct", f, "x:1", reference="select100k") == first
+    first = measure.run("kl", "Qwen2.5-1.5B-Instruct", f, "x:1", split="select")
+    assert measure.run("kl", "Qwen2.5-1.5B-Instruct", f, "x:1", split="select") == first
     assert (tmp_path / "calls").read_text().count("run") == 1
+    assert first["how"]["llama"] == "a" * 40 and first["how"]["ctx"][0] == measure.CTX
+    monkeypatch.setattr(measure, "llama_commit", lambda: "b" * 40)  # another llama.cpp: measured anew
+    assert measure.run("kl", "Qwen2.5-1.5B-Instruct", f, "x:1", split="select") != first
+    assert (tmp_path / "calls").read_text().count("run") == 2
     h = sha(f)
     assert sha(f) == h and Path(f"{f}.sha256").exists()  # kept beside the file
     f.write_bytes(b"GGUF")
     assert sha(f) != h  # a changed file is hashed anew, so its results are measured anew
+
+
+def test_derived_files_carry_their_inputs(tmp_path):
+    from panther.model import made, stamp
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    assert not made(f, "i")
+    stamp(f, "i")
+    assert made(f, "i") and not made(f, "j")
+    os.utime(f, ns=(1, 1))  # rewritten (killed before its new stamp): not taken as made from the old inputs
+    assert not made(f, "i")
 
 
 def test_presets_shared_by_budgets(tmp_path, monkeypatch):

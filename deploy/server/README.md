@@ -8,7 +8,7 @@ How Panther runs on the shared server (RHEL 10, SELinux enforcing, RTX PRO 6000 
 Everything goes through `./panther` at the repo root (its usage header lists the commands; `./panther` alone prints
 it): from your machine it syncs the code here and runs the same command. `./panther run 14b@5` returns at once and
 runs the contest detached as three containers in order: `fetch` (CPU, network), `run` (GPU, no network), `publish`
-(CPU, network); `./panther qat 14b@5` is the same shape. A run claims its GPU and RAM when it starts
+(CPU, network). A run claims its GPU and RAM when it starts
 (`data/locks/claims.json`) and refuses to start, naming the runs holding the rest, if they do not fit beside the
 active ones; `./panther stop 14b@5` stops only that run. Starting a run also starts the dashboard and the GitLab guard
 (3 bad checks → every Panther container paused; 5 good → resumed). Log: `data/logs/panther.log` (also on the
@@ -96,7 +96,7 @@ undoes its own run on any failure. `--dry-run` prints the steps. Templates: `ngi
 
 ## Two kinds of container
 
-| | CPU (`fetch`, `publish`, `qatdata`, `qatpublish`, `cexec`) | GPU (`run`, `qat`, `test`, `exec`) |
+| | CPU (`fetch`, `publish`, `cexec`) | GPU (`run`, `test`, `exec`) |
 |---|---|---|
 | SELinux | confined (`container_t`) | labelling off (required for `/dev/nvidia*`) |
 | GPU | none | all (CDI `nvidia.com/gpu=all`) |

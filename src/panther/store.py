@@ -27,6 +27,10 @@ def imatrix(model: str) -> Path:
     return STORE / model / f"{model}.imatrix.gguf"
 
 
+def imatrix_out(model: str) -> Path:  # with the output layer's data (a tied word table's under its name): the error's
+    return STORE / model / f"{model}.imatrix-output.gguf"
+
+
 def preset_file(model: str, p: str) -> Path:
     return STORE / model / f"preset-{p}.gguf"
 
@@ -117,12 +121,13 @@ def build(model: str) -> None:
         if hf.exists():
             shutil.rmtree(hf)  # rounding reads the 16-bit GGUF: the original from here on
         size = bf16.stat().st_size
-        if not imat.exists():
-            po = ["--process-output"] if MODELS[model].get("imatrix_process_output") else []
-            with hold(size + 4 * GIB, 2 * size):
-                subprocess.run([str(BIN / "llama-imatrix"), "-m", str(bf16), "-f", str(WEB["train"]), "-o",
-                                f"{imat}.part.gguf", "-c", "512", "-ngl", "99", "-t", str(THREADS)] + po, check=True)
-            os.rename(f"{imat}.part.gguf", imat)
+        for f, out in ((imat, MODELS[model].get("imatrix_process_output")), (imatrix_out(model), True)):
+            if not f.exists():  # the store's importance data; the same with the output layer's, for the offline error
+                with hold(size + 4 * GIB, 2 * size):
+                    subprocess.run([str(BIN / "llama-imatrix"), "-m", str(bf16), "-f", str(WEB["train"]), "-o",
+                                    f"{f}.part.gguf", "-c", "512", "-ngl", "99", "-t", str(THREADS)]
+                                   + (["--process-output"] if out else []), check=True)
+                os.rename(f"{f}.part.gguf", f)
         if removed(model):
             return  # removed after their backup; fetch restores them when a step of the run still needs them
         M, have = Model(model), [t for t in rounded(model) if copy_of(model, t).exists()]
@@ -179,3 +184,4 @@ def drop_presets(model: str, busy: list[str]) -> None:
         if f.name[len("preset-"):-len(".gguf")] not in keep:
             f.unlink()
             Path(f"{f}.sha256").unlink(missing_ok=True)
+            Path(f"{f}.inputs").unlink(missing_ok=True)

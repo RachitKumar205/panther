@@ -18,17 +18,21 @@ from pathlib import Path
 
 import numpy as np
 
-from panther.data import PROMPT_FILE, REF, SPLITS, WEB, chat_text, joined_text, select_text
-from panther.model import BIN, DATA, GIB, REPO, RUN, THREADS, hold, lock, put, sha
+from panther.data import PROMPT_FILE, REF, SELECT_TOKENS, SPLITS, WEB, chat_text, joined_text, jsonl, select_text
+from panther.model import (BIN, CFG, DATA, GIB, REPO, RULES, RUN, THREADS, consts, digest, hold, llama_commit, lock,
+                           made, put, sha, stamp)
 from panther.store import copy_of
 
 TASKS = ["mmlu", "hellaswag", "arc_challenge", "winogrande"]
 FIT = {"mmlu": 300, "arc_challenge": 200, "hellaswag": 200, "winogrande": 200}  # the GA's selection questions
-FIRST = {t: v // 3 for t, v in FIT.items()}  # a first look: a genome clearly worse here is not finished
+FIRST = {t: v // 3 for t, v in FIT.items()}  # a first look: the first third of FIT (llama.cpp draws them in order)
+DROP_SE = 2  # a first look drops a genome worse than its rival there by more than 2 SE of the difference
 ALL = dict.fromkeys(TASKS, 0)  # every selection question (llama.cpp's n = 0)
 KL_WEIGHT = 10  # score = flips % + 10 x KL on the select text (lower is better)
-CTX = 2048
+CTX = 2048  # KL and perplexity: chunks (and batches) of 2,048 tokens
+TASK_CTX, PARALLEL = 4096, 5  # multiple choice: 5 sequences of up to 4,096 positions at once
 STOP = ["Question:", "</s>", "<|im_end|>"]
+MANIFEST = "splits/llama_tasks/manifest.json"  # under DATA: the task files and their hashes
 
 
 class ParseError(ValueError):
@@ -36,11 +40,16 @@ class ParseError(ValueError):
 
 
 def parse_kl(text: str) -> dict:
-    m = re.search(r"Mean\s+KLD:\s*(-?[0-9.]+)\s*±\s*([0-9.]+)", text)
+    """The mean KL, same top word %, and each chunk's KL, recovered from the running mean printed after each chunk
+    (each chunk scores the same 1,023 tokens): chunk k = k x mean_k - (k-1) x mean_(k-1)."""
+    m = re.search(r"Mean\s+KLD:\s*(-?[0-9.]+)", text)
     top = re.search(r"Same top p:\s*([0-9.]+)", text)
-    if not (m and top):
+    rows = re.findall(r"^\s*(\d+)\s+\S+ ± \s*\S+\s+\S+ ± \s*\S+\s+(-?[0-9.]+) ± ", text, re.M)
+    if not (m and top and rows) or [int(i) for i, _ in rows] != list(range(1, len(rows) + 1)) or \
+            abs(float(rows[-1][1]) - float(m[1])) > 1e-5:  # every chunk line, the last one llama.cpp's mean
         raise ParseError("KL output incomplete")
-    return {"kl_mean": float(m[1]), "kl_se": float(m[2]), "top1_pct": float(top[1])}
+    chunks = np.diff([0, *(float(v) * k for k, (_, v) in enumerate(rows, 1))])
+    return {"kl_mean": float(m[1]), "top1_pct": float(top[1]), "kl_chunks": chunks.tolist()}
 
 
 def parse_ppl(text: str) -> float:
@@ -71,33 +80,39 @@ def need(size: int, extra: int = 4 * GIB, model: str = "") -> tuple[int, int]:
     for 300 or all questions; perplexity and KL, 2,048 positions, 1.2 GB), plus the file and 1 GiB. A file's runs book
     this once and run one after another."""
     vocab = json.loads((REPO / "configs/model_configs" / f"{model or RUN['model']}.json").read_text())["vocab_size"]
-    return int(1.1 * size) + extra, 5 * 4096 * vocab * 4 + size + GIB
+    return int(1.1 * size) + extra, PARALLEL * TASK_CTX * vocab * 4 + size + GIB
 
 
 def cost(f: Path, extra: int = 4 * GIB, model: str = "") -> tuple[int, int]:
     return need(f.stat().st_size, extra, model)
 
 
-def write(f: Path, x) -> None:
-    put(f, json.dumps(x))
-
-
 def kld(model: str, sp: str) -> Path:
     return DATA / "reference" / model / f"{REF[sp]}.kld"
 
 
-def kl_how(model: str, sp: str) -> dict:
-    """A KL run's cache key: the reference and its hash (a regenerated reference is measured against anew)."""
-    return {"reference": REF[sp], "ref": sha(kld(model, sp))[:12]}
+def original(model: str) -> str:  # the original's results label: its file's hash, like every other file's
+    return f"original:{sha(copy_of(model, 'BF16'))[:12]}"
 
 
-def fits(model: str, r: dict, how: dict) -> bool:
-    h = r["how"]
-    if "ref" in how and "ref" not in h:  # made before KL records carried the reference's hash: valid if made after it
-        made = dt.datetime.fromtimestamp((DATA / "reference" / model / f"{how['reference']}.kld").stat().st_mtime,
-                                         dt.timezone.utc)
-        h = {**h, "ref": how["ref"]} if r["eval_id"][:15] > f"{made:%Y%m%dT%H%M%S}" else h
-    return all(h.get(k) == v for k, v in how.items())
+def entry(how: dict) -> dict:  # a task file's manifest entry (file, n, sha256)
+    return json.loads((DATA / MANIFEST).read_text())["files"][f"{how['split']}/{how['task']}"]
+
+
+def key(model: str, how: dict) -> dict:
+    """A llama.cpp result's whole cache key, which a stored record must match exactly: what was asked, its input
+    file's hash (task file, text or reference), the llama.cpp commit, its settings and measure's rules."""
+    f = entry(how)["sha256"] if "task" in how else sha(DATA / "splits/text" / f"{how['text']}.txt") if "text" in how \
+        else sha(kld(model, how["split"]))
+    return {**how, "file": f[:12], "llama": llama_commit(), "ctx": [CTX, TASK_CTX, PARALLEL], "rules": RULES["measure"]}
+
+
+def inputs(model: str) -> list:
+    """What every scoring step rests on besides its own inputs: the llama.cpp commit, the original and its references,
+    the task files, the RAM model, measure's and data's constants and rules."""
+    return [llama_commit(), sha(copy_of(model, "BF16")), [sha(kld(model, sp)) for sp in REF], sha(DATA / MANIFEST),
+            {k: v for k, v in CFG.items() if k != "contests"}, consts("measure", "data"), RULES["refs"],
+            RULES["measure"]]
 
 
 _SEEN: dict[Path, dict] = {}  # records already read (every run of a model writes into one folder)
@@ -107,29 +122,30 @@ def find(model: str, label: str, **how) -> dict | None:
     for p in (DATA / "results" / model).glob("*.json"):
         if p not in _SEEN:
             _SEEN[p] = json.loads(p.read_text())
+    want = key(model, how)
     hits = [r for p, r in list(_SEEN.items()) if p.parent.name == model and r.get("label") == label and r.get("ok")
-            and fits(model, r, how)]
+            and r["how"] == want]
     return max(hits, key=lambda r: r["eval_id"]) if hits else None
 
 
 def run(kind: str, model: str, gguf: Path, label: str, **how) -> dict:
-    """kind "kl" (how: kl_how), "ppl" (text) or "task" (task, split, n: a fixed subset, 0 = all); cached."""
+    """kind "kl" (split: the reference), "ppl" (text) or "task" (task, split, n: a fixed subset, 0 = all); cached."""
     if rec := find(model, label, **how):
         return rec
     d = DATA / "results" / model
     eid = f"{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%S%fZ}-{kind}-{uuid.uuid4().hex[:8]}"
     cmd = [str(BIN / "llama-perplexity"), "-m", str(gguf), "-t", str(THREADS), "-ngl", "99"]
     if kind == "kl":
-        cmd += ["--kl-divergence-base", str(DATA / "reference" / model / f"{how['reference']}.kld"),
+        cmd += ["--kl-divergence-base", str(kld(model, how["split"])),
                 "--kl-divergence", "-c", str(CTX), "-b", str(CTX)]
     elif kind == "ppl":
         cmd += ["-f", str(DATA / "splits/text" / f"{how['text']}.txt"), "-c", str(CTX), "-b", str(CTX)]
     else:
-        entry = json.loads((DATA / "splits/llama_tasks/manifest.json").read_text())["files"][
-            f"{how['split']}/{how['task']}"]
-        n, f = how.get("n") or entry["n"], str(DATA / "splits" / entry["file"])
+        e = entry(how)
+        n, f = how.get("n") or e["n"], str(DATA / "splits" / e["file"])
         o = "--winogrande" if how["task"] == "winogrande" else "--multiple-choice"
-        cmd += ["-f" if o == "--winogrande" else "-bf", f, o, f"{o}-tasks", str(how.get("n", 0)), "-c", "4096", "-np", "5"]
+        cmd += ["-f" if o == "--winogrande" else "-bf", f, o, f"{o}-tasks", str(how.get("n", 0)), "-c", str(TASK_CTX),
+                "-np", str(PARALLEL)]
     t0, log = time.monotonic(), d / "logs" / f"{eid}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with hold(*cost(gguf, model=model)):
@@ -139,7 +155,8 @@ def run(kind: str, model: str, gguf: Path, label: str, **how) -> dict:
     try:
         if p.returncode:
             raise ParseError(f"exit code {p.returncode}")
-        rec = {"eval_id": eid, "label": label, "how": how, "seconds": round(time.monotonic() - t0), "ok": True}
+        rec = {"eval_id": eid, "label": label, "how": key(model, how), "seconds": round(time.monotonic() - t0),
+               "ok": True}
         if kind == "kl":
             rec["metrics"] = parse_kl(text)
         elif kind == "ppl":
@@ -149,8 +166,9 @@ def run(kind: str, model: str, gguf: Path, label: str, **how) -> dict:
             rec["metrics"], rec["correct"] = {"accuracy_pct": 100 * float(c.mean())}, c.tolist()
     except ParseError as e:
         raise ParseError(f"llama-perplexity {kind} {how} on {gguf.name}: {e}; its output: {log}") from None
-    write(d / f"{eid}.json", rec)
-    print(f"{label} {kind} {how}: {rec['metrics']} [{rec['seconds']}s]", flush=True)
+    put(d / f"{eid}.json", json.dumps(rec))
+    shown = {k: len(v) if k == "kl_chunks" else v for k, v in rec["metrics"].items()}  # chunks of 1,023 tokens
+    print(f"{label} {kind} {how}: {shown} [{rec['seconds']}s]", flush=True)
     return rec
 
 
@@ -202,6 +220,9 @@ def complete(gguf: Path, prompts: list[str], chat: bool = False) -> list[str]:
                     time.sleep(1)
             else:
                 raise TimeoutError(f"llama-server did not start in 30 min; its output: {log}")
+            other = json.loads(urllib.request.urlopen(url + "/props", timeout=60).read())["model_path"]
+            if other != str(gguf):
+                raise RuntimeError(f"port {port} is answered by a server of {other}, not ours (it lost the port to it)")
             with ThreadPoolExecutor(8) as ex:
                 return list(ex.map(one, prompts))
         finally:  # never masks the error that got here, never leaves the server running
@@ -214,15 +235,16 @@ def complete(gguf: Path, prompts: list[str], chat: bool = False) -> list[str]:
 
 
 def gsm8k(model: str, gguf: Path, label: str) -> np.ndarray:
-    """0/1 per held-out GSM8K question, cached under data/results/<model>/gsm8k/."""
-    qs = DATA / "splits/llama_tasks/poc_test/gsm8k.jsonl"
+    """0/1 per held-out GSM8K question, cached under data/results/<model>/gsm8k/ with what made them."""
+    qs, fs = DATA / "splits/llama_tasks/poc_test/gsm8k.jsonl", DATA / "splits/tasks/fewshot/gsm8k.jsonl"
     rec = DATA / "results" / model / "gsm8k" / f"{label.replace(':', '_')}-{qs.parent.name}-0.json"
-    if not rec.exists():
-        jl = lambda p: [json.loads(x) for x in p.read_text().split("\n") if x]  # noqa: E731
-        items, shots = jl(qs), jl(DATA / "splits/tasks/fewshot/gsm8k.jsonl")
+    ins = digest([label, sha(qs), sha(fs), STOP, llama_commit(), RULES["measure"]])
+    if not made(rec, ins):
+        items, shots = jsonl(qs), jsonl(fs)
         head = "".join(f"Question: {s['question']}\nAnswer: {s['answer']}\n\n" for s in shots)
         outs = complete(gguf, [f"{head}Question: {it['question']}\nAnswer:" for it in items])
-        write(rec, [int(gsm8k_correct(o, it["answer"])) for o, it in zip(outs, items)])
+        put(rec, json.dumps([int(gsm8k_correct(o, it["answer"])) for o, it in zip(outs, items)]))
+        stamp(rec, ins)
     return np.array(json.loads(rec.read_text()), dtype=np.int8)
 
 
@@ -230,30 +252,37 @@ def gsm8k(model: str, gguf: Path, label: str) -> np.ndarray:
 
 def refs(model: str) -> None:
     """The original's chat answers (the dataset's chat part), its next-word probabilities on the select and test
-    text, and which selection and held-out questions it gets right."""
-    ref, bf16 = DATA / "reference" / model, copy_of(model, "BF16")
+    text, and which selection and held-out questions it gets right. Each file is made anew when what made it changed."""
+    ref, bf16, orig = DATA / "reference" / model, copy_of(model, "BF16"), original(model)
     ref.mkdir(parents=True, exist_ok=True)
     with lock(f"refs-{model}"):
-        if not all(chat_text(model, sp).exists() for sp in SPLITS):  # each model in its own chat template
+        ins = digest([sha(PROMPT_FILE), sha(bf16), llama_commit(), RULES["refs"]])
+        if not all(made(chat_text(model, sp), ins) for sp in SPLITS):  # each model in its own chat template
             ps = json.loads(PROMPT_FILE.read_text())["prompts"]
             outs = complete(bf16, [x["text"] for x in ps], chat=True)
             for sp in SPLITS:
                 put(chat_text(model, sp), "\n\n".join(o for o, x in zip(outs, ps) if x["split"] == sp) + "\n")
+                stamp(chat_text(model, sp), ins)
 
         for sp in REF:
-            if not (j := joined_text(model, sp)).exists():
+            j, sel = joined_text(model, sp), [SELECT_TOKENS] if sp == "select" else []
+            ins = digest([sha(chat_text(model, sp)), sha(WEB[sp]), sha(bf16), sel, RULES["refs"]])
+            if not made(j, ins):
                 put(j, select_text(model, bf16) if sp == "select" else
                     chat_text(model, sp).read_text() + "\n" + WEB[sp].read_text())
+                stamp(j, ins)
 
         def base(sp: str) -> None:
-            if not kld(model, sp).exists():  # whole 2048-token chunks: a last partial one is not read
+            ins = digest([sha(joined_text(model, sp)), sha(bf16), llama_commit(), CTX, RULES["refs"]])
+            if not made(kld(model, sp), ins):  # whole 2048-token chunks: a last partial one is not read
                 with hold(*cost(bf16)):
                     subprocess.run([str(BIN / "llama-perplexity"), "-m", str(bf16), "-f", str(joined_text(model, sp)),
-                                    "-c", "2048", "-b", "2048", "-ngl", "99", "-t", str(THREADS),
+                                    "-c", str(CTX), "-b", str(CTX), "-ngl", "99", "-t", str(THREADS),
                                     "--kl-divergence-base", f"{ref}/{REF[sp]}.part"], check=True)
                 os.rename(f"{ref}/{REF[sp]}.part", kld(model, sp))
-        parallel([lambda sp=sp: base(sp) for sp in REF] + [lambda: test(model, bf16, "original")] + [
-            lambda t=t, n=n: run("task", model, bf16, "original", task=t, split="selection", n=n[t])
+                stamp(kld(model, sp), ins)
+        parallel([lambda sp=sp: base(sp) for sp in REF] + [lambda: test(model, bf16, orig)] + [
+            lambda t=t, n=n: run("task", model, bf16, orig, task=t, split="selection", n=n[t])
             for t in TASKS for n in (FIT, FIRST, ALL)])
         parallel([lambda sp=sp: sha(kld(model, sp)) for sp in REF])  # hashed once here, not by every scoring thread
 
@@ -266,35 +295,39 @@ def test(model: str, path: Path, label: str) -> dict:
     """The held-out test: 4 multiple-choice tasks, GSM8K (test split), KL and perplexity on the test text."""
     jobs = [lambda t=t: run("task", model, path, label, task=t, split="poc_test", n=0) for t in TASKS]
     jobs += [lambda: gsm8k(model, path, label), lambda: run("ppl", model, path, label, text=joined_text(model, "test").stem)]
-    jobs += [] if label == "original" else [lambda: run("kl", model, path, label, **kl_how(model, "test"))]
+    jobs += [] if label.startswith("original:") else [lambda: run("kl", model, path, label, split="test")]
     r = parallel(jobs)
     c = {t: np.array(x["correct"]) for t, x in zip(TASKS, r)} | {"gsm8k": r[4]}
     kl = r[6]["metrics"] if len(r) > 6 else None
-    return {"correct": c, "kl": kl and kl["kl_mean"], "kl_se": kl and kl["kl_se"], "same_top": kl and kl["top1_pct"],
-            "ppl": r[5]["metrics"]["ppl"]}
+    return {"correct": c, "kl": kl and kl["kl_mean"], "kl_chunks": kl and kl["kl_chunks"],
+            "same_top": kl and kl["top1_pct"], "ppl": r[5]["metrics"]["ppl"]}
 
 
-def score(model: str, label: str, file, full: bool = False, cut: float | None = None) -> dict:
+def score(model: str, label: str, file, full: bool = False, rival: str | None = None) -> dict:
     """Flips (the GA's questions, or all selection questions if full) + 10 x KL on the select text. file: the GGUF or
-    a function building it (called only if a result is missing). cut: a file worse than cut on a first look at a
-    third of the questions is dropped there ("dropped": True)."""
+    a function building it (called only if a result is missing). rival (a label scored on the GA's questions): a file
+    worse than it on a first look at the first third of them, paired, is dropped there ("dropped": True)."""
     fpath = None
 
     def runs(n: dict) -> dict:
         nonlocal fpath
-        hows = [("kl", kl_how(model, "select"))] + [("task", {"task": t, "split": "selection", "n": n[t]}) for t in TASKS]
+        hows = [("kl", {"split": "select"})] + [("task", {"task": t, "split": "selection", "n": n[t]}) for t in TASKS]
         todo = [(k, h) for k, h in hows if not find(model, label, **h)]
         if todo and fpath is None:
             fpath = file() if callable(file) else file
         with hold(*cost(fpath)) if todo else contextlib.nullcontext():  # one booking per file, its runs in turn
             kl = [run(k, model, fpath, label, **h) for k, h in hows][0]["metrics"]
         c = correct(model, label, n)
-        f = flips(c, correct(model, "original", n))
-        return {"score": f + KL_WEIGHT * kl["kl_mean"], "flips": f, "kl": kl["kl_mean"], "kl_se": kl["kl_se"],
+        f = flips(c, correct(model, original(model), n))
+        return {"score": f + KL_WEIGHT * kl["kl_mean"], "flips": f, "kl": kl["kl_mean"], "kl_chunks": kl["kl_chunks"],
                 "same_top": kl["top1_pct"], "accuracy": acc(c)}  # same top word %: reported, not scored
     n = ALL if full else FIT
-    if cut is not None and not all(find(model, label, task=t, split="selection", n=n[t]) for t in TASKS):
-        if (first := runs(FIRST))["score"] > cut:
+    if rival and not all(find(model, label, task=t, split="selection", n=n[t]) for t in TASKS):
+        first, o = runs(FIRST), correct(model, original(model), FIRST)
+        w, wkl = {t: v[:FIRST[t]] for t, v in correct(model, rival, FIT).items()}, find(model, rival, split="select")
+        gap = first["score"] - flips(w, o) - KL_WEIGHT * wkl["metrics"]["kl_mean"]
+        if gap > DROP_SE * score_se(correct(model, label, FIRST), w, o, first["kl_chunks"], wkl["metrics"]["kl_chunks"],
+                                    KL_WEIGHT):
             return {**first, "dropped": True}
     return runs(n)
 
@@ -310,19 +343,24 @@ def flips(correct: dict[str, np.ndarray], original: dict[str, np.ndarray]) -> fl
     return 100 * float(np.mean([np.mean(correct[t] != original[t]) for t in original]))
 
 
-def score_se(a: dict, b: dict, original: dict, kl_se_a: float, kl_se_b: float, kl_weight: float) -> float:
+def kl_se(a: list, b: list) -> float:
+    """SE of the difference of two files' mean KL, paired over the chunks of the same text and reference."""
+    return float(np.std(np.subtract(a, b), ddof=1) / np.sqrt(len(a)))
+
+
+def score_se(a: dict, b: dict, original: dict, chunks_a: list, chunks_b: list, kl_weight: float) -> float:
     """SE of the difference of two scores: flips paired over the same questions (per task, averaged over tasks), and
-    the two KL runs' own SEs, independent."""
+    KL paired over the same chunks; the two independent."""
     f = 100 * np.sqrt(sum(np.var((a[t] != o).astype(float) - (b[t] != o).astype(float), ddof=1) / len(o)
                           for t, o in original.items())) / len(original)
-    return float(np.hypot(f, kl_weight * np.hypot(kl_se_a, kl_se_b)))
+    return float(np.hypot(f, kl_weight * kl_se(chunks_a, chunks_b)))
 
 
-def relative(a: dict, b: dict, original: dict, kl_a: float, kl_se_a: float, kl_b: float, kl_se_b: float,
+def relative(a: dict, b: dict, original: dict, kl_a: float, chunks_a: list, kl_b: float, chunks_b: list,
              kl_weight: float) -> tuple[float, float, float]:
     """a's score as % of b's, with its 95% interval: 100 x (score_a +- 1.96 SE of the difference) / score_b."""
     sa, sb = flips(a, original) + kl_weight * kl_a, flips(b, original) + kl_weight * kl_b
-    h = 1.96 * score_se(a, b, original, kl_se_a, kl_se_b, kl_weight)
+    h = 1.96 * score_se(a, b, original, chunks_a, chunks_b, kl_weight)
     return 100 * sa / sb, 100 * (sa - h) / sb, 100 * (sa + h) / sb
 
 
@@ -339,7 +377,7 @@ def against(r: dict, base: float) -> dict:
 def versus(a: dict, b: dict, orig: dict[str, np.ndarray], w: float = KL_WEIGHT) -> dict:
     """a's relative score against b (100 = b's damage) and its 95% interval; diff and ci: those - 100 (negative = better
     than b)."""
-    rel, lo, hi = relative(a["correct"], b["correct"], orig, a["kl"], a["kl_se"], b["kl"], b["kl_se"], w)
+    rel, lo, hi = relative(a["correct"], b["correct"], orig, a["kl"], a["kl_chunks"], b["kl"], b["kl_chunks"], w)
     return {"relative": rel, "relative_ci": [lo, hi], "diff": rel - 100, "ci": [lo - 100, hi - 100],
             "verdict": verdict(lo, hi), "unit": "relative score - 100"}
 

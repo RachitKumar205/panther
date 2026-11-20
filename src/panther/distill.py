@@ -17,6 +17,7 @@ LINEAR = {"self_attn.q_proj": "attn_q", "self_attn.k_proj": "attn_k", "self_attn
           "mlp.down_proj": "ffn_down"}
 NORM = {"input_layernorm": "attn_norm", "post_attention_layernorm": "ffn_norm"}
 SEQ, BATCH, TOPK, STEPS = 512, 2, 64, 600
+LR_SCALE, LR_NORM = 2e-3, 1e-4  # Adam's learning rates: block-scale multipliers, norms
 
 
 def _load(path: Path):
@@ -60,7 +61,7 @@ def passes(n: int, batch: int, steps: int, rng) -> list:
 
 def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=print) -> Path:
     """The final step's distillation: STEPS batches of BATCH sequences of the whole texts (every sequence once, in a
-    random order, before any repeats); scales at a rate of 2e-3, norms at 1e-4."""
+    random order, before any repeats); scales at a rate of LR_SCALE, norms at LR_NORM."""
     import gguf
     import torch
     import torch.nn.utils.parametrize as P
@@ -97,7 +98,8 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
     norms["output_norm.weight"] = m.model.norm.weight
     for w in norms.values():
         w.requires_grad_(True)
-    opt = torch.optim.Adam([{"params": list(scales.values()), "lr": 2e-3}, {"params": list(norms.values()), "lr": 1e-4}])
+    opt = torch.optim.Adam([{"params": list(scales.values()), "lr": LR_SCALE},
+                            {"params": list(norms.values()), "lr": LR_NORM}])
     for u, b in enumerate(passes(len(ids), BATCH, STEPS, np.random.default_rng(0)), 1):
         b = torch.from_numpy(b)
         logp = torch.log_softmax(m(ids[b].cuda()).logits.float(), -1)

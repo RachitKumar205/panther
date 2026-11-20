@@ -17,19 +17,17 @@ from pathlib import Path
 import numpy as np
 
 from panther import measure as ms
-from panther.data import REF
-from panther.model import BIN, GIB, THREADS, Model, bpw, digest, done, hold, lock, note, path, put, record, sha, short
-from panther.store import copy_of, ident, imatrix, preset_file
+from panther.data import WEB
+from panther.model import (BIN, GIB, RULES, THREADS, Model, bpw, consts, digest, done, hold, llama_commit, lock, made,
+                           note, path, put, record, sha, short, stamp)
+from panther.store import copy_of, ident, imatrix, imatrix_out, preset_file
 
 WINDOW = (-0.01, 0.005)  # a genome's RAM must be within -1% / +0.5% of the budget
-POP, ELITE, MAX_EVALS, MIN_EVALS, PATIENCE, TOP, SOLVED = 16, 4, 70, 30, 15, 3, 4  # an improvement: beyond 1 SE
-DROP_MARGIN = 3.0  # dropped only if its first-look score is this much worse than the population's worst (~2 SE)
+POP, ELITE, EVALS, TOP, SOLVED = 16, 4, 70, 3, 4  # population, mutants' parents, genomes, finalists, solver answers
 PRESETS = {"IQ1_S": 1.56, "IQ1_M": 1.75, "IQ2_XXS": 2.06, "IQ2_XS": 2.31, "IQ2_S": 2.5, "IQ2_M": 2.7, "Q2_K_S": 2.9,
            "IQ3_XXS": 3.06, "Q2_K": 3.2, "IQ3_XS": 3.3, "IQ3_S": 3.44, "Q3_K_S": 3.5, "IQ3_M": 3.66, "Q3_K_M": 3.9,
            "IQ4_XS": 4.25, "Q3_K_L": 4.27, "Q4_K_S": 4.58, "Q4_K_M": 4.89, "Q5_K_S": 5.54, "Q5_K_M": 5.69,
            "Q6_K": 6.56, "Q8_0": 8.5}
-
-
 @cache
 def reader(f: Path):
     """A GGUF's reader, kept: building a genome reads the same type copies again and again."""
@@ -42,37 +40,66 @@ def tensors(f: Path) -> dict:
     return {t.name: t for t in reader(f).tensors}
 
 
-def _error_one(job: tuple[str, str, list[str], np.ndarray]) -> tuple[str, dict[str, float]]:
+def weighted(d2: np.ndarray, cols: np.ndarray | None, rows: np.ndarray | None) -> float:
+    """The expected squared change of a matrix's output, from its squared weight errors d2 (rows x input columns):
+    each column weighted by its mean squared input; the word table's rows (its output is the row of the token read) by
+    each token's frequency; a tied word table, also the output layer, both."""
+    return sum(float(d2.sum(axis=a) @ v) for a, v in ((0, cols), (1, rows)) if v is not None)
+
+
+def _error_one(job: tuple) -> tuple[str, dict[str, float]]:
     from gguf.quants import dequantize
-    model, name, types, imp = job
+    model, name, types, cols, rows = job
     deq = lambda t: dequantize(tensors(copy_of(model, t))[name].data, tensors(copy_of(model, t))[name].tensor_type)  # noqa: E731
     w = deq("BF16").astype(np.float32)
-    return name, {t: float(((w - deq(t).reshape(w.shape)) ** 2).sum(axis=0) @ imp[: w.shape[1]]) for t in types}
+    return name, {t: weighted((w - deq(t).reshape(w.shape)) ** 2, cols, rows) for t in types}
+
+
+def error_ins(model: str) -> str:
+    return digest([ident(model), sha(imatrix_out(model)), sha(WEB["train"]), RULES["error"]])
 
 
 def error_done(model: str) -> bool:
     dst = path(model, "error.json")
-    return done(dst, ident(model)) and all(set(ts) <= set(json.loads(dst.read_text())["error"].get(g, {}))
-                                           for g, ts in Model(model).allowed().items())
+    return done(dst, error_ins(model)) and all(set(ts) <= set(json.loads(dst.read_text())["error"].get(g, {}))
+                                               for g, ts in Model(model).allowed().items())
 
 
 def error(model: str) -> None:
-    """Offline error of every matrix in every type: squared error weighted by the importance matrix. Per model: one
-    run of it computes, another finds it done."""
+    """Offline error of every matrix in every type: the expected squared change of its output. Per model: one run of
+    it computes, another finds it done."""
     with lock(f"error-{model}"):
         if not error_done(model):
             _error(model)
 
 
+def importance(f: Path, name: str) -> np.ndarray:  # a matrix's mean squared input per column, from an importance file
+    t = tensors(f)
+    n = max(float(t[f"{name}.counts"].data.flat[0]), 1)
+    return np.asarray(t[f"{name}.in_sum2"].data, np.float64).reshape(-1) / n
+
+
+def frequency(model: str) -> np.ndarray:
+    """Each token's share of the train web text, by token id (row r of the word table is token r; an id past its rows
+    makes the vector too long for the table, an error in weighted)."""
+    from transformers import AutoTokenizer
+    bf16 = copy_of(model, "BF16")
+    tok = AutoTokenizer.from_pretrained(str(bf16.parent), gguf_file=bf16.name)
+    n = np.bincount(tok(WEB["train"].read_text(), add_special_tokens=False).input_ids,
+                    minlength=tensors(bf16)["token_embd.weight"].shape[1])
+    return n / n.sum()
+
+
 def _error(model: str) -> None:
-    imat = {k: np.asarray(v.data, dtype=np.float64).reshape(-1) for k, v in tensors(imatrix(model)).items()}
-    jobs = []
-    for name, types in Model(model).allowed().items():
-        cnt = max(float(imat.get(f"{name}.counts", np.ones(1))[0]), 1.0)
-        jobs.append((model, name, types, imat.get(f"{name}.in_sum2", np.ones(1 << 16)) / cnt))
+    M, jobs = Model(model), []
+    tied = not any(m.role == "output" for m in M.matrices)
+    for m in M.matrices:  # layers: the store's importance data; the output layer (a tied word table too): the second
+        cols = importance(imatrix(model), m.name) if m.layer >= 0 else \
+            importance(imatrix_out(model), m.name) if m.role == "output" or tied else None
+        jobs.append((model, m.name, M.allowed()[m.name], cols, frequency(model) if m.role == "token_embd" else None))
     with ProcessPoolExecutor(8) as ex:
         err = dict(ex.map(_error_one, jobs))
-    put(path(model, "error.json"), json.dumps({"inputs": ident(model), "error": err}))
+    put(path(model, "error.json"), json.dumps({"inputs": error_ins(model), "error": err}))
 
 
 def solve(cost: dict[str, dict[str, int]], penalty: dict[str, dict[str, float]], lo: int, hi: int, k: int,
@@ -162,12 +189,21 @@ class Genes:
         return self.repair({g: p[g] if take[self.mats[g].layer] else q[g] for g in p})
 
     def proposals(self, scored: list[tuple[float, dict[str, str]]], k: int) -> list[dict[str, str]]:
-        """Fit score ~ sum over groups of (weight x the group's offline error), then the solver's k best genomes."""
+        """Fit score ~ c + sum over groups of (w + d_g) x the group's offline error, the d_g shrunk towards 0 (ridge,
+        its strength chosen by leave-one-out), a weight under a twentieth of the mean raised to it; then the solver's
+        k best genomes."""
         groups = sorted(set(self.group.values()))
         X = np.array([[sum(self.err[g][a[g]] for g in a if self.group[g] == grp) for grp in groups] for _, a in scored])
         s = X.mean(axis=0) + 1e-30
-        coef = np.linalg.lstsq(np.c_[X / s, np.ones(len(X))], [v for v, _ in scored], rcond=None)[0][:-1]
-        w = dict(zip(groups, np.maximum(coef, 1e-9 * max(1e-12, np.abs(coef).max())) / s))
+        A, y = np.c_[np.ones(len(X)), (X / s).sum(axis=1), X / s], np.array([v for v, _ in scored])
+
+        def fit(lam: float) -> tuple:  # the coefficients and their leave-one-out error
+            M = np.linalg.inv(A.T @ A + np.diag([0, 0] + [lam] * len(groups)))
+            b = M @ A.T @ y
+            return np.mean(((y - A @ b) / (1 - np.einsum("ij,jk,ik->i", A, M, A))) ** 2), list(b)
+        b = np.array(min(fit(lam) for lam in np.logspace(-3, 3, 13))[1])
+        c = b[1] + b[2:]
+        w = dict(zip(groups, np.maximum(c, abs(c.mean()) / 20) / s))
         pen = {g: {t: float(w[self.group[g]] * e) for t, e in es.items()} for g, es in self.err.items()}
         sols = solve(self.bytes, pen, int(self.lo - self.const), int(self.hi - self.const), k)
         return [a for a in sols if self.fits(a)]
@@ -229,7 +265,7 @@ def preset_label(model: str, p: str) -> str:
 
 
 def preset_ins(model: str, budget: int) -> str:
-    return digest([sha(imatrix(model)), sha(copy_of(model, "BF16")), budget, REF["select"], ms.FIT])
+    return digest([ms.inputs(model), sha(imatrix(model)), budget, consts("search"), RULES["preset"]])
 
 
 def preset(model: str, budget: int) -> None:
@@ -244,13 +280,15 @@ def preset(model: str, budget: int) -> None:
         if b > room + 0.3 and p != "IQ1_S":  # clearly too big (nominal bits per weight); IQ1_S is the fallback
             continue
         f = preset_file(model, p)
-        with lock(f"preset-{model}-{p}"):
-            if not f.exists():
+        with lock(f"preset-{model}-{p}"):  # made anew when what made it changed
+            fins = digest([sha(copy_of(model, "BF16")), sha(imatrix(model)), llama_commit(), p])
+            if not made(f, fins):
                 q = subprocess.run([str(BIN / "llama-quantize"), "--imatrix", str(imatrix(model)),
                                     str(copy_of(model, "BF16")), f"{f}.part", p, str(THREADS)], capture_output=True, text=True)
                 if q.returncode:
                     raise RuntimeError(f"llama-quantize {p} exited {q.returncode}: {q.stderr[-600:]}")
                 os.rename(f"{f}.part", f)
+                stamp(f, fins)
         ram = sum(int(t.n_bytes) for t in tensors(f).values()) + M.runtime()
         (fit if ram <= top else over).append((p, f, ram))
         note(f"preset {p}: {ram / GIB:.3f} GiB ({'fits' if ram <= top else 'too big'})")
@@ -269,13 +307,13 @@ def preset(model: str, budget: int) -> None:
 
 def ga_ins(model: str, budget: int) -> str:
     pr = json.loads(record("preset", "").read_text())
-    return digest([ident(model), pr["inputs"], budget, POP, MAX_EVALS, MIN_EVALS, PATIENCE, TOP])
+    return digest([ident(model), pr["inputs"], RULES["ga"]])  # the preset's carry the budget and constants
 
 
 def ga(model: str, budget: int) -> None:
     """Steady state, as many genomes at once as the claim holds (none twice, none while it is in flight); each round
-    SOLVED solver proposals from a fit of every score so far. Stops after PATIENCE genomes without an improvement
-    beyond 1 SE. Writes the TOP best."""
+    SOLVED solver proposals from a fit of every score so far. Scores EVALS genomes, each recorded with its origin;
+    writes the TOP best."""
     lst, pr, ins = record("list"), json.loads(record("preset", "").read_text()), ga_ins(model, budget)
     if done(lst, ins):
         return
@@ -284,29 +322,32 @@ def ga(model: str, budget: int) -> None:
     tmp.mkdir()
     G, base = Genes(model, budget), pr["score_fit"]  # the preset's score on the GA questions: relative scores
     have = {n: t.tensor_type.name for n, t in tensors(preset_file(model, pr["preset"])).items()}
-    queue = G.initial({g: have[g] if have[g] in ts else G.nearest(g, have[g]) for g, ts in G.steps.items()})
-    pop, seen, scored, best, last_gain, n, dropped, top, se, why = [], set(), [], float("inf"), 0, 0, 0, None, 0.0, ""
+    queue = [(a, "start") for a in G.initial({g: have[g] if have[g] in ts else G.nearest(g, have[g])
+                                              for g, ts in G.steps.items()})]
+    pop, seen, scored, log, origin, best, n = [], set(), [], [], {}, float("inf"), 0
     note(f"GA: {len(queue)} starting genomes")
 
-    def fresh() -> dict[str, str] | None:
-        """The next genome never scored nor in flight: from the queue, else a child; None if 500 tries find none."""
+    def fresh() -> tuple[dict[str, str], str] | None:
+        """The next genome never scored nor in flight, and its origin: from the queue, else a child; None if 500 tries
+        find none."""
         while queue:
-            if digest(a := queue.pop(0)) not in seen:
-                return a
+            if digest((x := queue.pop(0))[0]) not in seen:
+                return x
         for _ in range(500):
             if len(pop) < 2 or G.rng.random() < 0.3:
-                a = G.mutate(G.rng.choice(pop[:ELITE] or pop)[2])
+                a, o = G.mutate(G.rng.choice(pop[:ELITE] or pop)[2]), "mutation"
             else:
                 p, q = (min(G.rng.sample(pop, 2))[2] for _ in range(2))
-                a = G.crossover(p, q) if G.rng.random() < 0.5 else G.mutate(G.crossover(p, q))
+                a, o = (G.crossover(p, q), "crossover") if G.rng.random() < 0.5 else \
+                    (G.mutate(G.crossover(p, q)), "crossover+mutation")
             if digest(a) not in seen and G.fits(a):
-                return a
+                return a, o
         return None
 
-    def one(a: dict[str, str], cut: float | None) -> dict:
+    def one(a: dict[str, str], rival: str | None) -> dict:
         f = tmp / f"{digest(a)}.gguf"
         try:
-            return ms.score(model, label(model, a), lambda: procs.submit(build, model, a, f).result(), cut=cut)
+            return ms.score(model, label(model, a), lambda: procs.submit(build, model, a, f).result(), rival=rival)
         finally:
             f.unlink(missing_ok=True)
     g, m = ms.need(budget * GIB)  # a genome's file is about the budget, its runs one booking: as many as fit the claim
@@ -316,44 +357,38 @@ def ga(model: str, budget: int) -> None:
     with ThreadPoolExecutor(inflight) as ex, ProcessPoolExecutor(inflight, mp_context=get_context("spawn")) as procs:
         running = {}
 
-        def submit(a: dict[str, str] | None) -> None:
-            if a is None:  # nothing new to score now: the GA ends once those in flight are done
+        def submit(x: tuple[dict[str, str], str] | None) -> None:
+            if x is None:  # nothing new to score now: the GA ends once those in flight are done
                 return
-            seen.add(digest(a))
-            cut = pop[-1][0] + DROP_MARGIN if len(pop) >= POP else None  # a full population: weak ones dropped early
-            running[ex.submit(one, a, cut)] = a
+            seen.add(d := digest(x[0]))
+            origin[d] = x[1]
+            rival = label(model, pop[-1][2]) if len(pop) >= POP else None  # a full population: its worst to beat
+            running[ex.submit(one, x[0], rival)] = x
         while queue and len(running) < inflight:
             submit(fresh())
         while running:
             fut = next(as_completed(running))
-            a, n = running.pop(fut), n + 1
+            (a, o), n = running.pop(fut), n + 1
             r = ms.against(fut.result(), base)
-            if r.get("dropped"):
-                dropped += 1
-            else:
+            log.append({"origin": o, "score": r["score"], "dropped": bool(r.get("dropped"))})
+            if not r.get("dropped"):
                 scored.append((r["score"], a))
                 pop = sorted(pop + [(r["score"], digest(a), a)])[:POP]
-            if r["score"] < best and not r.get("dropped"):
-                if top:  # an improvement only beyond 1 SE of the difference (flips paired on the GA questions)
-                    se = ms.score_se(ms.correct(model, label(model, a), ms.FIT), ms.correct(model, top[0], ms.FIT),
-                                     ms.correct(model, "original", ms.FIT), r["kl_se"], top[1], ms.KL_WEIGHT)
-                last_gain = n if best - r["score"] > se else last_gain
-                best, top = r["score"], (label(model, a), r["kl_se"])
+            if not r.get("dropped") and r["score"] < best:
+                best = r["score"]
                 note(f"GA: genome {n}: new best score {best:.2f} (flips {r['flips']:.2f}%, KL {r['kl']:.4f}, "
-                     f"accuracy {r['accuracy']:.2f}, RAM {G.ram(a) / GIB:.3f} GiB); relative {r['relative']:.1f}")
+                     f"accuracy {r['accuracy']:.2f}, RAM {G.ram(a) / GIB:.3f} GiB); relative {r['relative']:.1f}; "
+                     f"from {o}")
             elif n % 10 == 0:
-                note(f"GA: {n} genomes, best score {best:.2f} ({dropped} dropped after a first look)")
-            if n + len(running) < MAX_EVALS and (n < MIN_EVALS or n - last_gain < PATIENCE):
+                note(f"GA: {n} genomes, best score {best:.2f} ({sum(x['dropped'] for x in log)} dropped after a first "
+                     f"look)")
+            if n + len(running) < EVALS:
                 if not queue and len(scored) >= 8:
                     picks = [p for p in G.proposals(scored, SOLVED) if digest(p) not in seen]
-                    queue += picks + [G.mutate(p) for p in picks[:2]]
+                    queue += [(p, "solver") for p in picks] + [(G.mutate(p), "solver mutant") for p in picks[:2]]
                 submit(fresh())
-            elif not why:  # why it stopped, as decided now (a genome still running may improve on best)
-                why = "plateau" if n - last_gain >= PATIENCE else "max"
-    put(lst, json.dumps({"inputs": ins, "finalists": {
-        f"{short(model)}:ga{i}": {"assignment": a, "score": s, "relative": 100 * s / base, "ram_gib": G.ram(a) / GIB}
-        for i, (s, _, a) in enumerate(pop[:TOP], 1)}}, indent=1))
-    why = (f"{PATIENCE} genomes without an improvement beyond 1 SE (best {best:.2f}, SE {se:.2f})" if why == "plateau"
-           else f"{MAX_EVALS} genomes reached, best score {best:.2f}" if why == "max"
-           else f"no genome not already scored found in 500 tries, best score {best:.2f}")
-    note(f"GA done: {n} genomes ({dropped} dropped after a first look); {why}")
+    put(lst, json.dumps({"inputs": ins, "genomes": log, "finalists": {
+        f"{short(model)}:ga{i}": {"assignment": a, "score": s, "relative": 100 * s / base, "ram_gib": G.ram(a) / GIB,
+                                  "origin": origin[d]} for i, (s, d, a) in enumerate(pop[:TOP], 1)}}, indent=1))
+    note(f"GA done: {n} genomes ({sum(x['dropped'] for x in log)} dropped after a first look); best score {best:.2f}"
+         + ("" if n >= EVALS else "; no genome not already scored found in 500 tries"))

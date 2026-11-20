@@ -22,11 +22,18 @@ output in `logs/`); `rewrite/budget-B/preset-<model>.json`, `list-<model>-v2.jso
 `pi_bundle/budget-B-<size>-v2/`;
 `logs/progress-b<B>.log` (the steps' notes) and `logs/panther.log`.
 
-**Nothing is measured or built twice.** A step returns at once if its output records the same `inputs` digest. A
-llama.cpp result is cached by label, and a label carries what the file is: `g:<digest of the genome and the store's
-hashes>`, `preset:<type>:<file hash>`, `d:<file hash>` (distilled). File hashes are kept
-beside the file (`<file>.sha256`) while its size and time are unchanged. A genome's file is built in the run's own
-`rewrite/<model>/tmp-b<B>/` and deleted after it is scored.
+**Nothing is measured or built twice, and nothing is reused that was made otherwise.** A step returns at once if
+its output records the same `inputs` digest. A step's inputs hold every constant of the modules it depends on
+(`model.consts` reads them from the source, so none can be left out), the llama.cpp commit (`model.llama_commit`, from
+`/opt/llama.cpp/.git/HEAD`), the RAM model's settings and the step's rule number (`model.RULES`, raised whenever its
+written-out logic changes). A llama.cpp result is cached by label and its key (`how`): what was asked, the hash of
+the task file, text or reference, the llama.cpp commit, its settings and measure's rule; a stored record is reused
+only if its key is exactly the one asked for. A label carries what the file is: `g:<digest of the genome and the store's hashes>`,
+`preset:<type>:<file hash>`, `d:<file hash>` (distilled), `original:<16-bit file hash>`. File hashes are kept beside
+the file (`<file>.sha256`) while its size and time are unchanged. Files made once and reused (the chat answers, the
+joined texts, the `.kld` references, GSM8K results, preset files) record what they were made from in
+`<file>.inputs` (with the file's size and time) and are made anew when that differs. A genome's file is built in the
+run's own `rewrite/<model>/tmp-b<B>/` and deleted after it is scored.
 
 ## In depth
 
@@ -51,12 +58,13 @@ importance-matrix data, which the word table never has and the output layer has 
 ### The claim
 
 A run claims, for its whole length, GPU memory of max(2 × parameters + 20 GiB (distillation's peak), k genomes) and
-RAM of max(2 × parameters + 8 GiB (the transformers load of the 16-bit model), 4 GiB + k genomes), k = up to 8
-genomes at once within 92 GiB GPU and 64 GiB RAM (`run.sizes`). All claims together stay within 92 GiB of
-GPU and 96 GiB of RAM (the host has 124 GB; the rest stays for GitLab). A claim counts while its `data/locks/run-<id>.lock` is held. Inside the run every llama.cpp
-process, rounding pass and distillation waits for its share of the claim less 4 GiB kept for the orchestrator
-(`model.hold`): a file's llama.cpp runs take one booking, 1.1 × its file + 4 GiB of GPU and 2.7 × its file + 1 GiB of
-RAM, and run one after another. A run refused at its claim never started: a "refused" line, not a FAILED one.
+RAM of max(2 × parameters + 8 GiB (the transformers load of the 16-bit model), 20 GiB + k genomes), k = up to 8
+genomes at once within half the caps, so two runs fit side by side (`run.sizes`). All claims together stay within
+94 GiB of GPU and 100 GiB of RAM (`run.CAP_GPU`, `run.CAP_RAM`; the host has ~125 GiB, the rest stays for GitLab). A
+claim counts while its `data/locks/run-<id>.lock` is held. Inside the run every llama.cpp process, rounding pass and
+distillation waits for its share of the claim less 20 GiB kept for the run's own processes (`run.RESERVE`,
+`model.hold`): a file's llama.cpp runs take one booking, 1.1 × its file + 4 GiB of GPU and 5 × 4,096 × the
+vocabulary × 4 bytes (multiple choice's buffer) + its file + 1 GiB of RAM, and run one after another. A run refused at its claim never started: a "refused" line, not a FAILED one.
 
 ### Error-compensated rounding (`rounding.py`)
 
@@ -75,8 +83,19 @@ The word table and output layer are quantized by llama.cpp without compensation 
 
 ### Offline error (`search.error`)
 
-**error(m, t) = Σ over columns importance_c × Σ over rows (w − ŵ)²**, ŵ being matrix m in type t's copy and
-importance_c the mean squared input of column c (from the importance matrix). It only guides repair and the solver.
+**error(m, t)** = the expected squared change of matrix m's output per token when it takes type t, ŵ being m in
+type t's copy:
+
+- a layer matrix: **Σ over columns importance_c × Σ over rows (w − ŵ)²**, importance_c the mean squared input of
+  column c (the store's importance matrix);
+- the output layer: the same, its importance from a second importance file, `<model>.imatrix-output.gguf`
+  (made beside the store's with `--process-output`; only this step reads it);
+- the word table (its output is the row of the token read): **Σ over rows freq_r × Σ over columns (w − ŵ)²**,
+  freq_r the share of token r in the train web text (the model's tokenizer); a tied word table is also the output
+  layer and takes both terms (llama-imatrix records that use under `token_embd.weight`).
+
+Missing importance data is an error. `error.json` is made anew when the store, the second file or the train text
+changes. It only guides repair and the solver.
 
 ### The score
 
@@ -88,13 +107,18 @@ importance_c the mean squared input of column c (from the importance matrix). It
 - **KL**: llama.cpp's mean KL divergence per token from the original's recorded probabilities, on the select text
   (`select100k-<model>.txt`): the original's greedy answers (up to 256 tokens, in its chat template) to the 150
   select prompts, then whole select web documents in a fixed random order (seed 0) until 100,352 tokens (49 × 2,048).
-  It is read in chunks of 2,048 tokens; a last partial chunk is not read (the count is logged).
+  It is read in chunks of 2,048 tokens; a last partial chunk is not read (the count is logged). llama.cpp scores only
+  the second half of each chunk (1,023 tokens, after 1,024 of context), so about half the tokens are scored (49
+  chunks: 50,127 of 100,352). Each chunk's KL is recovered from the running mean printed after it (`kl_chunks`); a
+  missing chunk line, or a last one that is not llama.cpp's mean, is an error.
 - **Same top word %** comes from the same KL run and is reported, not scored. Accuracy is recorded, never optimized.
 - **Relative score** = score ÷ the preset's score × 100, the preset scored on the same questions and text (the 900
   in the search, all selection questions in the final step): 100 = the preset's damage, 0 = none.
 - **Standard error of a difference** (`measure.score_se`): per task, the standard error of the mean of the two files'
   paired flip differences (only questions where they disagree add to it), combined over the tasks as the SE of
-  their mean; combined with 10 × both KL runs' own SEs (llama.cpp's, over the chunks), as independent errors.
+  their mean; combined, as independent errors, with 10 × the SE of the mean of the two files' paired per-chunk KL
+  differences (`measure.kl_se`: the same text and reference, so chunk k is the same text for both; about 49 chunks
+  on the select text, about 110 on the test text).
 
 ### The preset (`search.preset`)
 
@@ -120,18 +144,22 @@ on the search's 900 questions (`score_fit`) and on all selection questions are t
   more layer. Then repair.
 - **A child**: 30 %: a mutant of one of the 4 best; otherwise two parents, each the better of 2 random population
   members, then crossover (50 %) or crossover + mutation (50 %). A genome already scored is never scored again.
-- **Solver proposals** (from 8 scored genomes on, whenever the queue is empty): fit **score ≈ Σ_g w_g × x_g + c** by
-  least squares over every scored genome, x_g = the summed offline error of group g (role × depth quarter, about 30
-  groups). CP-SAT then finds 4 genomes inside the window that minimize **Σ w_g × error(m, t)**, each at least 3
+- **Solver proposals** (from 8 scored genomes on, whenever the queue is empty): fit **score ≈ c + Σ_g (w + d_g) × x_g**
+  over every scored genome, x_g = the summed offline error of group g (role × depth quarter, about 30 groups), each
+  scaled by its mean; the d_g are shrunk towards 0 (ridge regression, its strength chosen by leave-one-out among
+  10⁻³…10³), so with few genomes every group weighs about the same; a weight w + d_g under a twentieth of the mean is
+  raised to it. CP-SAT then finds 4 genomes inside the window that minimize **Σ w_g × error(m, t)**, each at least 3
   matrices from the others; those 4 and mutants of the first 2 are scored next.
 - **Steady state**: as many genomes at once as the claim holds (each counted as a file of the budget's size, at most
   16). The best 16 are the population.
-- **First look**: once the population is full, a new genome is first scored on a third of the questions (MMLU 100,
-  the others 66) and the full KL; if that score is more than 3 above the population's worst (about 2 standard
-  errors of the flips on that many questions), it is dropped. Dropped genomes count toward the stop rule.
-- **Stop**: a new best counts as an improvement only if it is lower than the previous best by more than 1 standard
-  error of the difference (on the 900 questions). A smaller gain still becomes the best but does not count. Stop
-  after 15 genomes in a row without an improvement; at least 30, at most 70. The 3 lowest go to the final step.
+- **First look**: once the population is full, a new genome is first scored on the first third of the questions
+  (MMLU 100, the others 66: llama.cpp draws a task's questions in a fixed order, so these are the first third of the
+  900) and the full KL. It is compared with the population's worst on the same questions and chunks, paired, and
+  dropped if worse by more than 2 standard errors of the difference.
+- **Length**: 70 genomes (dropped ones count), with no early stopping: the final step's re-scoring of the best 3 on
+  all selection questions decides among noisy scores. Each genome's origin (start, mutation, crossover,
+  crossover+mutation, solver, solver mutant), score and whether it was dropped are in the list record (`genomes`),
+  the finalists' origins beside them. The 3 lowest go to the final step.
 
 ### Distillation (`distill.py`)
 

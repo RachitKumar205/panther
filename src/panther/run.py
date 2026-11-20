@@ -14,9 +14,9 @@ import traceback
 from pathlib import Path
 
 from panther import data, final, measure, search, store
-from panther.model import DATA, GIB, RUN, Model, clock, done, hold, lock, named, note, record, short
+from panther.model import DATA, GIB, RUN, Model, clock, done, hold, lock, named, note, put, record, short
 
-CAP_GPU, CAP_RAM, RUN_RAM = 94 * GIB, 120 * GIB, 120 * GIB  # 96 GiB GPU, 124 GiB host: 4 GiB left for the system
+CAP_GPU, CAP_RAM = 94 * GIB, 100 * GIB  # all runs' claims: of 96 GiB GPU and the host's ~125 GiB, the rest for GitLab
 GENOMES = 8  # genomes scored at once that a claim is sized for (fewer if the caps do not hold them)
 SIDE = 2  # runs a claim is sized to fit beside each other: each run's genomes fit in 1 / SIDE of the caps
 RESERVE = 20 * GIB  # measured 20 Nov: ~19 GB on the 1.5B; the run's own processes outside its bookings: the orchestrator (torch, mapped type copies, records) and the genome builders
@@ -86,7 +86,7 @@ def claim(new: bool = False) -> int:
                                  f"{CAP_RAM // GIB} GiB RAM; start it when one of them ends")
             book[r] = {"model": RUN["model"], "budget": RUN["budget"], "kind": "run", "gpu": gpu, "ram": ram,
                        "host": os.uname().nodename, "since": time.strftime("%Y-%m-%d %H:%M")}
-            measure.write(CLAIMS, book)
+            put(CLAIMS, json.dumps(book))
     hold.set(gpu, ram - RESERVE)
     return ram
 
@@ -108,7 +108,7 @@ def tidy() -> None:
         store.clean(RUN["model"], others(book))
         store.drop_presets(RUN["model"], others(book))
         book.pop(rid(), None)
-        measure.write(CLAIMS, book)
+        put(CLAIMS, json.dumps(book))
 
 
 def finished(M: str, B: int) -> bool:

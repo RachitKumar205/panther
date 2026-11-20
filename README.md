@@ -35,6 +35,11 @@ the 14 types in `configs/search.yaml` leave them out.
 word is the original's, 64.5 % → 71.9 %.
 
 **Contests:**
+- Qwen2.5 1.5B @ 1 GiB (21 Nov 2026, the reviewed pipeline with decisions 1–17, before 18–21): **WIN**, relative score
+  65.8 [61.1, 70.5] against IQ2_S on held-out data (flips 19.83 vs 28.87 %, same top word 78.19 vs 66.95 %);
+  held-out accuracy 48.98 vs 39.91 (the original 55.97), 87.5 vs 71.3 % of the original's; the same verdict at KL
+  weight 5 and 20. Its search stopped after 31 genomes (best from genome 8), and its KL error came from llama.cpp's
+  per-token SEs, unpaired (both replaced by decisions 20 and 21).
 - InternLM2.5 20B (14 Nov 2026, search only, accuracy verdict): TIE at 5 GiB (+0.46 points) and at 7 GiB (+0.89).
   The model was then dropped for Mistral Small 22B: its model code does not run with the current transformers
   library, so it could get neither rounding nor distillation. Its logs and results are kept.
@@ -91,7 +96,7 @@ image installs exactly it (`uv sync --frozen`).
 - **One run** is three containers in order: `fetch` (CPU, network), `run` (GPU, no network), `publish` (CPU,
   network). No container has both GPU and network.
 - **The claim:** when it starts, before its three containers, the run claims the GPU memory and RAM it needs for its
-  whole length (`data/locks/claims.json`). If that does not fit beside the active runs' claims (92 GiB GPU, 96 GiB
+  whole length (`data/locks/claims.json`). If that does not fit beside the active runs' claims (94 GiB GPU, 100 GiB
   RAM in all), it refuses to start and names the runs holding the rest. A claim ends with its run, however the run ends.
 - **Failures are loud:** a failed step writes one `FAILED in <step>: <error>` line to `data/logs/panther.log` and the
   progress log, the traceback to its own log (`data/logs/<size>-b<budget>-<step>.log`), and stops the run.
@@ -161,6 +166,10 @@ was picked, and whether the guard was passed, may have been affected.
 | 15 | Final | Reported next to the verdict, deciding nothing: **accuracy kept**, each file's held-out accuracy ÷ the original's × 100, for ours and the preset; and whether the verdict stays the same with the KL weight at 5 and 20 instead of 10 (the weight is a choice, so its effect is shown). The relative score already places the original at 0 and the preset at 100. |
 | 16 | Data | Every stage reads the whole of its split, never a part of it. The select split is made smaller instead (~100k tokens: the 150 chat prompts' answers and whole web documents up to the rest), so the search's KL reads all of it at today's cost. The held-out test reads the whole test split. Distillation covers the whole train split: every sequence, in a random order (fixed seed), for the same 600 updates as before (about 1.6 passes), so it takes about as long. Web documents left out of the smaller select split are used by nothing. |
 | 17 | QAT | The QAT experiment's FineWeb-Edu sample (Stage 1: 4,096 × 2,048 tokens, its early-stopping checks 64 × 2,048; Stage 2: 4,096 × 4,096) counts as part of the train split: a web-only extension used only by QAT, about 60× larger than the rest of the train split. It shares no document with the select or test splits, and the split check confirms that. QAT's files are judged like a winner (guard on selection data, verdict on held-out data). The QAT code was removed afterwards (20 Nov). |
+| 18 | All | **Every cached result is keyed by everything that made it.** llama.cpp results by the file's hash (the original's too: `original:<BF16 hash>`), the llama.cpp commit, the task file's or text's hash and the run's settings; a stored record matches only if its key is exactly the one asked for. The chat answers, joined texts, references, GSM8K results and preset files carry their inputs too. Each step's inputs hold every constant of the modules it depends on, read from their source so none can be left out (KL weight, question counts, window, RAM model, margins, distillation's rates), and a `RULES` number raised when its written-out logic changes. Results made before this are not reused: the next run of each contest measures everything again except the store (finding 1 below). |
+| 19 | Error | **The word table and the output layer get an error on the same scale as every other matrix**: how much the matrix's own output changes. The output layer's columns are weighted by their mean squared input from a second importance file, `llama-imatrix --process-output` on the 16-bit original and the train web text, used only by the error step (the store's importance matrix and type copies stay as they are). The word table's rows are weighted by how often each token appears in the train web text (a lookup's output is the looked-up row). A tied word table (the 1.5B) gets both terms. Replaces a weight of 1 for both, which put their error 2–30× per weight off the rest (finding 3 below). |
+| 20 | Measure | **KL's standard error is paired over chunks.** Each 2,048-token chunk's KL is recovered from llama.cpp's running mean (chunk k = k × mean_k − (k−1) × mean_(k−1)); every chunk line must be read and they must add up to its final mean; the SE of a KL difference between two files is that of their per-chunk differences, paired (the same text and reference). It replaces llama.cpp's per-token ± (too small: neighbouring tokens move together) and treating the two files' KL as independent (too large: they share their hard chunks). Flips, from other data, stay an independent term. Used wherever decisions 9, 12 and 13 take an SE. With 5 printed decimals, chunk k is good to about ±k × 0.00001 (±0.0005 at chunk 49, ±0.001 at chunk 110), which widens the SE slightly and matters only for near-lossless files. **Decision 16 corrected:** llama.cpp scores only the second half of each chunk (every scored token has at least 1,024 tokens of context), so about half of each split's tokens are scored and the rest are context; this stays, and the scored count is logged. |
+| 21 | Search | **The search's rules.** (a) The first look compares a new genome with the population's worst on the same questions (the first third of the 900 is the first third of each task's questions, so the worst's answers to them are known) and the same chunks, paired; it is dropped if worse by more than 2 standard errors of that difference (replaces a fixed margin of 3.0, about 1.2 SE). (b) Every search scores 70 genomes; early stopping is dropped (replaces part of decision 9): which genome is best among noisy scores is settled by the final step's re-scoring on all selection questions, not by a stopping rule. (c) The solver's fit shrinks each group's weight towards one common weight (ridge regression, its strength chosen by leave-one-out over the scored genomes), so with few genomes it stays close to "least total offline error"; a weight below a twentieth of the mean is raised to it. Every genome's origin (start, mutation, crossover, solver) is recorded with its score, to show what each source contributes. |
 
 ### Open findings (code audit, 21 Nov 2026)
 
@@ -185,8 +194,8 @@ under the current rules.
    preset's as independent though they share text and reference (too large).
 
 **Server:**
-5. The RAM cap (`run.CAP_RAM`, 120 GiB) leaves too little of the host's ~125 GiB for the shared services; pausing a
-   container does not free its memory. Suggested: 96–100 GiB.
+5. The RAM cap (`run.CAP_RAM`, 120 GiB) left too little of the host's ~125 GiB for the shared services; pausing a
+   container does not free its memory. Lowered to 100 GiB.
 6. Disk: the 22B and 24B stores (~190–205 GB each, plus ~40 GB of references) do not fit in what is free. A model's
    references are ~44 GB (`select100k.kld` 15.5 GB, `test.kld` 28.9 GB on the 1.5B); stale `select.kld` files remain.
 7. Not verified: if the transformers load of the 16-bit model holds both its state dict and the model, rounding and
@@ -201,7 +210,8 @@ under the current rules.
 11. Not reproducible: genomes are taken in the order they finish. Q3_K and IQ3_S are the same size, so a step between
     them saves no bytes.
 
-**Other:** the old method's `winner-*-v2.json` records share the new pipeline's names and will be overwritten; the
+**Other:** the old method's records in budgets 3, 5 and 7 (`winner-`, `list-`, `ga-*-v2.json`, `preset-*.json`,
+36 files) shared the new pipeline's names; moved to `data/archive/old-method-21nov/` on 21 Nov. The
 store backup publishes the 16-bit original, so Mistral-22B (Mistral Research License) needs its licence file and
 terms checked; a llama-server losing a port race in `measure.complete` could be answered by another file's server;
 `PANTHER_CPUS=40` per container and per llama.cpp process on 48 threads; this README and `src/panther/README.md`
