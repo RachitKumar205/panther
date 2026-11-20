@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from panther_core.cache import key
 from panther_core.error import weighted_sqerr
+from panther_core.genome import Assignment, Genome, RamWindow
 from panther_core.geometry import GeometrySpec, Matrix, ModelGeometry
 from panther_core.quant import IMATRIX_FORMATS, SEARCH_FORMATS, QuantType
 from panther_core.ram import GIB, KV_BYTES_PER_ELEMENT, RamModel, RuntimeConfig
@@ -26,11 +27,14 @@ __all__ = [
     "IMATRIX_FORMATS",
     "KV_BYTES_PER_ELEMENT",
     "SEARCH_FORMATS",
+    "Assignment",
+    "Genome",
     "GeometrySpec",
     "Matrix",
     "ModelGeometry",
     "QuantType",
     "RamModel",
+    "RamWindow",
     "RuntimeConfig",
     "Score",
     "Verdict",
