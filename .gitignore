@@ -1,9 +1,14 @@
+# Reference implementation of the previous pipeline (read-only reference).
+panther-old/
+
 # Python / uv
 __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.pyright/
 *.egg-info/
 build/
 dist/
@@ -15,7 +20,7 @@ dist/
 *.gguf
 *.imatrix
 
-# Local settings and tools
+# Local settings and secrets
 /deploy/server/local.env
 /.claude/
 .DS_Store

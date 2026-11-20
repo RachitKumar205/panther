@@ -1,4 +1,8 @@
+# Build context for the Panther toolchain image. The source tree is bind-mounted at
+# run time, so only the packaging metadata and the Containerfile are needed here.
 *
 !pyproject.toml
 !uv.lock
+!packages/*/pyproject.toml
+!apps/*/pyproject.toml
 !deploy/server/Containerfile
