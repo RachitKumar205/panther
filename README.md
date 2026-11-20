@@ -245,8 +245,8 @@ ARM processor llama.cpp otherwise keeps a second, repacked copy of K-type weight
 tokens. **Reading speed** = prompt tokens per second, **writing speed** = generated tokens per second, **peak RAM** =
 the process's maximum resident memory (VmHWM), and the Pi's throttle state before and after.
 
-**Writing speed on the Pi** (measured 16 Nov 2026 on the 14B @ 5 QAT file; `pi/runtime_check.py`, `pi/membw.c`,
-`pi/spec_check.py`). Writing is limited by the CPU decoding weights, not by memory: the Pi reads 12.7–14.1 GB/s,
+**Writing speed on the Pi** (measured 16 Nov 2026 on the 14B @ 5 QAT file; `pi/panther_pi.py runtime` and `spec`,
+`pi/membw.c`). Writing is limited by the CPU decoding weights, not by memory: the Pi reads 12.7–14.1 GB/s,
 enough for ~2.9 tokens/s, but every type family tops out near 20–22 billion weights a second (a 14B: ~1.5 tokens/s),
 and four busy cores reach 80–85 °C within a minute and throttle (1.48 cold, 1.25 over five answers).
 `ik_llama.cpp` (`fcf7b364`) reads prompts 6.6x faster than mainline (9.63 vs 1.47 tokens/s, no repacking) and writes

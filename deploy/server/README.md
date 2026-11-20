@@ -85,13 +85,13 @@ undoes its own run on any failure. `--dry-run` prints the steps. Templates: `ngi
 ## The image (Containerfile)
 
 - Base `nvidia/cuda:12.9.1-devel-ubi9`, uv `0.9.5`, both pinned by digest.
-- llama.cpp at the commit in `configs/models.yaml`, shallow-fetched and checked: `build-cpu`
-  (`GGML_NATIVE`, for final numbers) and `build-cuda` (`sm_120`, for imatrix and screening).
+- llama.cpp at the commit in `configs/models.yaml`, shallow-fetched and checked: `build-cuda`
+  (`sm_120`, used for every measurement) and `build-cpu` (`GGML_NATIVE`, used only by `scripts/server/draft_model.sh`).
 - `/opt/venv`: Panther's dependencies from `uv.lock` (torch 2.13.0+cu129).
   `/opt/venv-convert`: llama.cpp's converter requirements at the same commit.
 - Source code is **not** in the image; it is mounted from `work/repo`, so code changes need no rebuild.
 - Tag = hash of Containerfile + pyproject.toml + uv.lock + llama.cpp commit; `current` points at the
-  latest build. Current: `localhost/panther:5b6c7bcf98f4` (~17 GB).
+  latest build (~17 GB).
 
 ## Two kinds of container
 
@@ -110,7 +110,7 @@ No container ever has both the GPU and a network. Anything needing the network r
 
 ## Commands
 
-`./panther start | pause | resume | stop | status | build | exec` (`./panther` alone prints the help). The SSH
+`./panther` alone prints the help. The SSH
 connection from your machine must be open (a control master, opened once with your hardware key). Never poll the
 server in an unguarded loop or let SSH fall back to a password login: its sshd blocks an address after repeated
 failed logins. Resource caps: `PANTHER_CPUS`, `PANTHER_MEM`.
@@ -124,11 +124,3 @@ bash /s3/panther/work/repo/deploy/server/uninstall.sh             # asks before 
 
 It removes Panther's containers and images (only from Panther's storage), replays the ledger newest
 first, removes `/s3/panther` after confirmation, and checks the SELinux rule is gone and GitLab returns 200.
-
-## Smoke test (2026-11-10)
-
-```
-CPU: no GPU device, huggingface.co 200, llama.cpp cd959ba, python imports ok, data writable
-GPU: RTX PRO 6000 Blackwell 97887 MiB, llama.cpp CUDA0 visible,
-     torch 2.13.0+cu129 cuda 12.9 available, no network
-```
