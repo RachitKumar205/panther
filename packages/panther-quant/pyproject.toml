@@ -3,7 +3,7 @@ name = "panther-quant"
 version = "0.1.0"
 description = "Quantized stores, importance matrices, error-compensated rounding and distillation."
 requires-python = ">=3.12,<3.13"
-dependencies = ["panther-core", "panther-data", "numpy>=1.26", "gguf>=0.17"]
+dependencies = ["panther-core", "panther-data", "numpy>=1.26", "gguf>=0.17", "torch>=2.4"]
 
 [build-system]
 requires = ["hatchling"]

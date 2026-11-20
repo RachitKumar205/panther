@@ -2,4 +2,6 @@
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from panther_quant.nn import Qwen2Model
+
+__all__ = ["Qwen2Model"]
