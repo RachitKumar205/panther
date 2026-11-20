@@ -10,6 +10,23 @@ import torch.nn as nn
 
 from panther_quant.nn import Layer, Qwen2Model
 
+# Byte offset(s) of each type's 16-bit block scale(s) inside one block, for the distillation write-back.
+D_OFF = {
+    "Q2_K": (80, 82),
+    "Q3_K": (108,),
+    "Q4_K": (0, 2),
+    "Q5_K": (0, 2),
+    "Q6_K": (208,),
+    "Q8_0": (0,),
+    "IQ1_S": (0,),
+    "IQ2_XXS": (0,),
+    "IQ2_XS": (0,),
+    "IQ2_S": (0,),
+    "IQ3_XXS": (0,),
+    "IQ3_S": (0,),
+    "IQ4_XS": (0,),
+}
+
 
 class BlockScale(nn.Module):
     """Multiply each 256-weight block of a weight by ``exp(theta)``, ``theta`` in fp32."""

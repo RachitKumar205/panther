@@ -64,13 +64,25 @@ known-first-party = [
     "panther_cli",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Ported numerical codecs (rachit branch): not reformatted.
+"packages/panther-quant/src/panther_quant/fakequant.py" = ["E501", "RUF005"]
+"packages/panther-quant/src/panther_quant/rounding.py" = ["E501"]
+
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"
 include = ["packages", "apps"]
-exclude = ["**/__pycache__", ".venv", "panther-old"]
+exclude = [
+    "**/__pycache__",
+    ".venv",
+    "panther-old",
+    # Ported numerical codecs (rachit branch): not held to strict typing.
+    "packages/panther-quant/src/panther_quant/fakequant.py",
+    "packages/panther-quant/src/panther_quant/rounding.py",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
