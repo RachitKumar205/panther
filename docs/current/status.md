@@ -6,8 +6,8 @@
 | Phase | Status | Notes |
 |---|---|---|
 | M0 Bootstrap | Done | workspace, tooling, CI, docs and fixtures in place |
-| M1 `panther-core` | In progress | quant/geometry/RAM/stats/cache/error landed |
-| M2 `panther-data` | Planned | — |
+| M1 `panther-core` | Done | quant/geometry/RAM/genome/stats/cache/error, all pydantic |
+| M2 `panther-data` | In progress | config schemas + integrity checker landed |
 | M3 `panther-measure` | Planned | — |
 | M4 Vertical slice | Planned | — |
 | M5 `panther-quant` | Planned | — |
@@ -18,10 +18,10 @@
 | M10 Parity + E2E | Planned | — |
 | M11 Cutover | Planned | — |
 
-## Open work in the current phase (M1)
+## Open work in the current phase (M2)
 
-- Genomes and the RAM window (repair/mutation/crossover, next).
-- Wire the corrected offline error and chunk-based statistics into the measurement layer (M3).
+- Prompt builder (OpenAssistant) and split assignment.
+- Wire the integrity checker to the measured `llama_tasks` files (done in the `check` step, M4).
 
 ## Completed
 
@@ -36,6 +36,9 @@
 - Reference `llama-perplexity` fixtures copied to `tests/parity/fixtures/llama/`.
 - `panther-core`: `QuantType`/`SEARCH_FORMATS` (B15), `GeometrySpec`/`ModelGeometry`, `RamModel`/`RuntimeConfig`,
   `weighted_sqerr` (B3), chunk-based statistics (B4), and content-addressed `key` (B1).
+- All dataclasses replaced with pydantic models (ADR 0012); every field carries a short comment.
+- `panther-data`: typed config schemas (`ModelConfig`, `SearchConfig`, `ModelsConfig`) and the split-integrity
+  checker (`manifest_problems`, `question_overlap`) for B2 and B19.
 
 ## Verification
 

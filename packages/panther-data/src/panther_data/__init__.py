@@ -13,6 +13,7 @@ from panther_data.config import (
     load_models,
     load_search_config,
 )
+from panther_data.integrity import manifest_problems, question_overlap, sha256_file
 
 __all__ = [
     "ContestSpec",
@@ -24,4 +25,7 @@ __all__ = [
     "load_model_config",
     "load_models",
     "load_search_config",
+    "manifest_problems",
+    "question_overlap",
+    "sha256_file",
 ]
