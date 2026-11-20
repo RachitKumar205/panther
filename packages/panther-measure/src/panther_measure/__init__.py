@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+from panther_measure.backend import LlamaBackend
+from panther_measure.cache import ResultCache
 from panther_measure.parse import KlMetrics, ParseError, parse_choice, parse_kl, parse_ppl, parse_winogrande
 
-__all__ = ["KlMetrics", "ParseError", "parse_choice", "parse_kl", "parse_ppl", "parse_winogrande"]
+__all__ = [
+    "KlMetrics",
+    "LlamaBackend",
+    "ParseError",
+    "ResultCache",
+    "parse_choice",
+    "parse_kl",
+    "parse_ppl",
+    "parse_winogrande",
+]
