@@ -1,8 +1,5 @@
-"""Error-compensated rounding (GPTQ) into llama.cpp's own types. A matrix is quantized 256 input columns at a time
-with llama.cpp's quantizer (ggml_quantize_chunk); each chunk's error is pushed onto the columns not yet quantized,
-weighted by the inverse Hessian (X^T X) of the matrix's inputs on calibration text. The codes overwrite a type copy
-in place, so the format, size and speed are unchanged. Measured on Qwen2.5 7B: drift -52% Q3_K, -11% Q2_K, -9%
-IQ2_XS, -8% Q4_K, IQ3_S unchanged."""
+"""Error-compensated rounding (GPTQ) into llama.cpp's own types, written into the type copies in place: same format,
+size and speed (measured on Qwen2.5 7B: drift -52% Q3_K, -11% Q2_K, -9% IQ2_XS, -8% Q4_K, IQ3_S unchanged)."""
 
 from __future__ import annotations
 
@@ -13,8 +10,9 @@ from pathlib import Path
 
 import numpy as np
 
+from panther.model import BIN, THREADS
+
 CHUNK, SEQS, SEQ_LEN = 256, 128, 512
-THREADS = int(os.environ.get("PANTHER_THREADS", "16"))
 INPUTS = {"attn_in": ("self_attn.q_proj", "attention.wqkv"), "o_in": ("self_attn.o_proj", "attention.wo"),
           "mlp_in": ("mlp.gate_proj", "feed_forward.w1"), "down_in": ("mlp.down_proj", "feed_forward.w2")}
 ROLE_INPUT = {"attn_q": "attn_in", "attn_k": "attn_in", "attn_v": "attn_in", "attn_output": "o_in",
@@ -34,7 +32,7 @@ def quant(w: np.ndarray, imp: np.ndarray | None, qtype, threads: int = THREADS, 
     imp None: llama.cpp's own weighting, as llama-quantize uses for a tensor the importance matrix lacks."""
     global _LIB
     if _LIB is None:
-        _LIB = ctypes.CDLL("/opt/llama.cpp/build-cuda/bin/libggml-base.so")
+        _LIB = ctypes.CDLL(str(BIN / "libggml-base.so"))
         _LIB.ggml_quantize_chunk.restype, _LIB.ggml_row_size.restype = ctypes.c_size_t, ctypes.c_size_t
         _LIB.ggml_quantize_chunk.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p] + [ctypes.c_int64] * 3 \
             + [ctypes.c_void_p]
@@ -130,18 +128,17 @@ def gptq(w, h, qtype, threads: int = THREADS) -> np.ndarray:
     return np.concatenate(codes, axis=1)
 
 
-def round_copies(hf_dir: Path | None, bf16: Path, copies: dict[str, Path], calib: Path, layers_per_pass: int,
-                 booked: int) -> None:
-    """Rewrites every matrix of every copy {type: path} with error-compensated codes. Inputs come from the HF
-    model on calibration text; weights from the 16-bit GGUF (llama.cpp may reorder rows, never input columns)."""
+def round_copies(bf16: Path, copies: dict[str, Path], calib: Path, layers_per_pass: int, booked: int) -> None:
+    """Rewrites every matrix of every copy {type: path} with error-compensated codes. Inputs come from the model
+    (loaded from the 16-bit GGUF) on calibration text; weights from the 16-bit GGUF (llama.cpp may reorder rows,
+    never input columns)."""
     import gguf
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    src_args = ({"pretrained_model_name_or_path": str(hf_dir), "trust_remote_code": True} if hf_dir else
-                {"pretrained_model_name_or_path": str(bf16.parent), "gguf_file": bf16.name})  # no HF files: the GGUF
-    tok = AutoTokenizer.from_pretrained(**src_args)
+    args = {"pretrained_model_name_or_path": str(bf16.parent), "gguf_file": bf16.name}
+    tok = AutoTokenizer.from_pretrained(**args)
     ids = tok(calib.read_text(), return_tensors="pt").input_ids[0][: SEQS * SEQ_LEN].view(SEQS, SEQ_LEN)
-    m = AutoModelForCausalLM.from_pretrained(**src_args, dtype=torch.bfloat16).cuda().eval()
+    m = AutoModelForCausalLM.from_pretrained(**args, dtype=torch.bfloat16).cuda().eval()
     e = torch.eye(2, device="cuda")  # GPU linear algebra set up once, before threads race to do it
     torch.linalg.solve_triangular(torch.linalg.cholesky(torch.cholesky_inverse(torch.linalg.cholesky(e))), e, upper=False)
     src = {t.name: t for t in gguf.GGUFReader(bf16).tensors}
@@ -164,13 +161,12 @@ def round_copies(hf_dir: Path | None, bf16: Path, copies: dict[str, Path], calib
         for hk in hooks:
             hk.remove()
         for (i, key), h in H.items():
+            hm = h / (SEQS // 8)
             for role, k in ROLE_INPUT.items():
                 name = f"blk.{i}.{role}.weight"
                 if k != key or name not in src:
                     continue
-                w = torch.from_numpy((np.asarray(src[name].data).view(np.uint16).astype(np.uint32) << 16)
-                                     .view(np.float32).reshape(src[name].shape[::-1].tolist())).cuda()
-                hm = h / (SEQS // 8)
+                w = torch.from_numpy(f32(src[name])).cuda()
                 torch.cuda.empty_cache()  # types rounded at once: as many as the free GPU memory holds (each ~24 n^2), inside this job's GPU booking
                 room = min(torch.cuda.mem_get_info()[0], booked - torch.cuda.memory_reserved()) - 4 * 2**30  # own booking
                 par = int(max(1, min(6, room // (24 * widest**2))))

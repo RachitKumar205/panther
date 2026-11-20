@@ -3,7 +3,8 @@
 #
 #   bash /s3/panther/work/repo/deploy/server/uninstall.sh [--dry-run] [--yes]
 #
-#   1. Stops and removes svcuser's Panther containers and images (they live only in Panther's own
+#   1. Stops svcuser's host-side Panther loops (each run's `panther _run`, the GitLab guard `panther _guard`),
+#      then removes svcuser's Panther containers and images (they live only in Panther's own
 #      container storage under /s3/panther/work/containers; svcuser's other Podman storage is untouched).
 #   2. Replays /s3/panther/HOST_CHANGES.tsv in reverse: SELinux equivalence, linger, and finally the
 #      /s3/panther folder itself (all data, models and results; asks first unless --yes).
@@ -36,8 +37,30 @@ do_() { echo "+ $*"; [ "$DRY" = 1 ] || "$@"; }
 [ "$(id -u)" = 0 ] || die "run as root"
 [ -f "$LEDGER" ] || die "no ledger at $LEDGER: nothing recorded to undo"
 
-# --- 1. containers and images (as the owning user, in Panther's storage only) ---
+# --- 1. host-side loops, then containers and images (as the owning user, in Panther's storage only) ---
 uid="$(id -u "$USER_NAME")"
+# Only svcuser's bash processes running exactly $W/repo/panther _run|_guard (the script path resolved against the
+# process's own working directory): never a pattern that could match another user's or program's process.
+loops=()
+for d in /proc/[0-9]*; do
+  [ "$(stat -c %u "$d" 2>/dev/null)" = "$uid" ] || continue
+  mapfile -d '' -t a < "$d/cmdline" 2>/dev/null || continue
+  [ "${a[0]:-}" != "" ] && [ "${a[0]##*/}" = bash ] && { [ "${a[2]:-}" = _run ] || [ "${a[2]:-}" = _guard ]; } || continue
+  [ "$(cd "$d/cwd" 2>/dev/null && realpath -e -- "${a[1]}" 2>/dev/null)" = "$W/repo/panther" ] || continue
+  echo "  Panther loop ${d#/proc/}: ${a[*]}"; loops+=("${d#/proc/}")
+done
+if [ "${#loops[@]}" -gt 0 ]; then
+  do_ kill "${loops[@]}"
+  if [ "$DRY" != 1 ]; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      left=(); for p in "${loops[@]}"; do ! kill -0 "$p" 2>/dev/null || left+=("$p"); done
+      [ "${#left[@]}" = 0 ] && break; sleep 1
+    done
+    [ "${#left[@]}" = 0 ] || die "Panther loops still running after 10 s: ${left[*]}; stop them and rerun"
+  fi
+else
+  echo "  no Panther loops running"
+fi
 if [ -d "/run/user/$uid" ] && [ -d "$W/containers/storage" ]; then
   P="podman --root $W/containers/storage --runroot /run/user/$uid/panther --events-backend file --tmpdir $W/tmp/libpod"
   do_ runuser -u "$USER_NAME" -- env "XDG_RUNTIME_DIR=/run/user/$uid" $P rm -af -t 30 || true
@@ -62,7 +85,12 @@ for u in "${UNDO[@]}"; do
   else
     echo "+ $u"
     if [ "$DRY" != 1 ]; then
-      bash -c "$u" || { echo "  undo failed: $u" >&2; fail=1; }
+      if bash -c "$u"; then  # done: drop its line, so a rerun after a partial uninstall doesn't redo it
+        { grep -vF -- "	$u" "$LEDGER" || [ $? = 1 ]; } > "$LEDGER.tmp" && mv "$LEDGER.tmp" "$LEDGER" \
+          || { echo "  undone, but could not drop it from $LEDGER: $u" >&2; fail=1; }
+      else
+        echo "  undo failed: $u" >&2; fail=1
+      fi
     fi
   fi
 done

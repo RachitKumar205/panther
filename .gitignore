@@ -1,11 +1,21 @@
+# Python / uv
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 .pytest_cache/
-results/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Run outputs and models (they live on the server under data/)
+/data/
+/results/
+/experiments/
 *.gguf
 *.imatrix
-/data/
-/third_party/
+
+# Local settings and tools
 /deploy/server/local.env
 /.claude/
+.DS_Store

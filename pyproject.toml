@@ -7,20 +7,17 @@ dependencies = [
     "gguf>=0.17",
     "numpy>=1.26",
     "pyyaml>=6.0",
-    "pydantic>=2.6",
     "ortools>=9.10",
 ]
 
 [project.optional-dependencies]
-# Installed on the server only (quality evaluation, data preparation, Stage 2 quantizer).
+# Installed on the server only (distillation, rounding, chat prompts, Hugging Face).
 server = [
     "torch>=2.4",
     "transformers>=4.45",
     "accelerate>=1.0",  # transformers needs it to load GGUF files (distillation)
     "sentencepiece>=0.2",  # InternLM's tokenizer
     "einops>=0.8",  # InternLM's model code
-    "datasets>=3.0",
-    "lm-eval>=0.4.5",
     "pyarrow>=16",
     "huggingface_hub[cli]>=0.34",
 ]

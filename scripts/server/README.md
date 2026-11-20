@@ -1,59 +1,35 @@
-# scripts/server
+# scripts/server: the dashboard
 
-`pipeline.py` runs one contest (a model at a RAM budget) inside the server's containers; the project README's "How
-it works" explains every step. Each step skips work already on disk and writes progress lines to
-`data/logs/progress-b<BUDGET>.log`.
+A read-only web page of the pipeline. `./panther dashboard` (re)starts it on the server in its own container, with
+`data/` mounted read-only; `./panther run` starts it if it is not running.
 
-| Step | Output |
-|---|---|
-| `fetch` (CPU container) | `data/hf/<model>` |
-| `prompts` (CPU container, before the GPU steps) | `data/splits/text/prompts.json`: the dataset's chat prompts (OpenAssistant oasst1, Apache-2.0, pinned), 300 / 150 / 150 for train / select / test, none sharing 8 words with a benchmark question (how many were dropped is in the file); then the split check (decision 3): web documents, questions and prompts in one split each, files matching their manifests' hashes, else the contest stops |
-| `store` | `data/store/<model>/`: 16-bit original, importance matrix, one type copy per type (14), error-compensated |
-| `error` | `rewrite/<model>/error.json` |
-| `refs` | `data/splits/text/chat-<model>-{train,select,test}.txt` (the original's chat answers), `{select,test}-<model>.txt` (chat + web, one file each), `data/reference/<model>/{select,test}.kld`, the original's question results |
-| `preset` | `rewrite/budget-B/preset-<model>.json`: every fitting preset scored on all selection questions (`tried`), the most accurate one's held-out test (`test`) and its score on the GA's questions (`score_fit`, the base of the relative score) |
-| `ga` | `rewrite/budget-B/list-<model>-v2.json` (top 3), `ga-<model>-v2.json` (every genome), `ga-<model>-live.json` |
-| `final` | `rewrite/<model>/tuned/` (the top 3 distilled on the train text, chat + web), `rewrite/budget-B/winner-<model>-v2.json` (winner, verdict, held-out numbers for ours, preset, original) |
-| `bundle`, `upload` | `data/pi_bundle/budget-B-<size>-v2/` → private Hugging Face repo `panther-<size>-<B>g-v2` |
-| `qatdata`, `qat` (`./panther qat C`, an experiment) | `rewrite/<model>/qat/`: token samples, the rebuilt undistilled winner, Stage 1, Stage 1 + 2, Stage 2 only; `rewrite/budget-B/qat-<model>.json` (held-out results vs the winner and the preset) |
+**What it reads:** the logs (`data/logs/panther.log`, `data/logs/progress-b<B>.log`), each contest's winner record
+(`data/rewrite/budget-B/winner-<model>-v2.json`), the active runs' claims (`data/locks/claims.json` and the
+`run-<id>.lock` files), `configs/search.yaml` (the planned contests), GPU memory (`nvidia-smi`) and disk, and the Pi's
+results from Hugging Face (below). `deploy/server/local.env` gives the names it masks.
 
-`./panther start` (repo root) runs every contest through these steps; `pipeline.py run B MODEL` runs store → bundle
-in order inside one GPU container. `status.py` rewrites `data/status.md` every 30 s
-(verdicts, every contest's steps with time spent and left, the Pi's results) and publishes it to
-`<user>/panther-status` every 60 s.
-
-
-Every formula and number (RAM model, rounding, score, search, distillation, verdict): the project README,
-[section 6](../../README.md#6-in-depth-every-number-and-formula).
-
-## The dashboard
-
-`dashboard.py` serves a self-hosted, read-only web page of the pipeline, from `data/` only (no outside service, no
-fonts or scripts from the internet). It is laid out like W&B, MLflow or Airflow: a sidebar of sections, list pages
-that lead to detail pages, tabs on a detail page, and links that can be shared (`#/contests/22b@5/steps`).
+`dashboard.py` serves the page and `/api/state` (everything it shows, as JSON); no fonts or scripts come from the
+internet. A sidebar of sections, list pages that lead to detail pages, tabs on a detail page, and links that can be
+shared (`#/contests/22b@5/steps`).
 
 | Page | Shows |
 |---|---|
 | Overview | contests won, what is running and when it ends, GPU and disk; every verdict; recent activity |
-| Contests | every contest, filterable (won, tied, running, dropped) and sortable; one row each |
-| Contest | Results (ours − preset, held-out table by task, the Pi's RAM and speed, our mix of types), Steps (a timeline of the pipeline's steps with start times and durations), Events |
-| Experiments | the EfficientQAT runs and the control, with status and results |
-| Experiment | Overview, Stage 1 (a strip of every block, the chosen block's validation curve over all 4,096 steps, a table of blocks), Stage 2 (KL against the control), Setup (the block-0 tests side by side as changes in validation error, the one in use marked; every Stage 1 and Stage 2 setting, read from the code that runs them) |
-| System | GPU memory, the booking ledger, disk, the Pi's measurements |
+| Contests | every contest, filterable (won, tied, running, failed or stopped, dropped) and sortable; one row each |
+| Contest | Results (the relative score with its 95 % interval, 100 = the preset, lower is better; older results: ours − preset in accuracy points; held-out table by task, accuracy kept, the verdict at KL weight 5 and 20, the Pi's RAM with FITS / OVER and speed, our mix of types), Steps (a timeline of the pipeline's steps with start times and durations; the step a failed or stopped run was in shows as such), Events |
+| System | GPU memory, the active runs' claims (`data/locks/claims.json`; a claim shows while its `run-<id>.lock` is held, "unknown" if the lock cannot be read), disk, the Pi's measurements (a failed Pi check shows as failed), files that could not be read |
 | Logs | a live tail of every log (the last 3,000 lines, then each new line about a second after it is written, pushed by the server as server-sent events): search, level (key, notes, errors), which log, wrap, follow; scroll up and it holds still and counts new lines |
 
-It refreshes every 10 s; jobs are still controlled with `./panther`. Since it may be public, the server's account and address and the shared service's domain are masked in everything it sends, and at most 16 live log streams run at once. Running it on the server: `deploy/server/README.md`.
+A file that cannot be read (bad JSON, a Pi line without its numbers) is named in a banner and on the System page;
+the rest of the page still shows. It refreshes every 10 s; jobs are controlled only with `./panther`. Since it may be
+public, the server's account and address and the shared service's domain are masked in everything it sends, and at
+most 16 live log streams run at once. Where it listens on the server: [deploy/server](../../deploy/server/README.md).
 
 ```bash
 uv run python scripts/server/dashboard.py --data /path/to/data --port 43800   # then open http://localhost:43800
 ```
 
 `dashboard/` holds the page (HTML, CSS, JS with hand-drawn SVG charts) and its font, Recursive (SIL Open Font
-License, `dashboard/OFL.txt`). The Pi's results reach `data/pi/` through `status.py`.
-
-## Before a long EfficientQAT run on a new model
-
-| Script | What |
-|---|---|
-| `qat_trial.py` | Block-AP on the model's first blocks with a few short samples, everything in the container's `/tmp` (nothing kept), early stopping off so each block's whole validation curve shows: `./panther exec /opt/venv/bin/python scripts/server/qat_trial.py 7 Mistral-22B-Instruct [samples] [blocks] [tokens] [weights lr]` |
-| `weight_scale.py` | The size of the model's layer weights by block (what the weights' learning rate is relative to): `./panther exec /opt/venv/bin/python scripts/server/weight_scale.py Mistral-22B-Instruct [blocks...]` |
+License, `dashboard/OFL.txt`). The Pi's results: the dashboard fetches `pi/<contest>.txt` from the public Hugging Face
+repo `<user>/panther-status` (`<user>`: the part of `PANTHER_HF_REPO` before `/`) every 5 minutes into its `/tmp`,
+over the older `data/pi/*.txt`; a failed fetch is shown on the System page and the last good results are kept.

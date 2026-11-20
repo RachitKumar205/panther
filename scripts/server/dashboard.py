@@ -6,13 +6,18 @@ GET /            the page (scripts/server/dashboard/)
 GET /api/logs?n=3000     the last n lines of every log, oldest first: [{"src": "main" | "b5" ..., "line": ...}]
 GET /api/logs/stream     server-sent events: each new log line as it is written (checked every second)
 GET /api/state   everything the page shows, as JSON: contests and their steps, verdicts and held-out tables, the
-                 Pi's results, the EfficientQAT experiments (strategy, every block's checks, Stage 2 updates,
-                 results), GPU memory and bookings, disk, events and notes.
+                 Pi's results, GPU memory and the runs' claims, disk, events and notes; "problems": files that could
+                 not be read (the rest of the page still shows).
+
+The Pi's results come from pi/<contest>.txt in the public Hugging Face repo <user>/panther-status (user: the part of
+PANTHER_HF_REPO before "/"), fetched every 5 minutes into the temporary directory, merged over data/pi/*.txt (older
+results, no longer written; the fetched copy wins).
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -20,13 +25,78 @@ import select
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import status as S
+import yaml
+
+DATA = Path(os.environ.get("PANTHER_DATA", "/work/data"))
+STEPS = ["store", "error", "refs", "preset", "ga", "final", "bundle"]
+WHAT = {"store": "16-bit original, importance matrix, the model in every type", "error": "offline error per matrix",
+        "refs": "the original's answers and reference outputs", "preset": "llama.cpp's preset (competitor)",
+        "ga": "genetic search (score: flips + 10 × KL, relative to the preset)",
+        "final": "6 finalists scored, guard, held-out verdict vs the preset", "bundle": "file for the Pi"}
+MINUTES = {"store": 5, "error": 0.2, "refs": 3, "preset": 4, "ga": 10, "final": 14, "bundle": 0.3}  # x size in B
+DESCRIBE = {
+    "store": "the original as a 16-bit file; its importance matrix (on the calibration web text); the whole model in"
+             " each of 14 types (IQ1_S to Q8_0), every matrix with error-compensated rounding",
+    "error": "for every matrix and type, a cheap estimate of the damage (guides the search's repairs and proposals;"
+             " every genome is still measured)",
+    "refs": "the original answers the dataset's chat prompts (train, select, test); its next-word probabilities on"
+            " the select and test text (chat + web) and which questions it gets right are recorded",
+    "preset": "every llama.cpp preset that fits the budget is scored on the selection questions; the most accurate"
+              " is the competitor (none fits: the smallest)",
+    "ga": "genetic search: genomes (one type per matrix, inside the RAM budget) scored by flips % + 10 × KL (flips on"
+          " 900 selection questions, KL on the select split), relative to the preset; stops after 15 genomes without"
+          " a gain beyond the measurement's noise (at least 30, at most 70)",
+    "final": "the best 3 built distilled and undistilled (6 files), scored on all selection questions and the select"
+             " split, the lowest score wins; a warning if it is clearly worse than the preset (guard); then the"
+             " verdict on held-out data: relative score (100 = the preset's damage, lower is better), WIN, TIE or LOSE",
+    "bundle": "the winning file packed for the Pi, which downloads it and posts its real peak RAM (FITS or OVER the"
+              " budget) and speed"}
+PROBLEMS: list[str] = []  # this state's unreadable files, shown on the page
+STATE = threading.Lock()
+
+
+def problem(f: Path | str, e: Exception | str) -> None:
+    PROBLEMS.append(f"{Path(f).relative_to(DATA) if Path(f).is_relative_to(DATA) else f}: "
+                    f"{e if isinstance(e, str) else type(e).__name__ + ': ' + str(e)}")
+
+
+def clock(line: str) -> int:
+    h, m = line[:5].split(":")
+    return int(h) * 60 + int(m)
+
+
+def lanes() -> list[tuple[int, str, list[str]]]:
+    """Every contest's progress lines (budget, size, lines), from its latest `step store: start` on (this run)."""
+    out = []
+    for f in sorted(DATA.glob("logs/progress-b*.log")):
+        b, lines = int(f.stem[10:]), f.read_text(errors="replace").splitlines()
+        for sm in dict.fromkeys(m.split()[1] for m in lines if re.match(r"\d\d:\d\d \S+ step \w+: start", m)):
+            ls = [x for x in lines if x[6:].startswith(sm + " ")]
+            out.append((b, sm, ls[max((i for i, x in enumerate(ls) if " step store: start" in x), default=0):]))
+    return out
+
+
+def winner(b: int, sm: str) -> tuple[dict, Path] | None:
+    f = next(iter((DATA / "rewrite" / f"budget-{b}").glob(f"winner-*-{sm}-*-v2.json")), None)
+    try:
+        return (json.loads(f.read_text()), f) if f else None
+    except (OSError, ValueError) as e:
+        problem(f, e)
+        return None
+
+
+def searched(b: int, sm: str) -> bool:
+    """True if the config still searches a model of this size at this budget."""
+    c = yaml.safe_load((Path(__file__).resolve().parents[2] / "configs/search.yaml").read_text())
+    return any(f"-{sm}-" in m for m in c["contests"].get(b, {}).get("searched", []))
+
 
 STATIC = Path(__file__).with_name("dashboard")
 NUM = r"([-+]?[\d.]+)"
@@ -62,8 +132,8 @@ def ist() -> time.struct_time:
 
 
 def logs() -> tuple[list[str], list[tuple[int, str, list[str]]]]:
-    f = S.DATA / "logs/panther.log"
-    return (f.read_text().splitlines() if f.exists() else []), S.lanes()
+    f = DATA / "logs/panther.log"
+    return (f.read_text().splitlines() if f.exists() else []), lanes()
 
 
 def dated(f: Path, n: int) -> list[tuple[int, str]]:
@@ -75,15 +145,15 @@ def dated(f: Path, n: int) -> list[tuple[int, str]]:
     t = time.gmtime(f.stat().st_mtime + 19800)
     day, prev, out = int((f.stat().st_mtime + 19800) // 86400), t.tm_hour * 60 + t.tm_min, []
     for x in reversed(lines):
-        if S.clock(x) > prev:
+        if clock(x) > prev:
             day -= 1
-        prev = S.clock(x)
+        prev = clock(x)
         out.append((day * 1440 + prev, x))
     return out
 
 
 def log_files() -> list[Path]:
-    return [S.DATA / "logs/panther.log", *sorted(S.DATA.glob("logs/progress-b*.log"))]
+    return [DATA / "logs/panther.log", *sorted(DATA.glob("logs/progress-b*.log"))]
 
 
 def source(f: Path) -> str:
@@ -103,40 +173,42 @@ def backlog(n: int) -> list[dict]:
 
 def events(n: int) -> list[str]:
     """The newest n lines of the main log and the progress logs together, newest first."""
-    rows = [r for f in [S.DATA / "logs/panther.log", *sorted(S.DATA.glob("logs/progress-b*.log"))] for r in dated(f, 300)]
+    rows = [r for f in [DATA / "logs/panther.log", *sorted(DATA.glob("logs/progress-b*.log"))] for r in dated(f, 300)]
     return [x for _, x in sorted(dict.fromkeys(rows), key=lambda r: -r[0])[:n]]
 
 
-def steps(b: int, sm: str, ls: list[str]) -> tuple[list[dict], str]:
-    """A contest's steps (state, minutes spent and left), and its ETA (as status.lane works it out)."""
+def steps(b: int, sm: str, ls: list[str], halt: tuple[str, int] | None) -> tuple[list[dict], str]:
+    """A contest's steps (state, minutes spent and left) and its ETA. halt: ("failed" | "stopped", minute) when the
+    run ended without finishing; the step it was in shows that state, timed up to the end."""
     size, t = float(re.sub(r"[^0-9.]", "", sm) or 7), ist()
     now = t.tm_hour * 60 + t.tm_min
     seen, began, took = {}, {}, {}
     for x in ls:
         if m := re.search(r"step (\w+): (start|done)(?: in (\d+) min)?", x):
-            seen[m.group(1)] = (m.group(2), S.clock(x))
+            seen[m.group(1)] = (m.group(2), clock(x))
             if m.group(2) == "start":
                 began[m.group(1)] = x[:5]
             elif m.group(3):
                 took[m.group(1)] = int(m.group(3))
-    failed, out, clk = any("FAILED" in x for x in ls[-3:]), [], now
-    for s in S.STEPS:
+    out, clk = [], now
+    for s in STEPS:
         st, at = seen.get(s, ("waiting", None))
-        typ = S.MINUTES[s] * size
-        row = {"name": s, "what": S.WHAT[s], "about": S.DESCRIBE[s], "began": began.get(s), "took": took.get(s)}
+        typ = MINUTES[s] * size
+        row = {"name": s, "what": WHAT[s], "about": DESCRIBE[s], "began": began.get(s), "took": took.get(s)}
         if st == "done":
             out.append({**row, "state": "done"})
-            continue
-        if st == "start":
+        elif st == "start" and halt:
+            out.append({**row, "state": halt[0], "spent": (halt[1] - at) % 1440})
+        elif st == "start":
             spent = (now - at) % 1440
             left = max(1.0, typ - spent)
-            out.append({**row, "state": "failed" if failed else "running", "spent": spent, "left": left})
+            out.append({**row, "state": "running", "spent": spent, "left": left})
             clk = now + left
         else:
             clk += typ
             out.append({**row, "state": "waiting", "left": typ})
     done = all(x["state"] == "done" for x in out)
-    return out, "done" if done else f"{int(clk // 60) % 24:02d}:{int(clk % 60):02d}"
+    return out, "done" if done else "" if halt else f"{int(clk // 60) % 24:02d}:{int(clk % 60):02d}"
 
 
 def types(assignment: dict) -> list[list]:
@@ -146,191 +218,142 @@ def types(assignment: dict) -> list[list]:
     return sorted(([t, n] for t, n in c.items()), key=lambda x: -x[1])
 
 
+def halted(raw: tuple[str, int] | None, ls: list[str]) -> tuple[str, int] | None:
+    """How a run ended without finishing, if it did: its main-log line (FAILED, or stopped by the user), or a FAILED
+    line in its progress lines after the last step began (older logs' lines of the removed QAT experiment are not
+    the contest's)."""
+    if raw and "FAILED" in raw[0]:
+        return "failed", raw[1]
+    if raw and raw[0].startswith("stopped by the user"):
+        return "stopped", raw[1]
+    last = max((i for i, x in enumerate(ls) if re.search(r"step \w+: start", x)), default=-1)
+    fail = [x for x in ls[last + 1:] if re.search(r"(?<!QAT )FAILED in", x)]
+    return ("failed", clock(fail[-1])) if fail else None
+
+
+def verdict(w: dict, f: Path) -> dict | None:
+    """A winner file's verdict and held-out numbers. unit "relative score - 100": diff and ci are the relative score
+    minus 100 (negative = better than the preset); without unit (older files): accuracy points (positive = better)."""
+    try:
+        v = {k: w[k] for k in ("verdict", "diff", "ci", "preset", "winner", "ram_gib")}
+        v.update({k: w[k] for k in ("unit", "relative", "relative_ci", "accuracy_diff", "accuracy_kept",
+                                    "weight_check") if k in w})
+        v["guard_warning"] = bool(w.get("guard", {}).get("warning"))
+        return {"verdict": v, "model": Path(w["file"]).parts[-3] if "file" in w else "",
+                "held_out": {k: w[k] for k in ("ours", "preset_test", "original")}, "types": types(w["assignment"])}
+    except (KeyError, TypeError, AttributeError) as e:
+        problem(f, f"missing or malformed field {e}")
+        return None
+
+
 def contests(log: list[str], ln) -> list[dict]:
-    state = {}
-    for x in log:
-        if (m := re.match(r"\d\d:\d\d (\S+): (.*)", x)) and m.group(1) != "note" and "QAT" not in m.group(2):
-            state[m.group(1)] = m.group(2)
+    state: dict[str, tuple[str, int]] = {}  # each contest's last main-log line (older logs' QAT lines are not its; a
+    for x in log:  # "refused" line is a start that never happened: the contest is as it was)
+        if (m := re.match(r"\d\d:\d\d ([\w.]+-b\d+): (.*)", x)) and not m.group(2).startswith(("QAT", "refused:")):
+            state[m.group(1)] = (m.group(2), clock(x))
     lanes = {f"{sm.lower()}-b{b}": (b, sm, ls) for b, sm, ls in ln}
     out = []
     for key in dict.fromkeys(list(state) + list(lanes)):
-        sz, b = key.split("-b")
+        sz, b = key.rsplit("-b", 1)
         b, sm = int(b), sz.upper()
-        w, kept = S.winner(b, sm), S.searched(b, sm)
-        lane = lanes.get(key)
-        st, eta = steps(b, sm, lane[2]) if lane else ([], "")
-        c = {"id": f"{sz}@{b}", "size": sm, "budget": b, "steps": st, "eta": eta,
+        lane, raw = lanes.get(key), state.get(key)
+        halt = halted(raw, lane[2] if lane else [])
+        st, eta = steps(b, sm, lane[2], halt) if lane else ([], "")
+        c = {"id": f"{sz}@{b}", "size": sm, "budget": b, "steps": st, "eta": eta, "ended": raw[0] if halt and raw else None,
              "events": [x for x in (lane[2] if lane else []) if re.search(
-                 r"preset \S+: held-out|guard:|held-out test vs|GA done|new best", x)][-12:]}
-        if w:
+                 r"preset \S+: held-out|guard:|held-out test vs|GA done|new best|FAILED|Pi bundle uploaded", x)][-12:]}
+        w = winner(b, sm)
+        if w and (r := verdict(*w)):
+            c.update(r)
+        if halt:
+            c["state"] = halt[0]
+        elif raw and raw[0].startswith("started"):
+            c["state"] = "running"  # a rerun: an older result, if any, shows until the new one is written
+        elif "verdict" in c or (raw and raw[0] == "done"):
             c["state"] = "done"
-            c["verdict"] = {k: w[k] for k in ("verdict", "diff", "ci", "preset", "winner", "ram_gib")}
-            c["model"] = Path(w["file"]).parts[-3] if "file" in w else ""
-            c["held_out"] = {k: w[k] for k in ("ours", "preset_test", "original")}
-            c["types"] = types(w["assignment"])
-        elif not kept:
+        elif not searched(b, sm):
             c["state"] = "dropped"
-        else:
-            raw = state.get(key, "queued")
-            c["state"] = "failed" if "FAILED" in raw else "running" if raw.startswith("started") else "queued"
+        else:  # no main-log line (a rotated log): from its steps
+            c["state"] = "running" if any(x["state"] == "running" for x in st) else "done" if eta == "done" else "waiting"
         out.append(c)
-    order = {"running": 0, "failed": 1, "queued": 2, "done": 3, "dropped": 4}
+    order = {"running": 0, "failed": 1, "stopped": 2, "waiting": 3, "done": 4, "dropped": 5}
     return sorted(out, key=lambda c: (order[c["state"]], c["budget"], float(re.sub(r"[^0-9.]", "", c["size"]) or 0)))
 
 
-def tests(notes: list[str]) -> list[dict]:
-    """The block-0 tests that chose Stage 1's settings, as rows: what was trained, for how many steps, the block's
-    validation error before and after, and what we read from it. Notes without a result (plans) are left out."""
-    out = []
-    for t in notes:
-        m = re.search(r"validation ([\d.]+) -> ([\d.]+)", t) or re.search(r": ([\d.]+) -> ([\d.]+)", t)
-        if not m:
-            continue
-        label = re.sub(r"^\([A-Z]\)\s*", "", t.split(":")[0]).strip()
-        note = re.sub(r"^\s*\([^)]*%\)", "", t[m.end():])
-        note = re.sub(r"^[\s:,.)]+", "", note).split("; (")[0].strip()
-        steps = re.search(r"([\d,]+) steps", label)
-        out.append({"trains": label.split(",")[0].strip(), "steps": int(steps.group(1).replace(",", "")) if steps else None,
-                    "first": "first" in label, "before": float(m.group(1)), "after": float(m.group(2)), "note": note})
-    return out
+PI: dict = {"files": {}, "error": None, "at": None, "repo": None}  # the Pi's results from Hugging Face (fetch_pi)
 
 
-def constants(f: Path, names: str) -> dict[str, str]:
-    """A tuple assignment of constants in a source file (`A, B = 1, 2`), read as text (the dashboard imports no torch)."""
-    m = re.search(rf"^{re.escape(names)} = (.+?)(?:\s+#.*)?$", f.read_text(), re.M) if f.exists() else None
-    return dict(zip(names.split(", "), (v.strip() for v in m.group(1).split(",")))) if m else {}
-
-
-def config() -> list[dict]:
-    """Stage 1 and Stage 2's settings, from the code that runs them."""
-    root = Path(__file__).resolve().parents[2]
-    b = constants(root / "src/panther/blockap.py", "BATCH, EPOCHS, LR_W, LR_S, MIN_LR, RECODE, PATIENCE")
-    d = constants(root / "src/panther/distill.py", "SEQ, BATCH, TOPK, STEPS")
-    pipe = (root / "scripts/server/pipeline.py").read_text() if (root / "scripts/server/pipeline.py").exists() else ""
-    sizes = {k: (int(n), int(t)) for k, n, t in re.findall(r'"(\w+)": \((\d+), (\d+)\)', pipe.split("QAT_SIZES", 1)[-1].split("\n")[0])}
-    e2e_lr = re.search(r"^E2E_LR = (\S+)", pipe, re.M)
-    accum = re.search(r"accum=(\d+),\s*\n?\s*lr=E2E_LR", pipe)
-    out = []
-    if b:
-        n, t = sizes.get("block", (0, 0))
-        vn, vt = sizes.get("val", (0, 0))
-        steps = n * int(b["EPOCHS"]) // int(b["BATCH"]) if n else None
-        frozen = float(eval(b["LR_S"])) == 0
-        out.append({"stage": "Stage 1 · Block-AP", "rows": [
-            ["Trains", "weights" if frozen else "weights, block scales"],
-            ["Frozen", "block scales" if frozen else "–"],
-            ["Loss", "block output MSE"],
-            ["Learning rate", f"{b['LR_W']} × weight size → ×{b['MIN_LR'].replace(' ', '')}, cosine"],
-            ["Data", f"{n:,} × {t:,} tokens" if n else "–"],
-            ["Epochs", b["EPOCHS"]], ["Batch", b["BATCH"]],
-            ["Steps per block", f"{steps:,}" if steps else "–"],
-            ["Validation", f"{vn} × {vt:,} tokens, every 512 steps"],
-            ["Early stop", f"patience {b['PATIENCE']}"],
-            ["Re-encode", f"every {b['RECODE']} steps"]]})
-    if d:
-        n, t = sizes.get("e2e", (0, 0))
-        a = int(accum.group(1)) if accum else 1
-        out.append({"stage": "Stage 2 · end to end", "rows": [
-            ["Trains", "block scales"], ["Frozen", "weights, norms"],
-            ["Loss", f"KL, top {d['TOPK']}"],
-            ["Learning rate", f"{e2e_lr.group(1) if e2e_lr else '–'} relative → 0, linear"],
-            ["Data", f"{n:,} × {t:,} tokens" if n else "–"],
-            ["Epochs", "1"], ["Accumulation", str(a)],
-            ["Updates", f"{n // a:,}" if n else "–"]]})
-    return out
-
-
-LAYERS = {"1.5B": 28, "3B": 36, "7B": 28, "14B": 48, "20B": 48, "22B": 56, "24B": 40}  # blocks, for runs whose log does not say
-
-
-def _qat_run(b: int, sm: str, lines: list[str], res: dict, log: list[str]) -> dict:
-    """One EfficientQAT experiment (a contest's winner), from its lane's progress lines and its results file."""
-    runs = [i for i, x in enumerate(lines) if "block-ap strategy:" in x]
-    while len(runs) > 1 and runs[-1] + 1 < len(lines) and "resuming" in lines[runs[-1] + 1]:
-        runs.pop()  # a resumed Stage 1 continues the run before it
-    cur = lines[runs[-1]:] if runs else []
-    blocks: dict[int, dict] = {}
-    for x in cur:
-        if m := re.search(r"block-ap block (\d+): step 0, validation " + NUM, x):  # where training starts
-            k = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})
-            k["checks"], k["stopped"], k["start"] = [{"step": 0, "train": None, "val": float(m.group(2)), "at": x[:5]}], None, float(m.group(2))
-        elif m := re.search(r"block-ap block (\d+): step (\d+)/(\d+), train MSE " + NUM + r"(?:, validation " + NUM + ")?", x):
-            k = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})
-            k["of"] = int(m.group(3))
-            if int(m.group(2)) == 512 and not (k["checks"] and k["checks"][-1]["step"] == 0):
-                k["checks"], k["stopped"] = [], None  # retrained after a resume (logs before step 0 was logged)
-            k["checks"].append({"step": int(m.group(2)), "train": float(m.group(4)),
-                                "val": float(m.group(5)) if m.group(5) else None, "at": x[:5]})
-        elif m := re.search(r"block-ap block (\d+): validation MSE " + NUM + " -> " + NUM + r" \(best at step (\d+)", x):
-            k = blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})
-            k.update(before=float(m.group(2)), after=float(m.group(3)), best=int(m.group(4)), done=x[:5])
-        elif m := re.search(r"block-ap block (\d+): stopping early at step (\d+)", x):
-            blocks.setdefault(int(m.group(1)), {"block": int(m.group(1)), "checks": []})["stopped"] = int(m.group(2))
-
-    def updates(tag: str) -> list[dict]:
-        return [{"update": int(m.group(1)), "of": int(m.group(2)), "kl": float(m.group(3)), "at": x[:5]}
-                for x in lines if tag in x and (m := re.search(r"update (\d+)/(\d+): KL on the teacher's top \d+ " + NUM, x))]
-    done = sorted(k for k, v in blocks.items() if "after" in v)
-    times = [S.clock(blocks[k]["done"]) for k in done]
-    per = (times[-1] - times[0]) % 1440 / max(1, len(times) - 1) if len(times) > 1 else None
-    strategy = cur[0].split("strategy: ", 1)[1] if cur else None
-    total = int(m.group(1)) if strategy and (m := re.search(r"(\d+) blocks", strategy)) else LAYERS.get(sm, 48)
-    left, eta = total - len(done), None
-    if per and left:
-        t = ist()
-        e = t.tm_hour * 60 + t.tm_min + per * left
-        eta = f"{int(e // 60) % 24:02d}:{int(e % 60):02d}"
-    # this experiment's notes: from its own start on (when the log has it), never one that names another budget
-    start = next((i for i, x in enumerate(log) if f"{sm.lower()}-b{b}: QAT started" in x), 0)
-    other = re.compile(rf"\b{re.escape(sm)}\s*@\s*(?!{b}\b)\d")
-    notes = [x for x in log[start:] if "note:" in x and f" {sm} " in f" {x[6:]} " and ("QAT" in x or "Stage" in x)
-             and not other.search(x)]
-    rid = f"{sm.lower()}@{b}"
-    return {"id": rid, "name": f"EfficientQAT on {sm} @ {b} GiB", "size": sm, "budget": b,
-            "started": next((x[:5] for x in lines if "QAT started" in x or "block-ap strategy" in x), None),
-            "strategy": strategy, "blocks": [blocks[k] for k in sorted(blocks)], "total": total,
-            "minutes_per_block": per, "stage1_eta": eta,
-            "now": notes[-1][6:].replace("note: ", "") if notes else None, "now_at": notes[-1][:5] if notes else None,
-            "tests": tests([x[6:].split("block-0 test: ", 1)[1] for x in log if "note: block-0 test" in x])
-            if rid == "14b@5" else [],  # the block-0 tests that chose Stage 1's settings were on the 14B @ 5
-            "config": config(),
-            "control": updates("stage 2 only"), "stage2": updates("stage 2 after stage 1"), "results": res}
-
-
-def qats(log: list[str], ln) -> list[dict]:
-    """Every EfficientQAT experiment: one per contest whose winner was trained (its lane has Block-AP lines or it
-    has a results file), running ones first."""
-    out = []
-    for b, sm, ls in ln:
-        lines = [x for x in ls if "block-ap" in x or ("QAT" in x and "QAT trial" not in x)]
-        res = {}
-        for f in sorted(S.DATA.glob(f"rewrite/budget-{b}/qat-*.json")):
-            if "trial" not in f.name and f"-{sm}-" in f.name:
-                res.update(json.loads(f.read_text()))
-        if any("block-ap" in x for x in lines) or res or any("QAT started" in x for x in log if x[6:].startswith(f"{sm.lower()}-b{b}:")):
-            out.append(_qat_run(b, sm, lines, res, log))
-    out.sort(key=lambda q: ("stage 1 + 2" in q["results"], -q["budget"], q["size"]))
-    return out
+def fetch_pi() -> None:
+    """Every 5 minutes: pi/<contest>.txt from <user>/panther-status into the temporary directory; a failed fetch is
+    shown on the page and the last good results are kept."""
+    os.environ.setdefault("HF_HOME", str(Path(tempfile.gettempdir()) / "hf"))
+    repo = os.environ.get("PANTHER_HF_REPO", "")
+    if "/" not in repo:
+        PI["error"] = "Pi results: PANTHER_HF_REPO not set" if not repo else f"Pi results: PANTHER_HF_REPO {repo!r} has no '/'"
+        return
+    PI.update(repo=repo.split("/")[0] + "/panther-status", error="Pi results: first fetch running")
+    while True:
+        try:
+            from huggingface_hub import HfApi, hf_hub_download
+            files = {}
+            for f in HfApi().list_repo_files(PI["repo"]):
+                if f.startswith("pi/") and f.endswith(".txt"):
+                    files[f[3:-4]] = Path(hf_hub_download(PI["repo"], f, force_download=True, local_dir=Path(
+                        tempfile.gettempdir()) / "panther-status")).read_text(errors="replace").strip()
+            PI.update(files=files, error=None, at=time.strftime("%H:%M", ist()))
+        except Exception as e:  # noqa: BLE001  (shown on the page; retried in 5 minutes)
+            PI["error"] = f"Pi results from {PI['repo']}: fetch failed at {time.strftime('%H:%M', ist())}: " \
+                          f"{type(e).__name__}: {' '.join(str(e).split())[:300]}"
+        time.sleep(300)
 
 
 def pi() -> list[dict]:
-    """The Pi's measurements of our winners (data/pi/<contest>.txt, saved by the status job)."""
+    """The Pi's measurements of our winners: data/pi/<contest>.txt (older ones), with those fetched from Hugging Face
+    over them."""
+    text = {}
+    for f in sorted(DATA.glob("pi/*@*.txt")):
+        try:
+            text[f.stem] = (f.read_text(errors="replace").strip(), f)
+        except OSError as e:
+            problem(f, e)
+    text.update({k: (v, f"{PI['repo']}: pi/{k}.txt") for k, v in dict(PI["files"]).items()})
     out = []
-    for f in sorted(S.DATA.glob("pi/*@*.txt")):  # <contest>.txt; older files named otherwise are not contests
-        if not re.fullmatch(r"[\w.]+@\d+", f.stem):
+    for c, (x, src) in sorted(text.items()):
+        if not re.fullmatch(r"[\w.]+@\d+", c):
+            continue  # older files named otherwise are not contests
+        if f := re.search(r"FAILED: (.*)", x):  # a failed Pi check: shown as such, never dropped
+            out.append({"contest": c, "budget": int(c.split("@")[1]), "failed": f.group(1).strip() or "FAILED",
+                        "at": x[:8] if re.match(r"\d\d:\d\d:\d\d ", x) else None, "fits": None, "throttled": False,
+                        **dict.fromkeys(("decode", "prefill", "ram", "predicted"))})
             continue
-        x = f.read_text().strip()
         m = {k: re.search(p, x) for k, p in (("decode", r"decode " + NUM), ("prefill", r"prefill " + NUM),
                                               ("ram", r"peak RAM " + NUM), ("predicted", r"predicted " + NUM))}
-        if all(m.values()):
-            out.append({"contest": f.stem, "budget": int(f.stem.split("@")[1]), "throttled": "0xe" in x,
-                        **{k: float(v.group(1)) for k, v in m.items()}})
+        if not all(m.values()):
+            problem(src, "no " + ", ".join(k for k, v in m.items() if not v) + " in the Pi's line")
+            continue
+        fit = re.search(r"(FITS|OVER) [\d.]+ GiB", x)
+        out.append({"contest": c, "budget": int(c.split("@")[1]), "throttled": "0xe" in x,
+                    "fits": fit.group(0) if fit else None, **{k: float(v.group(1)) for k, v in m.items()}})
     return out
 
 
+def live(rid: str) -> bool | None:
+    """Whether a run is active: its lock file is held (a shared lock is refused); None if it cannot be told."""
+    try:
+        with open(DATA / "locks" / f"run-{rid}.lock") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(f, fcntl.LOCK_UN)
+            return False
+    except OSError:
+        return None
+
+
 def system() -> dict:
-    out: dict = {"disk": None, "gpu": None, "bookings": []}
-    d = shutil.disk_usage(S.DATA)
+    out: dict = {"disk": None, "gpu": None, "claims": []}
+    d = shutil.disk_usage(DATA)
     out["disk"] = {"free": d.free, "total": d.total}
     try:
         r = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu",
@@ -338,25 +361,30 @@ def system() -> dict:
         used, total, util = (float(v) for v in r.stdout.strip().split(","))
         out["gpu"] = {"used": used * 2**20, "total": total * 2**20, "util": util}
     except (OSError, ValueError, subprocess.SubprocessError):
-        pass
-    f = S.DATA / "locks/gpu.json"
-    if f.exists():
-        try:
-            out["bookings"] = [{"bytes": v[0], "lapses_in": v[1] - time.time()}
-                               for v in json.loads(f.read_text()).values() if v[1] > time.time()]
-        except (OSError, ValueError):
-            pass
+        pass  # no GPU in this container: the page shows the claims instead
+    f = DATA / "locks/claims.json"
+    try:
+        book = json.loads(f.read_text()) if f.exists() else {}
+        for k, v in book.items():  # a claim whose run has ended stays in the file until the next start: not shown
+            if (on := live(k)) is not False:
+                out["claims"].append({"id": k, "gpu": v["gpu"], "ram": v["ram"], "since": v.get("since", ""),
+                                      "kind": v.get("kind", ""), "live": "yes" if on else "unknown"})
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        problem(f, e)
     out["paused"] = [w for f, w in (("PAUSED", "by the user"), ("PAUSED.guard", "GitLab unhealthy"))
-                     if (S.DATA / f).exists()]
+                     if (DATA / f).exists()]
     return out
 
 
 def state() -> dict:
-    log, ln = logs()
-    t = ist()
-    return {"now": time.strftime("%d %b %H:%M:%S", t), "contests": contests(log, ln), "qats": qats(log, ln),
-            "pi": pi(), "system": system(),
-            "events": events(400)}
+    with STATE:
+        PROBLEMS.clear()
+        log, ln = logs()
+        t = ist()
+        out = {"now": time.strftime("%d %b %H:%M:%S", t), "contests": contests(log, ln),
+               "pi": pi(), "pi_status": {k: PI[k] for k in ("repo", "at", "error")}, "system": system(),
+               "events": events(400)}
+        return {**out, "problems": list(dict.fromkeys(PROBLEMS))}
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -453,8 +481,10 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=43800)
     a = ap.parse_args()
-    S.DATA = Path(a.data)
-    print(f"Panther dashboard: http://{a.host}:{a.port}  (data: {S.DATA})", flush=True)
+    global DATA
+    DATA = Path(a.data)
+    threading.Thread(target=fetch_pi, daemon=True).start()
+    print(f"Panther dashboard: http://{a.host}:{a.port}  (data: {DATA})", flush=True)
     ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
 
 
