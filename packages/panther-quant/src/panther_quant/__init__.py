@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from panther_quant.distill import BlockScale, kl_topk_loss
+from panther_quant.distill import BlockScale, distill, kl_topk_loss, passes, teacher_tops
 from panther_quant.gptq import gptq
 from panther_quant.hessian import compute_hessians
 from panther_quant.load import load_qwen2, param_path
@@ -14,11 +14,14 @@ __all__ = [
     "Qwen2Model",
     "compute_hessians",
     "cross_entropy",
+    "distill",
     "gptq",
     "kl_divergence",
     "kl_topk_loss",
     "load_qwen2",
     "param_path",
+    "passes",
     "perplexity",
     "same_top_word",
+    "teacher_tops",
 ]
