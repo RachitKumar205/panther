@@ -10,6 +10,8 @@ from panther_quant.hessian import compute_hessians
 from panther_quant.load import load_qwen2, param_path
 from panther_quant.measure import cross_entropy, kl_divergence, perplexity, same_top_word
 from panther_quant.nn import Qwen2Model
+from panther_quant.reference import kl_topk, topk_logprobs
+from panther_quant.tokenizer import load_tokenizer
 
 __all__ = [
     "BlockScale",
@@ -22,12 +24,15 @@ __all__ = [
     "greedy_decode",
     "gsm8k_correct",
     "kl_divergence",
+    "kl_topk",
     "kl_topk_loss",
     "load_qwen2",
+    "load_tokenizer",
     "multiple_choice",
     "param_path",
     "passes",
     "perplexity",
     "same_top_word",
     "teacher_tops",
+    "topk_logprobs",
 ]
