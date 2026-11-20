@@ -314,6 +314,10 @@ About 1,430 lines (blank and comment lines excluded):
   final step's tests, against the current winner and the preset (`rewrite/budget-B/qat-<model>.json`, the page).
   The paper's text (RedPajama-1T-Sample) has been taken down, so FineWeb-Edu stands in, without the documents our
   own splits use. On the 1.5B (all blocks, a small trial) Stage 1 took web-text perplexity 19.92 -> 17.38.
+  The 14B @ 7 QAT run was stopped at block 17 on 20 Nov and removed: until fix 79d9754 a block's codes were picked
+  again in fp32 when saved, while training and its checks picked them in bf16, so a block was saved worse than it
+  scored (block 5: scored 0.01606, saved 0.01981), and blocks 0-4 of that run were saved that way. The 14B @ 5 and
+  22B @ 7 QAT files were made before the fix: their results are true for the files as saved.
 - Measuring: **Accuracy is Not All You Need** (NeurIPS 2024): flips and KL over accuracy.
 - What Panther adds: allocation search over better-rounded type copies, K and IQ types, distillation into stock GGUF,
   RAM budgets that include the KV cache, verified on a real Pi, and a search score that does not reward luck.
