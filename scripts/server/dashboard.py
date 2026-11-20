@@ -280,7 +280,11 @@ def _qat_run(b: int, sm: str, lines: list[str], res: dict, log: list[str]) -> di
         t = ist()
         e = t.tm_hour * 60 + t.tm_min + per * left
         eta = f"{int(e // 60) % 24:02d}:{int(e % 60):02d}"
-    notes = [x for x in log if "note:" in x and f" {sm} " in f" {x[6:]} " and ("QAT" in x or "Stage" in x)]
+    # this experiment's notes: from its own start on (when the log has it), never one that names another budget
+    start = next((i for i, x in enumerate(log) if f"{sm.lower()}-b{b}: QAT started" in x), 0)
+    other = re.compile(rf"\b{re.escape(sm)}\s*@\s*(?!{b}\b)\d")
+    notes = [x for x in log[start:] if "note:" in x and f" {sm} " in f" {x[6:]} " and ("QAT" in x or "Stage" in x)
+             and not other.search(x)]
     rid = f"{sm.lower()}@{b}"
     return {"id": rid, "name": f"EfficientQAT on {sm} @ {b} GiB", "size": sm, "budget": b,
             "started": next((x[:5] for x in lines if "QAT started" in x or "block-ap strategy" in x), None),
