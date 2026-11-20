@@ -100,7 +100,7 @@ class QLinear(torch.nn.Module):
     def final(self) -> np.ndarray:
         """The trained matrix as llama.cpp bytes."""
         st = self.scales()
-        return fq.pack(self.t, {**st, **fq.encode(self.t, self.W, st)})
+        return fq.pack(self.t, {**st, **(self.codes if self.frozen else fq.encode(self.t, self.W, st))})
 
 
 def _restored(layer, b: int, src: dict, saved: dict, cfg):
@@ -286,14 +286,19 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
         with torch.no_grad():  # back to the best point (the paper's code stops early on the validation error)
             for p, v in zip(ws + ss, best[2]):
                 p.copy_(v.to(p.device))
-        for q in qlin.values():
-            q.frozen, q.codes = True, fq.encode(q.t, q.W, q.scales())  # the final codes, used from here on
-        after = val_loss()
+        with torch.autocast("cuda", torch.bfloat16):  # picked as in training and the checks: the block that scored
+            for q in qlin.values():
+                q.frozen, q.codes = True, fq.encode(q.t, q.W, q.scales())  # the final codes, used from here on
+        after, kept = val_loss(), False
+        if after >= before:  # rounding to the final codes lost more than training gained: the file's block stays
+            log(f"block-ap block {b}: final codes {_f(after)}, worse than the file's {_f(before)}: keeping the file's")
+            ql, kept = _restored(orig, b, src, {}, m.config), True
+            after = val_loss()
         with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):  # the validation samples move on a block
             vq = torch.cat([_run(ql, vq[i:i + BATCH].cuda(), rope).cpu() for i in range(0, len(vq), BATCH)])
             vfp = torch.cat([_run(orig, vfp[i:i + BATCH].cuda(), rope).cpu() for i in range(0, len(vfp), BATCH)])
         flush()
-        np.savez(f"{saved(b)}.part.npz", **{k: q.final() for k, q in qlin.items()})
+        np.savez(f"{saved(b)}.part.npz", **{k: np.asarray(src[k].data) if kept else q.final() for k, q in qlin.items()})
         os.rename(f"{saved(b)}.part.npz", saved(b))
         (cache / "state.json").write_text(json.dumps({"done": b + 1, "clean": True, "n": n, "lag": 1}))
         log(f"block-ap block {b}: validation MSE {_f(before)} -> {_f(after)} (best at step {best[1]}; "
