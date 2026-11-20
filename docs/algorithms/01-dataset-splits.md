@@ -47,6 +47,18 @@ Tokenize to lowercase alphanumeric runs; then:
 Complexity: `O((P + T) · ℓ)` where `P`, `T` are the numbers of prompts and texts and `ℓ` the mean
 token length; lookups are hash-map `O(1)`.
 
+## Web-vs-question leakage (V5)
+
+A web document can contain a benchmark question (these datasets are scraped from the web). Such a
+document in the train text would leak the question into the importance matrix, rounding and
+distillation, contaminating the verdict even though the document sits in a disjoint split.
+
+A document is **dropped** if it contains `>= 12` consecutive tokens of any question stem, or the
+whole stem when the stem is shorter. 12 is high enough to ignore boilerplate ("which of the
+following …") but specific enough to catch genuine copies. Detection is one n-gram index over all
+stems, then one pass over the documents — `O(total tokens)`. Drops are counted and returned, and the
+integrity checker re-proves that no kept document matches any question.
+
 ## Deterministic partition
 
 - Chat prompts: shuffle with a seeded PRNG (Fisher–Yates via `random.Random(seed).shuffle`), then

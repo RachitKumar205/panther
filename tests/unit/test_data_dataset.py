@@ -9,6 +9,7 @@ from panther_data.dataset import (
     WebDocument,
     build_splits,
     fill_to_budget,
+    leaking_documents,
     overlapping,
     partition_questions,
     partition_web,
@@ -117,3 +118,28 @@ def test_partition_web_fills_train_then_test_then_select_disjointly() -> None:
     ids = [d.id for split in web.values() for d in split]
     assert len(ids) == len(set(ids))  # disjoint by id
     assert sum(len(d.text) for d in web[SplitName.TRAIN]) <= 40
+
+
+def test_leaking_documents_flags_a_doc_containing_a_question_span() -> None:
+    stem = "what is the capital of france and its population size today"
+    doc = "some text " + stem + " more text"
+    assert leaking_documents([doc], [stem], 12) == frozenset({0})
+
+
+def test_leaking_documents_ignores_runs_shorter_than_n() -> None:
+    stem = "the quick brown fox jumps over the lazy dog"  # 9 words < 12
+    assert leaking_documents(["the quick brown fox"], [stem], 12) == frozenset()
+
+
+def test_build_splits_drops_a_web_doc_leaking_a_question() -> None:
+    stem = " ".join(f"word{i}" for i in range(15))
+    question = Question(id="0", task="mmlu", stem=stem, answer="A")
+    docs = [
+        WebDocument(id="clean", text="nothing to see here"),
+        WebDocument(id="leak", text="intro " + stem + " outro"),
+    ]
+    source = _Source([f"clean prompt {i}" for i in range(600)], {"mmlu": [question]}, docs)
+    built = build_splits(source, SplitSpec(), len)
+    assert built.dropped_web == ("leak",)
+    kept_ids = {d.id for split in built.web.values() for d in split}
+    assert "leak" not in kept_ids

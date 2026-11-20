@@ -79,6 +79,7 @@ class SplitSpec(BaseModel):
     )  # questions kept for selection, per benchmark
     seed: int = 0  # every draw is reproducible
     overlap_n: int = 8  # prompts sharing this many words with a question are dropped
+    web_leak_n: int = 12  # a web doc sharing this many stem tokens with a question is dropped
 
 
 def overlapping(prompts: Sequence[str], texts: Sequence[str], n: int = 8) -> frozenset[int]:
@@ -181,6 +182,7 @@ class BuiltDataset(BaseModel):
     selection: dict[str, list[str]]  # task -> question ids kept for selection
     heldout: dict[str, list[str]]  # task -> question ids held out
     web: dict[SplitName, list[WebDocument]]  # split -> documents (disjoint by id)
+    dropped_web: tuple[str, ...]  # document ids dropped for containing a question (V5)
 
 
 _TEXT_ORDER = (SplitName.TRAIN, SplitName.TEST, SplitName.SELECT)
@@ -214,14 +216,44 @@ def partition_web(
     return out
 
 
+def leaking_documents(
+    documents: Sequence[str],
+    stems: Sequence[str],
+    n: int = 12,
+) -> frozenset[int]:
+    """Indices of documents that contain a distinctive span of any question stem (leak V5).
+
+    A document leaks a question if it contains ``n`` consecutive tokens of the stem, or the whole
+    stem when the stem is shorter than ``n``.
+    """
+    grams: set[str] = set()
+    short: list[str] = []
+    for stem in stems:
+        toks = words(stem)
+        if len(toks) < n:
+            short.append(f" {' '.join(toks)} ")
+        else:
+            grams.update(" ".join(toks[j : j + n]) for j in range(len(toks) - n + 1))
+    leaking: set[int] = set()
+    for i, doc in enumerate(documents):
+        toks = words(doc)
+        padded = f" {' '.join(toks)} "
+        span = any(" ".join(toks[j : j + n]) in grams for j in range(len(toks) - n + 1))
+        whole = short and any(s in padded for s in short)
+        if span or whole:
+            leaking.add(i)
+    return frozenset(leaking)
+
+
 def build_splits(
     source: DatasetSource,
     spec: SplitSpec,
     count_tokens: Callable[[str], int],
 ) -> BuiltDataset:
-    """Build the chat, question and web splits; a prompt overlapping any question is dropped."""
+    """Build the chat, question and web splits; a prompt or document leaking a question is dropped."""
     questions = source.questions()
     texts = [" ".join((q.stem, *q.choices, q.answer)) for qs in questions.values() for q in qs]
+    stems = [q.stem for qs in questions.values() for q in qs]
     need = sum(spec.prompt_counts.values())
     candidates = list(source.chat_prompts())[: 2 * need]
     clean = [p for i, p in enumerate(candidates) if i not in overlapping(candidates, texts, spec.overlap_n)][:need]
@@ -230,5 +262,9 @@ def build_splits(
         {task: [q.id for q in qs] for task, qs in questions.items()},
         spec.selection_questions,
     )
-    web = partition_web(source.web_documents(), spec.web_tokens, count_tokens, spec.seed)
-    return BuiltDataset(prompts=prompts, selection=selection, heldout=heldout, web=web)
+    web_docs = list(source.web_documents())
+    leaking = leaking_documents([d.text for d in web_docs], stems, spec.web_leak_n)
+    kept_docs = [d for i, d in enumerate(web_docs) if i not in leaking]
+    web = partition_web(kept_docs, spec.web_tokens, count_tokens, spec.seed)
+    dropped = tuple(web_docs[i].id for i in sorted(leaking))
+    return BuiltDataset(prompts=prompts, selection=selection, heldout=heldout, web=web, dropped_web=dropped)
