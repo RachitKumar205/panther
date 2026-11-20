@@ -51,6 +51,19 @@ extend-exclude = ["panther-old", ".venv"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.isort]
+known-first-party = [
+    "panther_core",
+    "panther_data",
+    "panther_measure",
+    "panther_quant",
+    "panther_search",
+    "panther_pipeline",
+    "panther_ops",
+    "panther_dashboard",
+    "panther_cli",
+]
+
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.12"

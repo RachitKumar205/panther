@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from panther_cli.main import app
 from typer.testing import CliRunner
+
+from panther_cli.main import app
 
 
 def test_help_lists_the_command() -> None:
