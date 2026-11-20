@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from panther_quant.decode import greedy_decode
 from panther_quant.distill import BlockScale, distill, kl_topk_loss, passes, teacher_tops
 from panther_quant.eval import completion_logprob, gsm8k_correct, multiple_choice
 from panther_quant.gptq import gptq
@@ -18,6 +19,7 @@ __all__ = [
     "cross_entropy",
     "distill",
     "gptq",
+    "greedy_decode",
     "gsm8k_correct",
     "kl_divergence",
     "kl_topk_loss",
