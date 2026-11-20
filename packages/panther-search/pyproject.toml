@@ -3,7 +3,7 @@ name = "panther-search"
 version = "0.1.0"
 description = "Preset selection, genetic search and CP-SAT proposals."
 requires-python = ">=3.12,<3.13"
-dependencies = ["panther-core", "numpy>=1.26"]
+dependencies = ["panther-core", "numpy>=1.26", "pydantic>=2.9"]
 
 [build-system]
 requires = ["hatchling"]
