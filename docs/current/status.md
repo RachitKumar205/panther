@@ -5,8 +5,8 @@
 
 | Phase | Status | Notes |
 |---|---|---|
-| M0 Bootstrap | In progress | workspace, tooling, CI, docs and fixtures in place |
-| M1 `panther-core` | Planned | — |
+| M0 Bootstrap | Done | workspace, tooling, CI, docs and fixtures in place |
+| M1 `panther-core` | In progress | quant/geometry/RAM/stats/cache/error landed |
 | M2 `panther-data` | Planned | — |
 | M3 `panther-measure` | Planned | — |
 | M4 Vertical slice | Planned | — |
@@ -18,10 +18,10 @@
 | M10 Parity + E2E | Planned | — |
 | M11 Cutover | Planned | — |
 
-## Open work in the current phase
+## Open work in the current phase (M1)
 
-- Confirm the first CI run on `lalit` is green.
-- Then close M0 and start M1 (`panther-core`).
+- Genomes and the RAM window (repair/mutation/crossover, next).
+- Wire the corrected offline error and chunk-based statistics into the measurement layer (M3).
 
 ## Completed
 
@@ -34,6 +34,8 @@
 - CLI bootstrap: `panther --help` and `panther version`.
 - CI workflow `.github/workflows/ci.yml`.
 - Reference `llama-perplexity` fixtures copied to `tests/parity/fixtures/llama/`.
+- `panther-core`: `QuantType`/`SEARCH_FORMATS` (B15), `GeometrySpec`/`ModelGeometry`, `RamModel`/`RuntimeConfig`,
+  `weighted_sqerr` (B3), chunk-based statistics (B4), and content-addressed `key` (B1).
 
 ## Verification
 
