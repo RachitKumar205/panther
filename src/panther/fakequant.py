@@ -308,10 +308,12 @@ def _nearest(a: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
 
 
 def encode(t: str, W: torch.Tensor, st: dict) -> dict:
-    """The codes nearest to W (rows x columns) under st's scales, plain squared error."""
+    """The codes nearest to W (rows x columns) under st's scales, plain squared error. Always in fp32, whatever
+    autocast the caller is under: in bf16 the pattern search's distances are too coarse and 4-8 % of IQ groups get
+    another code, so codes picked in training, at a check and at the save would not be the same codes."""
     s = snap(t, st)
     kind, extra = SPEC[t][4], SPEC[t][5]
-    with torch.no_grad():
+    with torch.no_grad(), torch.autocast(W.device.type, enabled=False):
         step, off = _scales(t, s)
         u = _sub(t, W.float()) + (off if off is not None else 0)
         u = (u / torch.where(step == 0, torch.ones_like(step), step)).reshape(*s["d"].shape, -1)  # value units

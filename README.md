@@ -317,7 +317,9 @@ About 1,430 lines (blank and comment lines excluded):
   The 14B @ 7 QAT run was stopped at block 17 on 20 Nov and removed: until fix 79d9754 a block's codes were picked
   again in fp32 when saved, while training and its checks picked them in bf16, so a block was saved worse than it
   scored (block 5: scored 0.01606, saved 0.01981), and blocks 0-4 of that run were saved that way. The 14B @ 5 and
-  22B @ 7 QAT files were made before the fix: their results are true for the files as saved.
+  22B @ 7 QAT files were made before the fix: their results are true for the files as saved. Since 20 Nov codes are
+  picked in fp32 everywhere (in bf16 the pattern search gives 4-8 % of IQ groups another code), a block's logged
+  error is measured from its saved bytes, and a block that does not beat the starting file's keeps the file's.
 - Measuring: **Accuracy is Not All You Need** (NeurIPS 2024): flips and KL over accuracy.
 - What Panther adds: allocation search over better-rounded type copies, K and IQ types, distillation into stock GGUF,
   RAM budgets that include the KV cache, verified on a real Pi, and a search score that does not reward luck.

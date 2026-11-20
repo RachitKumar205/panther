@@ -901,7 +901,8 @@ def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
     with lock(step_lock(model, "refs")):
         refs(model)  # the original's reference outputs (a finished contest's were cleaned up)
     for name, (path, label) in files.items():
-        if rj.exists() and name in json.loads(rj.read_text()):
+        label = f"{label}:{digest_file(path)[:12]}"  # results are cached by label: a new file is tested anew
+        if rj.exists() and json.loads(rj.read_text()).get(name, {}).get("label") == label:
             continue
         sel = score(model, None, label, path=path, full=True)
         score(model, None, pl, path=pf, full=True)
@@ -910,7 +911,7 @@ def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
             ours, theirs, winner, orig = (test(model, path, label), test(model, pf, pl), test(model, wf, wl),
                                           test(model, bf16, "original"))
         vw, vp = stats.compare(ours["correct"], winner["correct"]), stats.compare(ours["correct"], theirs["correct"])
-        r = {"file": str(path), "selection": sel, "guard_vs_preset": g, "held_out": summary(ours, orig),
+        r = {"file": str(path), "label": label, "selection": sel, "guard_vs_preset": g, "held_out": summary(ours, orig),
                      "vs_winner": {"diff": vw[0], "ci": vw[1:], "verdict": stats.verdict(*vw[1:]),
                                    "winner_accuracy": stats.acc(winner["correct"])},
                      "vs_preset": {"diff": vp[0], "ci": vp[1:], "verdict": stats.verdict(*vp[1:]), "preset": p,

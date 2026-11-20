@@ -85,6 +85,20 @@ def test_encode_beats_or_matches_llama(t):
 
 
 @pytest.mark.parametrize("t", fq.TYPES)
+def test_encode_ignores_autocast(t):
+    """Codes are picked in fp32 whatever autocast the caller is under: training and its checks run under bf16, the
+    save does not, and all three must pick the same codes."""
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    st = fq.unpack(t, random_raw(t, 32, 8), dev)
+    W = fq.decode(t, st)
+    W = W + torch.randn_like(W) * W.std() * 0.05  # off the grid, as trained weights are
+    plain = fq.encode(t, W, st)
+    with torch.autocast(dev, torch.bfloat16):
+        cast = fq.encode(t, W, st)
+    assert all(torch.equal(plain[k], cast[k]) for k in plain)
+
+
+@pytest.mark.parametrize("t", fq.TYPES)
 def test_fake_forward_exact_and_gradients(t):
     st = {k: (v.clone().requires_grad_(True) if v.is_floating_point() else v) for k, v in fq.unpack(t, random_raw(t))
           .items()}

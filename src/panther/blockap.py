@@ -11,7 +11,9 @@ Ours: llama.cpp's own types (panther.fakequant) instead of uniform quantization;
 overflows fp16); a matrix's codes are re-chosen every RECODE steps (the IQ pattern search is the slow part; the
 weights move by ~1e-5 a step). Every 512 steps the block's validation error is measured and the best point is kept
 (training can drift late, or blow up: on the 14B, block 0's error halved by step 512, then doubled), and a
-block stops training after PATIENCE checks without a better point. The hidden
+block stops training after PATIENCE checks without a better point. Codes are always picked in fp32
+(fakequant.encode), and a finished block is scored, and run for the blocks after it, from the bytes that are saved;
+if that is not better than the block the starting file already has, the file's block stays. The hidden
 states of every sample (two copies, original and quantized) do not fit in memory at the paper's size (14B: 2 x 86
 GB), so they are streamed from disk (bf16), as the paper's code does for large models (fp16 there). A finished
 block's output is not written in a pass of its own: the next block's first epoch computes it from the cache (which
@@ -75,7 +77,7 @@ class QLinear(torch.nn.Module):
 
     def __init__(self, lin: torch.nn.Linear, t: str, raw: np.ndarray, rows: torch.Tensor | None = None):
         super().__init__()
-        self.t, self.n, self.codes, self.frozen = t, 0, None, False
+        self.t, self.n, self.codes = t, 0, None
         w = lin.weight.detach().float()
         self.W = torch.nn.Parameter((w if rows is None else w[rows]).clone())  # kept in the file's row order
         self.register_buffer("back", None if rows is None else torch.argsort(rows))  # to PyTorch's order
@@ -89,7 +91,7 @@ class QLinear(torch.nn.Module):
 
     def forward(self, x):
         st = self.scales()
-        if self.codes is None or (not self.frozen and self.n % RECODE == 0):
+        if self.codes is None or self.n % RECODE == 0:
             self.codes = fq.encode(self.t, self.W, st)
         self.n += 1
         w = fq.fake(self.t, self.W, st, self.codes)
@@ -98,9 +100,9 @@ class QLinear(torch.nn.Module):
         return torch.nn.functional.linear(x, w.to(x.dtype), None if self.bias is None else self.bias.to(x.dtype))
 
     def final(self) -> np.ndarray:
-        """The trained matrix as llama.cpp bytes."""
+        """The trained matrix as llama.cpp bytes (codes picked now, from the weights as they are)."""
         st = self.scales()
-        return fq.pack(self.t, {**st, **(self.codes if self.frozen else fq.encode(self.t, self.W, st))})
+        return fq.pack(self.t, {**st, **fq.encode(self.t, self.W, st)})
 
 
 def _restored(layer, b: int, src: dict, saved: dict, cfg):
@@ -235,13 +237,14 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
         sched = torch.optim.lr_scheduler.LambdaLR(
             opt, lambda s: MIN_LR + (1 - MIN_LR) * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps)))
 
-        def val_loss():
+        def val_loss(layer=None):  # of the block in training, or of another version of it
             with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
-                return sum(torch.nn.functional.mse_loss(_run(ql, vq[i:i + BATCH].cuda(), rope).float(),
+                return sum(torch.nn.functional.mse_loss(_run(layer or ql, vq[i:i + BATCH].cuda(), rope).float(),
                                                         _run(orig, vfp[i:i + BATCH].cuda(), rope).float()).item()
                            for i in range(0, len(vq), BATCH)) / math.ceil(len(vq) / BATCH)
         def snap():
             return [p.detach().cpu().clone() for p in ws + ss]
+        file_err = val_loss(_restored(orig, b, src, {}, m.config))  # the block as the starting file has it
         before, total, mark = val_loss(), 0.0, 0.0
         best = (before, 0, snap())  # (validation error, step, weights and scales): never end worse than the start
         log(f"block-ap block {b}: step 0, validation {_f(before)}")  # the starting point, so a curve starts at 0
@@ -286,26 +289,27 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
         with torch.no_grad():  # back to the best point (the paper's code stops early on the validation error)
             for p, v in zip(ws + ss, best[2]):
                 p.copy_(v.to(p.device))
-        with torch.autocast("cuda", torch.bfloat16):  # picked as in training and the checks: the block that scored
-            for q in qlin.values():
-                q.frozen, q.codes = True, fq.encode(q.t, q.W, q.scales())  # the final codes, used from here on
-        after, kept = val_loss(), False
-        if after >= before:  # rounding to the final codes lost more than training gained: the file's block stays
-            log(f"block-ap block {b}: final codes {_f(after)}, worse than the file's {_f(before)}: keeping the file's")
-            ql, kept = _restored(orig, b, src, {}, m.config), True
-            after = val_loss()
+        # the block is scored, and run for the blocks after it, from the bytes that are saved: what is logged is
+        # what the file holds
+        packed = {k: q.final() for k, q in qlin.items()}
+        ql = _restored(orig, b, src, packed, m.config)
+        after = val_loss()
+        if after >= file_err:  # training did not beat the block the file already has: that one stays
+            log(f"block-ap block {b}: trained {_f(after)}, not better than the file's {_f(file_err)}: keeping the file's")
+            packed = {k: np.asarray(src[k].data) for k in qlin}
+            ql, after = _restored(orig, b, src, {}, m.config), file_err
         with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):  # the validation samples move on a block
             vq = torch.cat([_run(ql, vq[i:i + BATCH].cuda(), rope).cpu() for i in range(0, len(vq), BATCH)])
             vfp = torch.cat([_run(orig, vfp[i:i + BATCH].cuda(), rope).cpu() for i in range(0, len(vfp), BATCH)])
         flush()
-        np.savez(f"{saved(b)}.part.npz", **{k: np.asarray(src[k].data) if kept else q.final() for k, q in qlin.items()})
+        np.savez(f"{saved(b)}.part.npz", **packed)
         os.rename(f"{saved(b)}.part.npz", saved(b))
         (cache / "state.json").write_text(json.dumps({"done": b + 1, "clean": True, "n": n, "lag": 1}))
         log(f"block-ap block {b}: validation MSE {_f(before)} -> {_f(after)} (best at step {best[1]}; "
-            f"train {_f(total / max(1, ran))})")
+            f"train {_f(total / max(1, ran))}; the file's {_f(file_err)})")
         m.model.layers[b] = orig.cpu()
-        prev = ql  # frozen at its final codes: the next block's first epoch runs it on the quantized cache
-        del qlin, opt, ws, ss
+        prev = ql  # the saved block: the next block's first epoch runs it on the quantized cache
+        del qlin, opt, ws, ss, packed
         torch.cuda.empty_cache()
     shutil.copy(start, f"{dst}.part")
     rw = gguf.GGUFReader(f"{dst}.part", "r+")

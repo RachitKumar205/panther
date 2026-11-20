@@ -92,8 +92,9 @@ def distill(student: Path, teacher: Path, texts: list[Path], dst: Path, log=prin
             th = torch.zeros(lin.weight.shape[0], lin.weight.shape[1] // 256, device="cuda", requires_grad=True)
 
             class Scale(torch.nn.Module):
-                def forward(self, w, th=th):  # one multiplier per 256 weights, broadcast (no full-size copy)
-                    return (w.view(w.shape[0], -1, 256) * torch.exp(th).to(w.dtype)[:, :, None]).view(w.shape)
+                def forward(self, w, th=th):  # one multiplier per 256 weights; multiplied in fp32, as the save does
+                    # (a bf16 multiplier moves in steps of 0.4-0.8 % near 1: not the scale that is written)
+                    return (w.float().view(w.shape[0], -1, 256) * torch.exp(th)[:, :, None]).view(w.shape).to(w.dtype)
             P.register_parametrization(lin, "weight", Scale())
             scales[name] = th
         for hf, g in NORM.items():

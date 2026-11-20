@@ -117,10 +117,12 @@ def check(d: Path, label: str = "Q", server: str | Path = LLAMA, opts: list[str]
 
 def spec(d: Path, label: str, server: str, opts: list[str]) -> str:
     m, t0, rows = manifest(d, verify=False), throttled(), []
+    chat = ("[INST] {}[/INST]" if "mistral" in m["file"].lower() else  # each model in its own chat format
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n"
+            "<|im_start|>assistant\n")
     with serving(server, d, m, opts, f"server-spec-{label}.log") as (ask, peak):
         for q in PROMPTS:
-            r = ask({"prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-                               f"<|im_start|>user\n{q}<|im_end|>\n<|im_start|>assistant\n", "n_predict": SPEC_GEN})
+            r = ask({"prompt": chat.format(q), "n_predict": SPEC_GEN})
             t = r["timings"]
             rows.append({"n": t["predicted_n"], "ms": t["predicted_ms"], "pp": t["prompt_per_second"],
                          "draft": t.get("draft_n"), "accepted": t.get("draft_n_accepted"),
