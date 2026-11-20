@@ -9,7 +9,15 @@ from panther_quant.nn import Qwen2Model
 
 
 def build() -> Qwen2Model:
-    return Qwen2Model(hidden_size=16, num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1, head_dim=8, intermediate_size=32, vocab_size=50)
+    return Qwen2Model(
+        hidden_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        intermediate_size=32,
+        vocab_size=50,
+    )
 
 
 def test_greedy_decode_appends_the_argmax_next_token() -> None:
