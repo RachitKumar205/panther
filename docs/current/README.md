@@ -6,6 +6,7 @@ planned. Update the relevant file in the same commit as the change it describes.
 | File | Contents |
 |---|---|
 | [architecture.md](architecture.md) | package graph, protocols, data flow |
+| [component-map.md](component-map.md) | authoritative inventory and implementation order |
 | [packages.md](packages.md) | each package's responsibility and public API |
 | [data-model.md](data-model.md) | configs, records, artifacts, manifests, schema versions |
 | [pipeline.md](pipeline.md) | pipeline steps and which split each reads |
