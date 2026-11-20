@@ -68,6 +68,8 @@ known-first-party = [
 # Ported numerical codecs (rachit branch): not reformatted.
 "packages/panther-quant/src/panther_quant/fakequant.py" = ["E501", "RUF005"]
 "packages/panther-quant/src/panther_quant/rounding.py" = ["E501"]
+"packages/panther-quant/src/panther_quant/blockap.py" = ["E501", "RUF005", "F821", "B905", "B023"]
+"tests/unit/test_quant_blockap_rows.py" = ["E501"]
 
 [tool.pyright]
 typeCheckingMode = "strict"
@@ -82,6 +84,7 @@ exclude = [
     # Ported numerical codecs (rachit branch): not held to strict typing.
     "packages/panther-quant/src/panther_quant/fakequant.py",
     "packages/panther-quant/src/panther_quant/rounding.py",
+    "packages/panther-quant/src/panther_quant/blockap.py",
 ]
 
 [tool.pytest.ini_options]

@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 from panther_quant.nn import Layer, Qwen2Model
+
+# HF module name -> GGUF role, for the distillation and QAT row mapping.
+LINEAR = {
+    "self_attn.q_proj": "attn_q",
+    "self_attn.k_proj": "attn_k",
+    "self_attn.v_proj": "attn_v",
+    "self_attn.o_proj": "attn_output",
+    "mlp.gate_proj": "ffn_gate",
+    "mlp.up_proj": "ffn_up",
+    "mlp.down_proj": "ffn_down",
+}
+
+
+def reorder(x: Any, n_head: int) -> Any:
+    """llama.cpp's row order for attention q/k of llama-style models (the converter's permute)."""
+    return x.reshape(n_head, 2, x.shape[0] // n_head // 2, *x.shape[1:]).swapaxes(1, 2).reshape(x.shape)
+
 
 # Byte offset(s) of each type's 16-bit block scale(s) inside one block, for the distillation write-back.
 D_OFF = {
