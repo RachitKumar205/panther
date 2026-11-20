@@ -285,6 +285,81 @@ than on the 14B (+78 % writing against +25 %).
   time spent and left per step, verdicts, the Pi's results.
 - On the Pi ([pi](pi/README.md)): `nohup python3 pi/panther_pi.py <hf-user> 7b@3 14b@5 > ~/panther-pi/pi.log 2>&1 &`
 
+## Pipeline review (from 20 Nov 2026)
+
+The pipeline is being rethought stage by stage; each decision is recorded here when made.
+
+**Found:** from 13 Nov (commit 4832b55) the final step distilled each finalist on `answers-<model>.txt`, which holds
+the selection GSM8K questions with the original's answers and the selection multiple-choice questions with their
+correct answers. The finalists were then ranked, and the guard run, on those same selection questions: a distilled
+file was scored on questions it had trained on. The held-out test shares no question or text with any of it
+(checked on the server's splits), so every verdict is a true measurement of the file that was tested; which file
+was picked, and whether the guard was passed, may have been affected.
+
+| # | Stage | Decision |
+|---|---|---|
+| 1 | Data | Each pool has one job. Calibration text is what things are built and trained on; selection questions are only scored on (search, picking the winner, guard); held-out questions and text are used once, for the verdict. Nothing trains on selection or held-out data. |
+| 2 | Final step | Distillation trains on the original's own answers to general prompts (instructions, chat, everyday maths) from a pool in no other split, mixed with calibration text. The targets stay the original's probabilities; no dataset answers are trained on. Practice is for real use, not the benchmarks' format. |
+| 3 | Data | The splits stay as they are (their builder was removed on 11 Nov, 87289e1). A short check, run before a contest, confirms the pools on the server share no question or text and match the hashes in their manifest. |
+| 4 | Store | The importance matrix and our error-compensated rounding stay on the calibration web text alone (the preset uses the same importance matrix). |
+| 5 | Error | The offline error estimate stays as it is: it reads only the type copies and the importance matrix, and only guides the search (repair, solver proposals); every genome is still measured. |
+| 6 | Data | One dataset, split into train, select and test (below). KL and perplexity are measured only on its splits; flips and accuracy only on the benchmark questions. Nothing trains on anything but the train split. |
+
+### The dataset (decision 6)
+
+**The rule:** KL and perplexity are measured only on splits of this dataset. Flips and accuracy are measured only on
+the benchmark questions. Nothing trains on anything but the train split.
+
+Two kinds of text, each cut three ways with no overlap:
+
+| | Train | Select | Test |
+|---|---|---|---|
+| **Chat**: OpenAssistant prompts (pinned, Apache-2.0) answered greedily by the original model in its own chat template | 300 prompts | 150 prompts | 150 prompts |
+| **Web**: FineWeb-Edu documents (pinned) | 300k tokens | 150k tokens | 150k tokens |
+
+- **The web part already exists:** the former calibration, selection and held-out web text, already disjoint by
+  document, under these three names.
+- **The chat part is new.** Prompts are split by a fixed seed. A prompt sharing 8 or more consecutive words with any
+  benchmark question is dropped before splitting.
+- **The answers are per model,** since each model is its own teacher.
+
+**Which split is used at which stage:**
+
+| Stage | Train | Select | Test |
+|---|---|---|---|
+| store: importance matrix, rounding | web part (decision 4) | | |
+| refs: the original's probabilities recorded | | both parts | both parts |
+| ga: the score's KL | | both parts | |
+| final: distillation | both parts | | |
+| final: picking the winner (the score's KL) | | both parts | |
+| final: held-out KL and perplexity | | | both parts |
+
+**Benchmark questions** (flips and accuracy only):
+
+| Stage | Selection questions | Held-out questions |
+|---|---|---|
+| ga: the score's flips | ✓ | |
+| final: picking the winner (flips), the guard (accuracy) | ✓ | |
+| final: the verdict (accuracy), held-out flips | | ✓ |
+
+The GSM8K few-shot examples stay as part of how a GSM8K question is asked.
+
+**Where it is built and stored:** on the server under `data/splits/text/`.
+
+1. `prompts` (a CPU job, the only step with network): downloads OpenAssistant at the pinned revision, filters, splits,
+   and writes `prompts.json` (each prompt's split, how many were dropped). Made once, shared by all models.
+2. `refs` (GPU, no network): the original answers every prompt, written as `chat-<model>-train.txt`, `-select.txt`
+   and `-test.txt`; then the original's probabilities on the select and test text (chat and web) are recorded in
+   `reference/<model>/select.kld` and `test.kld`.
+3. The check (decision 3): before a contest, all six text files and both question splits share nothing and match
+   their recorded hashes.
+
+**Archived, not deleted:** `bench.txt`, `answers-<model>.txt`, the sensitivity and agreement text,
+`gen_prompts.json`, WikiText, the MMLU few-shot examples.
+
+**Not covered yet:** the QAT experiment trains and validates on its own FineWeb sample, outside these splits; it is
+its own decision, still to be made.
+
 ## 8. The code
 
 About 1,430 lines (blank and comment lines excluded):
