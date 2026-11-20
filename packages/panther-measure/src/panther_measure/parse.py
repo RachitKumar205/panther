@@ -1,26 +1,27 @@
 """Parsers for llama-perplexity output.
 
-The KL parser keeps the per-chunk means, so the paired-difference standard error (bug B4) can be
-computed from the chunks of two files scored on the same text.
+The KL parser recovers the true per-chunk means (llama-perplexity prints a running average, not a
+chunk-wise value) so the paired-difference standard error (bug B4) is computed over real chunks.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 
 class KlMetrics(BaseModel):
-    """One KL run's summary and its per-chunk means."""
+    """One KL run's summary and its recovered per-chunk means."""
 
     model_config = ConfigDict(frozen=True)
 
-    mean: float  # mean KL divergence
-    se: float  # llama.cpp's reported SE over chunks
+    mean: float  # mean KL divergence (the summary, not recomputed from chunks)
+    se: float  # llama.cpp's reported SE over tokens (documented as too small; kept for reference)
     top1_pct: float  # same top word percent
-    chunks: tuple[float, ...]  # per-chunk KL means, for the paired-difference SE
+    chunks: tuple[float, ...]  # recovered per-chunk KL means, for the paired-difference SE
 
 
 class ParseError(ValueError):
@@ -33,12 +34,23 @@ def parse_kl(text: str) -> KlMetrics:
     if not (m and top):
         raise ParseError("KL output incomplete")
     chunk_re = r"^\s*\d+\s+[0-9.]+\s*±\s*[0-9.]+\s+[0-9.]+\s*±\s*[0-9.]+\s+([0-9.]+)\s*±"
+    cumulative = [float(c) for c in re.findall(chunk_re, text, re.M)]
     return KlMetrics(
         mean=float(m[1]),
         se=float(m[2]),
         top1_pct=float(top[1]),
-        chunks=tuple(float(c) for c in re.findall(chunk_re, text, re.M)),
+        chunks=_unchunk(cumulative),
     )
+
+
+def _unchunk(cumulative: Sequence[float]) -> tuple[float, ...]:
+    """Recover per-chunk KL from the running average: ``i*cum[i] - (i-1)*cum[i-1]``."""
+    per_chunk: list[float] = []
+    prev = 0.0
+    for i, total in enumerate(cumulative, 1):
+        per_chunk.append(i * total - (i - 1) * prev)
+        prev = total
+    return tuple(per_chunk)
 
 
 def parse_ppl(text: str) -> float:

@@ -11,12 +11,15 @@ from panther_measure.parse import ParseError, parse_choice, parse_kl, parse_ppl,
 FIXTURES = Path(__file__).resolve().parents[2] / "tests/parity/fixtures/llama"
 
 
-def test_parse_kl_extracts_mean_and_all_48_chunks() -> None:
+def test_parse_kl_extracts_mean_and_recovers_all_48_chunks() -> None:
     metrics = parse_kl((FIXTURES / "kl_q6k_48chunks.log").read_text())
     assert metrics.mean == pytest.approx(0.005810, abs=1e-6)
     assert metrics.top1_pct == pytest.approx(95.453, abs=1e-3)
     assert len(metrics.chunks) == 48
+    # The printed column is a running average; chunks are the recovered per-chunk values.
     assert metrics.chunks[0] == pytest.approx(0.00634, abs=1e-5)
+    assert metrics.chunks[1] == pytest.approx(0.00522, abs=1e-4)
+    assert sum(metrics.chunks) / len(metrics.chunks) == pytest.approx(metrics.mean, abs=1e-6)
 
 
 def test_parse_ppl_reads_the_final_estimate() -> None:
