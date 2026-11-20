@@ -443,6 +443,7 @@ dependencies = [
     { name = "numpy" },
     { name = "panther-core" },
     { name = "panther-data" },
+    { name = "pydantic" },
 ]
 
 [package.metadata]
@@ -451,6 +452,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "panther-core", editable = "packages/panther-core" },
     { name = "panther-data", editable = "packages/panther-data" },
+    { name = "pydantic", specifier = ">=2.9" },
 ]
 
 [[package]]
