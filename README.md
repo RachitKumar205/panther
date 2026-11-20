@@ -162,6 +162,56 @@ was picked, and whether the guard was passed, may have been affected.
 | 16 | Data | Every stage reads the whole of its split, never a part of it. The select split is made smaller instead (~100k tokens: the 150 chat prompts' answers and whole web documents up to the rest), so the search's KL reads all of it at today's cost. The held-out test reads the whole test split. Distillation covers the whole train split: every sequence, in a random order (fixed seed), for the same 600 updates as before (about 1.6 passes), so it takes about as long. Web documents left out of the smaller select split are used by nothing. |
 | 17 | QAT | The QAT experiment's FineWeb-Edu sample (Stage 1: 4,096 × 2,048 tokens, its early-stopping checks 64 × 2,048; Stage 2: 4,096 × 4,096) counts as part of the train split: a web-only extension used only by QAT, about 60× larger than the rest of the train split. It shares no document with the select or test splits, and the split check confirms that. QAT's files are judged like a winner (guard on selection data, verdict on held-out data). The QAT code was removed afterwards (20 Nov). |
 
+### Open findings (code audit, 21 Nov 2026)
+
+A read of every module, checked against llama.cpp at the pinned commit, transformers 5.22.2 and the server's data.
+Nothing here is fixed yet; each becomes a decision above or a plain fix. The 1.5b@1 run then active is the last one
+under the current rules.
+
+**Affect whether results can be trusted:**
+1. **Cache keys miss inputs.** `ga_ins` leaves out `KL_WEIGHT`, the question counts (`FIT`, `FIRST`), `DROP_MARGIN`,
+   `WINDOW` and the RAM model; `preset_ins` leaves out the KL weight and the RAM model (which decides which presets
+   fit); `final_ins` leaves out the verdict's rules; result labels carry no llama.cpp commit and `original` no file
+   hash; `measure.fits` ignores keys a stored record has beyond those asked for. Changing any of these reuses old
+   results as current.
+2. **The split check does not check the files measured.** It compares `splits/tasks/selection` with `splits/tasks/test`;
+   the measurements read `splits/llama_tasks/selection` and `poc_test`, which are only hash-checked, never checked for
+   overlap. It also passes when a manifest file is missing.
+3. **The word table's and output layer's offline error is on another scale.** Matrices without importance data are
+   weighted by 1, the rest by their mean squared input: on the 1.5B, Q4_K → Q2_K adds 13,340 for the word table and
+   8–240 for layer matrices. Repair (after every mutation and crossover) and the solver steer by it.
+4. **KL statistics.** llama-perplexity scores only the second half of each 2,048-token chunk (decision 16 reads about
+   50 % of the select and test tokens); its ± treats tokens as independent (too small); the code treats our KL and the
+   preset's as independent though they share text and reference (too large).
+
+**Server:**
+5. The RAM cap (`run.CAP_RAM`, 120 GiB) leaves too little of the host's ~125 GiB for the shared services; pausing a
+   container does not free its memory. Suggested: 96–100 GiB.
+6. Disk: the 22B and 24B stores (~190–205 GB each, plus ~40 GB of references) do not fit in what is free. A model's
+   references are ~44 GB (`select100k.kld` 15.5 GB, `test.kld` 28.9 GB on the 1.5B); stale `select.kld` files remain.
+7. Not verified: if the transformers load of the 16-bit model holds both its state dict and the model, rounding and
+   distillation of the 24B need ~94 GB of RAM against a ~52 GiB claim. One measured load settles it.
+
+**Search:**
+8. The first look's margin (3.0) is about 1.2 standard errors at the 1.5B's flip rate, not 2; it is hand-set, unlike
+   decision 9's threshold.
+9. The stop rule ratchets: a gain under 1 SE still becomes the best, so a run of small gains never counts. Compare
+   with the best at the last counted improvement instead.
+10. The solver fits ~30 group weights from 8–70 genomes; clipped weights push whole groups to IQ1_S.
+11. Not reproducible: genomes are taken in the order they finish. Q3_K and IQ3_S are the same size, so a step between
+    them saves no bytes.
+
+**Other:** the old method's `winner-*-v2.json` records share the new pipeline's names and will be overwritten; the
+store backup publishes the 16-bit original, so Mistral-22B (Mistral Research License) needs its licence file and
+terms checked; a llama-server losing a port race in `measure.complete` could be answered by another file's server;
+`PANTHER_CPUS=40` per container and per llama.cpp process on 48 threads; this README and `src/panther/README.md`
+state the old claim numbers (92/96/64 GiB, a 4 GiB reserve), and `deploy/server/README.md` still lists the QAT
+commands.
+
+**Checked and correct:** the ctypes interface to `ggml_quantize_chunk`, the 256-column GPTQ update, every block-scale
+offset in `distill.D_OFF` (with `dmin`), the q/k row order, the parsing of llama.cpp's output, the first look's
+questions being the first third of the 900, the paired SE of flips, atomic writes, the claim's lock handoff.
+
 ### The dataset (decision 6)
 
 **The rule:** KL and perplexity are measured only on splits of this dataset. Flips and accuracy are measured only on
