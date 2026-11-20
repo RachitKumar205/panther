@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Panther's one command. On your machine it syncs the code to the server and runs the same command there.
 #
-#   ./panther run 14b@5          a contest (model size @ RAM budget in GiB), detached: fetch -> run -> publish
+#   ./panther run 14b@5 [qat[=N]]  a contest (model size @ RAM budget in GiB), detached: fetch -> run -> publish;
+#                                qat: a QAT finalist too (Block-AP on N samples of 2,048 tokens, default 4,096)
 #   ./panther stop 14b@5         stop that run; started again, it continues where it stopped
 #   ./panther pause | resume     pause / resume every Panther container (the dashboard keeps running)
 #   ./panther status             containers, active runs and their claims, GPU, disk, the last log lines
@@ -15,7 +16,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 . "$ROOT/deploy/server/local.env"
 W="${PANTHER_WORK:-/s3/panther/work}"
-usage() { sed -n 2,13p "$0"; }
+usage() { sed -n 2,14p "$0"; }
 
 if [ ! -d "$W" ]; then  # your machine: sync the code, then the same command on the server
   case "${1:-}" in ""|help) usage; exit 0 ;; test) (cd "$ROOT" && uv run pytest -q) || exit 1 ;; esac
@@ -47,6 +48,7 @@ STEPS="fetch run publish"
 args() {  # args cpu|gpu|none MEM: a container's options (no container has both GPU and network)
   a=("${BOX[@]}" --init --tmpfs /tmp:rw,size=16g --shm-size 2g --pids-limit 4096 --cpus "$CPUS" --memory "$2"
      --memory-swap "$2" -v "$DATA:/work/data:rw,z" -e "PANTHER_THREADS=$CPUS" -e "PANTHER_HF_REPO=$PANTHER_HF_REPO"
+     -e "PANTHER_QAT=${PANTHER_QAT:-0}"
      --log-opt max-size=20mb)
   case "$1" in cpu) a+=(--network pasta) ;; none) a+=(--network none) ;;
     gpu) a+=(--device nvidia.com/gpu=all --security-opt label=disable --network none -e HF_HUB_OFFLINE=1) ;; esac
@@ -61,8 +63,12 @@ job() {  # job cpu|gpu NAME MEM CMD...: one container, waited for; its exit code
   rc="$(pm wait "$name" | head -1)"; pm rm "$name" >/dev/null; return "${rc:-1}"
 }
 
-start() {  # start SIZE@B: the claim now (or a loud refusal), then the three containers, detached
+start() {  # start SIZE@B [qat[=N]]: the claim now (or a loud refusal), then the three containers, detached
   local ram; parse "$1"
+  case "${2:-}" in "") PANTHER_QAT=0 ;; qat) PANTHER_QAT=4096 ;; qat=[1-9]*) PANTHER_QAT="${2#qat=}" ;;
+    *) echo "write the option as qat or qat=N (Block-AP samples), not '$2'"; exit 1 ;; esac
+  [[ "$PANTHER_QAT" =~ ^[0-9]+$ && $((PANTHER_QAT % 2)) = 0 ]] || { echo "qat=N: N must be an even number"; exit 1; }
+  export PANTHER_QAT
   "${P[@]}" image exists "$IMAGE:current" || "$0" build || exit 1
   [ -n "$("${P[@]}" ps -q --filter name='^panther-dashboard$')" ] || dashboard || exit 1
   pgrep -f "panther _guard" >/dev/null || detach guard _guard
@@ -72,7 +78,7 @@ start() {  # start SIZE@B: the claim now (or a loud refusal), then the three con
   ram="$(pm run --rm "${a[@]}" "$IMAGE:current" "${PY[@]}" claim "$size" "$b" | tail -1)" ||
     { echo "$ram"; echo "$1 not started" >&2; exit 1; }
   detach "$id" _run "$size" "$b" "$ram"
-  echo "started $1: ${STEPS// / -> }; logs: data/logs/$id-<step>.log"
+  echo "started $1${2:+ ($2)}: ${STEPS// / -> }; logs: data/logs/$id-<step>.log"
 }
 
 _run() {  # _run SIZE B RAM: the three containers in order; a failed one stops the run, loudly
@@ -114,7 +120,7 @@ guard() {  # pauses everything while GitLab is unhealthy (3 bad checks), resumes
 }
 
 case "${1:-}" in
-  run) start "${2:-}" ;;
+  run) start "${2:-}" "${3:-}" ;;
   _run) shift; _run "$@" ;;
   stop)  # only that run, by its exact names: its _run (checked by its command line) is frozen, so it starts nothing
     # and logs nothing, while its containers stop; then it ends, and with it the claim (held until they are gone)

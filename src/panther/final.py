@@ -8,19 +8,25 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import numpy as np
+
 from panther import measure as ms
-from panther.data import WEB, chat_text
-from panther.model import (CFG, DATA, RULES, consts, digest, done, hold, lock, note, path, put, record, sha, short,
-                           trained)
+from panther.data import WEB, chat_text, qat_file
+from panther.model import (CFG, DATA, GIB, QAT, RULES, Model, consts, digest, done, hold, lock, note, path, put,
+                           record, sha, short, trained)
 from panther.search import build, label
-from panther.store import copy_of, preset_file
+from panther.store import copy_of, disk, preset_file
 
 
 def final_ins(model: str) -> tuple[str, list]:
     """The step's inputs (the list's and the preset's carry measure's), and what a distilled file is made from."""
     lst, pr = json.loads(record("list").read_text()), json.loads(record("preset", "").read_text())
     dins = [sha(copy_of(model, "BF16"))] + [sha(f) for f in teach(model)] + [consts("distill"), RULES["final"]]
-    return digest([lst["inputs"], pr["inputs"], dins]), dins
+    return digest([lst["inputs"], pr["inputs"], dins] + qat_ins(model)), dins
+
+
+def qat_ins(model: str) -> list:  # the optional QAT finalist's inputs; none without it
+    return [QAT, sha(qat_file(model, QAT)), consts("blockap", "fakequant")] if QAT else []
 
 
 def teach(model: str) -> list[Path]:
@@ -50,15 +56,29 @@ def final(model: str, budget: int) -> None:
             files[name] = build(model, it["assignment"], path(model, "tuned", f"{budget}-{dg}-plain.gguf"))
             labels[name] = label(model, it["assignment"])  # the same file the GA scored: its results are reused
             jobs.append(ex.submit(scored, name))
-        for k in items:
-            plain = files[f"{k} undistilled"]
-            files[k] = path(model, "tuned", f"{budget}-{digest([sha(plain), dins])}.gguf")
-            if not files[k].exists():
+        def distilled(name: str, src: Path) -> None:
+            files[name] = path(model, "tuned", f"{budget}-{digest([sha(src), dins])}.gguf")
+            if not files[name].exists():
                 with lock(f"distill-{model}"), hold(*trained(model)):  # the 16-bit load; files built are scored
-                    distill(plain, bf16, teach(model), files[k], DATA / "reference" / model / "teacher-top64.pt",
-                            lambda m, k=k: note(f"{k} {m}"))
-            labels[k] = f"d:{sha(files[k])[:12]}"
-            jobs.append(ex.submit(scored, k))
+                    distill(src, bf16, teach(model), files[name], DATA / "reference" / model / "teacher-top64.pt",
+                            lambda m: note(f"{name} {m}"))
+            labels[name] = f"d:{sha(files[name])[:12]}"
+            jobs.append(ex.submit(scored, name))
+        for k in items:
+            distilled(k, files[f"{k} undistilled"])
+        if QAT:  # optional (./panther run SIZE@B qat[=N]): the best genome's file trained by Block-AP, then distilled
+            from panther.blockap import train
+            k, h = next(iter(items)), Model(model).matrices[0].cols
+            stage1 = path(model, "tuned", f"{budget}-{digest([sha(files[f'{k} undistilled']), qat_ins(model)])}"
+                                          "-blockap.gguf")
+            if not stage1.exists():
+                cache, t = DATA / "cache" / "blockap" / stage1.stem, np.load(qat_file(model, QAT))
+                disk(2 * 2 * QAT * 2048 * h, "Block-AP's hidden-state caches (2 x samples x 2,048 x hidden, 16-bit)")
+                with hold(40 * GIB, trained(model)[1]):  # a block in training (a resume: every trained block too)
+                    train(bf16, files[f"{k} undistilled"], t["block"], t["val"], stage1, cache,
+                          lambda m: note(f"{k} {m}"))
+                shutil.rmtree(cache)
+            distilled(f"{k} qat", stage1)
         preset_sel = jobs[0].result()
         for j in jobs:
             j.result()
@@ -82,7 +102,7 @@ def final(model: str, budget: int) -> None:
     for k, r in (("ours", ours), ("preset_test", theirs), ("original", orig)):
         res[k] = ms.summary(r, orig)
     put(win, json.dumps(res, indent=1))
-    for f in files.values():  # only the winner's file is kept
+    for f in [*files.values(), *([stage1] if QAT else [])]:  # only the winner's file is kept
         if f != files[w]:
             f.unlink()
     note(f"held-out test vs preset {p}: {res['ours']['accuracy']:.2f} vs {res['preset_test']['accuracy']:.2f} "

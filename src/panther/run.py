@@ -14,7 +14,7 @@ import traceback
 from pathlib import Path
 
 from panther import data, final, measure, search, store
-from panther.model import DATA, GIB, RUN, clock, done, hold, lock, named, note, put, record, short, trained
+from panther.model import DATA, GIB, QAT, RUN, clock, done, hold, lock, named, note, put, record, short, trained
 
 CAP_GPU, CAP_RAM = 94 * GIB, 100 * GIB  # all runs' claims: of 96 GiB GPU and the host's ~125 GiB, the rest for GitLab
 GENOMES = 8  # genomes scored at once that a claim is sized for (fewer if the caps do not hold them)
@@ -139,6 +139,8 @@ def push(d: Path) -> None:
 def fetch() -> None:
     step("fetch", lambda: finished(RUN["model"], RUN["budget"]) or store.fetch(RUN["model"]), False)
     step("prompts", data.prompts, False)
+    if QAT:  # the optional QAT finalist's samples (./panther run SIZE@B qat[=N])
+        step("qat samples", lambda: data.qat_tokens(RUN["model"], QAT), False)
 
 
 def run() -> None:

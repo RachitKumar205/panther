@@ -11,6 +11,8 @@ data splits each uses are on one page in the [project README](../../README.md#th
 | `measure.py` | llama.cpp runs (KL, perplexity, multiple choice, WinoGrande; GSM8K and chat answers by llama-server), each output checked and cached by label; the original's reference outputs; a file's score and held-out test; the relative score, its standard error, the verdict | `run`, `refs`, `score`, `test`, `versus`, `beside` |
 | `search.py` | The offline error, the preset (the competitor), the genetic search with CP-SAT proposals, building a genome's file from the type copies | `error`, `preset`, `ga`, `Genes`, `solve`, `build` |
 | `final.py` | The final step (finalists distilled and not, the winner, the guard, the verdict), the Pi bundle | `final`, `bundle` |
+| `blockap.py` | The optional QAT finalist's training (EfficientQAT's Block-AP): block by block, latent weights through the fake quantizers against the original's block outputs; codes written into a copy | `train` |
+| `fakequant.py` | Fake quantizers for the 14 types: file bytes ↔ scales and codes, decoding bit for bit as llama.cpp, gradients straight through | `unpack`, `pack`, `encode`, `fake` |
 | `distill.py` | Distillation of a finished file: block-scale multipliers and norms trained against the original, written back into a copy | `distill`, `teacher_tops` |
 | `rounding.py` | Error-compensated rounding (GPTQ) with llama.cpp's own quantizer, written into the type copies in place | `blank`, `round_copies`, `gptq` |
 | `model.py` | A model's matrices, bytes per type, the RAM model; what every step shares: paths, the progress log, hashes, locks, the run's GPU and RAM share (`hold`) | `Model`, `note`, `record`, `sha`, `lock`, `hold` |
@@ -188,8 +190,10 @@ on the search's 900 questions (`score_fit`) and on all selection questions are t
 ### The final step and the verdict (`final.py`)
 
 1. Each of the best 3 genomes is built undistilled (the same file the search scored, so its results are reused) and
-   distilled (one distillation at a time, while the files already built are scored beside it). The 6
-   files are scored on all selection questions and the select text; the lowest score wins.
+   distilled (one distillation at a time, while the files already built are scored beside it). With `qat[=N]`
+   (decision 22) a 7th: the best genome's undistilled file trained by Block-AP on the N QAT samples
+   (`rewrite/<model>/qat/tokens-N.npz`, drawn in the fetch container), then distilled. The files are scored on all
+   selection questions and the select text; the lowest score wins.
 2. **Guard**: the winner's relative score against the preset on all selection questions and the select text, with
    its 95 % interval; if the whole interval is above 100, a warning is logged and stored (`guard.warning`). The
    held-out test runs anyway.

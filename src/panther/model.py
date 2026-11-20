@@ -33,6 +33,7 @@ RW = DATA / "rewrite"
 LLAMA = Path(os.environ.get("PANTHER_LLAMA", "/opt/llama.cpp"))
 BIN = LLAMA / "build-cuda/bin"
 THREADS = int(os.environ.get("PANTHER_THREADS", "16"))
+QAT = int(os.environ.get("PANTHER_QAT", "0"))  # Block-AP samples (./panther run SIZE@B qat[=N]); 0: no QAT finalist
 RUN = {"model": "", "budget": 0, "step": ""}  # this process's run (panther.run sets it)
 # Each step's rule number, in its inputs: raised whenever that step's logic changes, so its results are made anew
 RULES = {"refs": 1, "measure": 2, "preset": 1, "ga": 2, "final": 2, "error": 2}

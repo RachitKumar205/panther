@@ -4,6 +4,7 @@ the chat prompts, the split check (decision 3) and the select text."""
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 from itertools import combinations
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from panther.model import DATA, lock, note, sha
+from panther.model import DATA, lock, note, put, sha
 
 SPLITS = ("train", "select", "test")
 TEXT = DATA / "splits/text"
@@ -28,6 +29,51 @@ PROMPTS = {"repo": "OpenAssistant/oasst1", "revision": "fdf72ae0827c1cda404aff25
            "n": {"train": 300, "select": 150, "test": 150}}
 PROMPT_FILE = TEXT / "prompts.json"
 LABELS = ("id", "task", "source_split", "key", "subject")  # a record's bookkeeping, not its question
+
+
+def qat_file(model: str, n: int) -> Path:
+    return DATA / "rewrite" / model / "qat" / f"tokens-{n}.npz"
+
+
+def qat_tokens(model: str, n: int) -> Path:
+    """Block-AP's token samples (decision 17: a web-only extension of the train split): n windows of 2,048 tokens and
+    64 for validation, drawn as EfficientQAT's code draws them (documents shuffled with seed 0, the first 90 % for
+    training; a random window in a random longer document), from the pinned FineWeb-Edu file without any document a
+    split was cut from. Needs the network; made once per model and n."""
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoTokenizer
+    if (dst := qat_file(model, n)).exists():
+        return dst
+    src = json.loads((DATA / "splits/manifest.json").read_text())["sources"]["fineweb_edu"]
+    (name, want), = src["files"].items()
+    if sha(f := Path(hf_hub_download(src["repo"], name, repo_type="dataset", revision=src["revision"]))) != want:
+        raise SystemExit(f"{f}: not the pinned FineWeb-Edu file")
+    used = {i for g in TEXT.glob("*.ids.json") for i in json.loads(g.read_text())}
+    t = pq.read_table(f, columns=["text", "id", "token_count"]).to_pydict()
+    docs = [(x, k, i) for x, i, k in zip(t["text"], t["id"], t["token_count"]) if i not in used]
+    hf, bf16 = DATA / "hf" / model, DATA / "store" / model / f"{model}-BF16.gguf"
+    tok = AutoTokenizer.from_pretrained(str(hf)) if (hf / "config.json").exists() else \
+        AutoTokenizer.from_pretrained(str(bf16.parent), gguf_file=bf16.name)
+    rng, drawn = random.Random(0), set()
+    order = list(range(len(docs)))
+    rng.shuffle(order)
+
+    def draw(pool: list[int], k: int, length: int = 2048) -> np.ndarray:
+        pool, a, j = [i for i in pool if docs[i][1] > length * 0.8], np.empty((k, length), np.int32), 0
+        while j < k:
+            if len(ids := tok(docs[d := rng.choice(pool)][0]).input_ids) > length:
+                i = rng.randint(0, len(ids) - length - 1)
+                a[j], j = ids[i:i + length], j + 1
+                drawn.add(docs[d][2])
+        return a
+    cut = int(0.9 * len(order))
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(f"{dst}.part.npz", block=draw(order[:cut], n), val=draw(order[cut:], 64))
+    put(dst.with_suffix(".ids.json"), json.dumps(sorted(drawn)))
+    os.rename(f"{dst}.part.npz", dst)
+    note(f"QAT samples: {n} + 64 of 2,048 tokens from {len(docs)} FineWeb-Edu documents in no split")
+    return dst
 
 
 def chat_text(model: str, split: str) -> Path:
@@ -143,6 +189,9 @@ def check() -> None:
     for f, rs in questions("selection").items():
         if n := len({key(r) for r in rs} & {key(r) for r in held.get(f, [])}):
             bad.append(f"{f}: {n} selection questions also held out")
+    for f in (DATA / "rewrite").glob("*/qat/tokens-*.ids.json"):  # decision 17: QAT's samples are in no split
+        if n := len(set(json.loads(f.read_text())) & set().union(*ids.values())):
+            bad.append(f"{f.relative_to(DATA)}: {n} documents also in a split")
     ps = json.loads(PROMPT_FILE.read_text())["prompts"]
     if n := len(ps) - len({" ".join(words(x["text"])) for x in ps}):
         bad.append(f"chat: {n} prompts twice")
