@@ -4,6 +4,7 @@
   pipeline.py run BUDGET MODEL       # GPU container: store, error, refs, preset, ga, final, bundle in order
   pipeline.py STEP BUDGET MODEL      # one of those steps; every step skips work already on disk
   pipeline.py upload BUDGET MODEL    # CPU container: the Pi bundle to Hugging Face
+  pipeline.py clean BUDGET MODEL     # the end of a contest: the type copies and reference outputs removed
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import random
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -33,9 +35,10 @@ RW, STORE, BIN = DATA / "rewrite", DATA / "store", llama.BIN
 TASKS = ["mmlu", "hellaswag", "arc_challenge", "winogrande"]
 FIT = {"mmlu": 300, "arc_challenge": 200, "hellaswag": 200, "winogrande": 200}  # the GA's selection questions
 FIRST = {t: v // 3 for t, v in FIT.items()}  # a first look: a genome clearly worse here is not finished
+ALL = dict.fromkeys(TASKS, 0)  # every selection question (llama.cpp's n = 0)
 DROP_MARGIN = 3.0  # dropped only if its first-look score is this much worse than the population's worst (~2 SE)
 WINDOW = (-0.01, 0.005)  # a genome's RAM must be within -1% / +0.5% of the budget
-POP, ELITE, INFLIGHT, MAX_EVALS, MIN_EVALS, PATIENCE, MIN_GAIN, TOP, SOLVED = 16, 4, 4, 70, 30, 15, 0.2, 3, 4
+POP, ELITE, MAX_EVALS, MIN_EVALS, PATIENCE, MIN_GAIN, TOP, SOLVED = 16, 4, 70, 30, 15, 0.2, 3, 4
 KL_WEIGHT = 10  # score = flips % + 10 x KL on the original's own answers (lower is better)
 SUFFIX = "-v2"
 FTYPE = {"Q3_K": "Q3_K_S", "Q4_K": "Q4_K_S", "Q5_K": "Q5_K_S", "IQ2_S": "IQ2_M"}  # --pure: one type everywhere
@@ -69,8 +72,47 @@ def copy_of(model: str, t: str) -> Path:
     return STORE / model / f"{model}-{t}.gguf"
 
 
+def imatrix(model: str) -> Path:
+    return STORE / model / f"{model}.imatrix.gguf"
+
+
+def preset_file(model: str, p: str) -> Path:
+    return STORE / model / f"preset-{p}.gguf"
+
+
+def bundle_dir(model: str, tag: str) -> Path:
+    return DATA / "pi_bundle" / f"budget-{BUDGET}-{short(model).lower()}{tag}"
+
+
+def record(kind: str, model: str, suffix: str = "") -> Path:
+    """A contest's result file: rewrite/budget-<BUDGET>/<kind>-<model><suffix>.json."""
+    return out(f"budget-{BUDGET}", f"{kind}-{model}{suffix}.json")
+
+
+def load(kind: str, model: str, suffix: str = "") -> dict:
+    return json.loads(record(kind, model, suffix).read_text())
+
+
 def digest(a: dict[str, str]) -> str:
     return sha256(json.dumps(a, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def digest_file(f: Path) -> str:
+    h = sha256()
+    with open(f, "rb") as fh:
+        while b := fh.read(1 << 24):
+            h.update(b)
+    return h.hexdigest()
+
+
+def label_of(winner: str, a: dict[str, str]) -> str:
+    """The results label of a contest's winner: v2 for an undistilled file, v2t for a distilled one."""
+    return f"{'v2' if winner.endswith('undistilled') else 'v2t'}:{digest(a)}"
+
+
+def step_lock(model: str, s: str) -> str:
+    """A step's lock name: per model for the steps every budget shares, per contest for the rest."""
+    return f"{model}-{s}" if s in ("store", "error", "refs") else f"{model}-{BUDGET}-{s}"
 
 
 @contextmanager
@@ -100,7 +142,6 @@ def gpu(nbytes: int, hold_s: int = 3600):
         {key: (nbytes, time.time() + 600)})
     while not edit(take):
         time.sleep(random.uniform(3, 8))
-    import threading
     done = threading.Event()
 
     def renew():  # a killed job's booking lapses within 10 minutes
@@ -183,7 +224,7 @@ def save(model: str) -> None:
 def store(model: str, types: list[str] | None = None) -> None:
     """The 16-bit original, its importance matrix, and the whole model once in every type (or only `types`)."""
     types = types or CFG["formats"]
-    d, bf16, imat = STORE / model, copy_of(model, "BF16"), STORE / model / f"{model}.imatrix.gguf"
+    d, bf16, imat = STORE / model, copy_of(model, "BF16"), imatrix(model)
     hf = DATA / "hf" / model
     d.mkdir(parents=True, exist_ok=True)
     if not bf16.exists():
@@ -191,7 +232,7 @@ def store(model: str, types: list[str] | None = None) -> None:
                         str(hf), "--outtype", "bf16", "--outfile", f"{bf16}.part"], check=True)
         os.rename(f"{bf16}.part", bf16)
     if hf.exists():
-        shutil.rmtree(hf)  # rounding reads the 16-bit GGUF
+        shutil.rmtree(hf)  # rounding reads the 16-bit GGUF: the original from here on
     if not imat.exists():
         po = ["--process-output"] if MODELS[model].get("imatrix_process_output") else []
         with gpu(bf16.stat().st_size + 4 * GIB):  # the whole 16-bit model on the GPU: booked like every other job
@@ -202,9 +243,8 @@ def store(model: str, types: list[str] | None = None) -> None:
     al, n = M.allowed(), sum(m.rows * m.cols for m in M.matrices)
     done = d / "rounded.json"  # types whose copy has error-compensated codes (panther.rounding)
     for t in types:
-        if not copy_of(model, t).exists():
-            wait_disk(int(n * bpw(t) / 8), f"{short(model)} store, {t} copy")
         if not copy_of(model, t).exists():  # embedding / head take Q8_0 where the type needs imatrix data they lack
+            wait_disk(int(n * bpw(t) / 8), f"{short(model)} store, {t} copy")
             emb, head = ((t if t in al.get(n, al["token_embd.weight"]) else "Q8_0").lower()
                          for n in ("token_embd.weight", "output.weight"))
             from panther.rounding import blank  # layer matrices come from the rounding below, quantized once
@@ -216,11 +256,9 @@ def store(model: str, types: list[str] | None = None) -> None:
         per_layer = 4 * (3 * h * h + i * i)  # bytes of the four input Hessians of one layer
         book = bf16.stat().st_size + 44 * GIB  # the model, 20 GiB of Hessians, several types rounded at once
         with gpu(book, 6 * 3600):
-            round_copies(hf if hf.exists() else None, bf16, {t: copy_of(model, t) for t in todo},
+            round_copies(None, bf16, {t: copy_of(model, t) for t in todo},
                          DATA / "splits/calibration.txt", max(1, int(20 * GIB // per_layer)), book)
         done.write_text(json.dumps(have + todo))
-    if (DATA / "hf" / model).exists():
-        shutil.rmtree(DATA / "hf" / model)  # the 16-bit GGUF is the original from here on
 
 
 _READ: dict[Path, dict] = {}
@@ -246,7 +284,7 @@ def error(model: str) -> None:
     dst = out(model, "error.json")
     done = json.loads(dst.read_text()) if dst.exists() else {}
     imat = {k: np.asarray(v.data, dtype=np.float64).reshape(-1) for k, v in
-            tensors(STORE / model / f"{model}.imatrix.gguf").items()}
+            tensors(imatrix(model)).items()}
     jobs = []
     for name, types in Model(model).allowed().items():
         if todo := [t for t in types if t not in done.get(name, {})]:
@@ -285,9 +323,8 @@ def refs(model: str) -> None:
                                + (["--chunks", str(chunks)] if chunks else []), check=True, capture_output=True)
                 os.rename(f"{ref}/{name}.part", ref / f"{name}.kld")
         for t in TASKS:
-            llama.run("task", model, bf16, "original", task=t, split="selection", n=FIT[t])
-            llama.run("task", model, bf16, "original", task=t, split="selection", n=FIRST[t])
-            llama.run("task", model, bf16, "original", task=t, split="selection", n=0)
+            for n in (FIT, FIRST, ALL):
+                llama.run("task", model, bf16, "original", task=t, split="selection", n=n[t])
         test(model, bf16, "original")
 
 
@@ -321,9 +358,8 @@ def build(model: str, a: dict[str, str], dst: Path | None = None) -> Path:
     return dst
 
 
-def correct(model: str, label: str, n: dict | None = None) -> dict[str, np.ndarray]:
-    return {t: np.array(llama.find(model, label, task=t, split="selection", n=n[t] if n else 0)["correct"])
-            for t in TASKS}
+def correct(model: str, label: str, n: dict = ALL) -> dict[str, np.ndarray]:
+    return {t: np.array(llama.find(model, label, task=t, split="selection", n=n[t])["correct"]) for t in TASKS}
 
 
 def test(model: str, path: Path, label: str) -> dict:
@@ -340,9 +376,14 @@ def score(model: str, a: dict[str, str] | None, label: str, path: Path | None = 
     """Flips against the original and KL on its own answers (GA questions, or all selection questions if full).
     With cut: a first look on a third of the questions; a genome already worse than cut there is dropped
     ("dropped": True, its score from that third) instead of finishing."""
-    n = None if full else FIT
+    n = ALL if full else FIT
     built = path is None and not (llama.find(model, label, reference="answers") and all(
-        llama.find(model, label, task=t, split="selection", n=n[t] if n else 0) for t in TASKS))
+        llama.find(model, label, task=t, split="selection", n=n[t]) for t in TASKS))
+
+    def result(n: dict) -> dict:
+        c = correct(model, label, n)
+        f = stats.flips(c, correct(model, "original", n))
+        return {"score": f + KL_WEIGHT * kl, "flips": f, "kl": kl, "accuracy": stats.acc(c)}
     try:
         path = path or (build(model, a) if built else Path("/dev/null"))
         with gpu(int(1.1 * path.stat().st_size) + 4 * GIB, 1800):
@@ -350,18 +391,14 @@ def score(model: str, a: dict[str, str] | None, label: str, path: Path | None = 
             if cut is not None:
                 for t in TASKS:
                     llama.run("task", model, path, label, task=t, split="selection", n=FIRST[t])
-                c = correct(model, label, FIRST)
-                f = stats.flips(c, correct(model, "original", FIRST))
-                if f + KL_WEIGHT * kl > cut:
-                    return {"score": f + KL_WEIGHT * kl, "flips": f, "kl": kl, "accuracy": stats.acc(c), "dropped": True}
+                if (first := result(FIRST))["score"] > cut:
+                    return {**first, "dropped": True}
             for t in TASKS:
-                llama.run("task", model, path, label, task=t, split="selection", n=n[t] if n else 0)
+                llama.run("task", model, path, label, task=t, split="selection", n=n[t])
     finally:
         if built and path:
             path.unlink(missing_ok=True)
-    c, o = correct(model, label, n), correct(model, "original", n)
-    f = stats.flips(c, o)
-    return {"score": f + KL_WEIGHT * kl, "flips": f, "kl": kl, "accuracy": stats.acc(c)}
+    return result(n)
 
 
 def _score_job(job):
@@ -464,11 +501,10 @@ class Genes:
         return list(uniq.values())
 
 
-def preset_layout(model: str, budget: int) -> dict[str, str] | None:
+def preset_layout(model: str) -> dict[str, str] | None:
     """The competing preset's types, each mapped to the nearest type the genome may use."""
-    p = json.loads(out(f"budget-{budget}", f"preset-{model}.json").read_text())["preset"]
-    steps = Genes(model, budget).steps
-    have = {n: t.tensor_type.name for n, t in tensors(STORE / model / f"preset-{p}.gguf").items()}
+    steps = Genes(model, BUDGET).steps
+    have = {n: t.tensor_type.name for n, t in tensors(preset_file(model, load("preset", model)["preset"])).items()}
     return {g: have[g] if have[g] in ts else min(ts, key=lambda x: (abs(bpw(x) - bpw(have[g])), -bpw(x)))
             for g, ts in steps.items()}
 
@@ -476,7 +512,7 @@ def preset_layout(model: str, budget: int) -> dict[str, str] | None:
 def ga(model: str) -> None:
     """Steady state: as many genomes scored at once as the GPU holds (up to 16, as GPU memory and the container's RAM allow), a new child whenever one finishes; each round the solver
     adds SOLVED proposals from a fit of every score so far. Stops on a plateau. Writes the TOP best."""
-    if (lst := out(f"budget-{BUDGET}", f"list-{model}{SUFFIX}.json")).exists():
+    if (lst := record("list", model, SUFFIX)).exists():
         return
     for f in out(model, "tmp", "x").parent.glob("*.gguf*"):  # left by a killed run
         if time.time() - f.stat().st_mtime > 3600:
@@ -486,7 +522,7 @@ def ga(model: str) -> None:
         with lock(f"{model}-first"), gpu(copy_of(model, "BF16").stat().st_size + 8 * GIB, 3600):  # first look
             for t in TASKS:
                 llama.run("task", model, copy_of(model, "BF16"), "original", task=t, split="selection", n=FIRST[t])
-    queue, pop, seen, scored, hist = G.initial(preset_layout(model, BUDGET)), [], set(), [], []
+    queue, pop, seen, scored, hist = G.initial(preset_layout(model)), [], set(), [], []
     best, last_gain, n, dropped = float("inf"), 0, 0, 0
     note(f"{sm} GA: {len(queue)} starting genomes")
 
@@ -530,7 +566,7 @@ def ga(model: str) -> None:
                 pop = sorted(pop + [(r["score"], digest(a), a)])[:POP]
             if r["score"] < best and not r.get("dropped"):
                 last_gain, best = (n if r["score"] < best - MIN_GAIN else last_gain), r["score"]
-                out(f"budget-{BUDGET}", f"ga-{model}-live.json").write_text(json.dumps({"n": n, **r, "assignment": a}))
+                record("ga", model, "-live").write_text(json.dumps({"n": n, **r, "assignment": a}))
                 note(f"{sm} GA: genome {n}: new best score {best:.2f} (flips {r['flips']:.2f}%, KL {r['kl']:.4f}, "
                      f"accuracy {r['accuracy']:.2f}, RAM {G.ram(a) / GIB:.3f} GiB)")
             elif n % 10 == 0:
@@ -546,7 +582,7 @@ def ga(model: str) -> None:
                 submit(queue.pop(0) if queue else child())
     lst.write_text(json.dumps({f"{sm}:ga{i}": {"assignment": a, "score": s, "ram_gib": G.ram(a) / GIB}
                                for i, (s, _, a) in enumerate(pop[:TOP], 1)}, indent=1))
-    out(f"budget-{BUDGET}", f"ga-{model}{SUFFIX}.json").write_text(json.dumps(hist, indent=1))
+    record("ga", model, SUFFIX).write_text(json.dumps(hist, indent=1))
     note(f"{sm} GA done: {n} genomes ({dropped} dropped after a first look); best score {best:.2f}")
 
 
@@ -555,7 +591,7 @@ def ga(model: str) -> None:
 def preset(model: str) -> None:
     """llama.cpp's best preset that fits: of the two largest whose RAM fits the budget, the more accurate on the
     held-out test. If none fits, the smallest preset (it then has more RAM than we do)."""
-    pj = out(f"budget-{BUDGET}", f"preset-{model}.json")
+    pj = record("preset", model)
     if pj.exists() and json.loads(pj.read_text()).get("test"):
         return
     M, top = Model(model), BUDGET * (1 + WINDOW[1]) * GIB
@@ -564,9 +600,9 @@ def preset(model: str) -> None:
     for p, b in sorted(PRESETS.items(), key=lambda x: -x[1]):
         if len(fit) == 2 or (b > room + 0.3 and p != "IQ1_S"):
             continue
-        path = STORE / model / f"preset-{p}.gguf"
+        path = preset_file(model, p)
         if not path.exists():
-            subprocess.run([str(BIN / "llama-quantize"), "--imatrix", str(STORE / model / f"{model}.imatrix.gguf"),
+            subprocess.run([str(BIN / "llama-quantize"), "--imatrix", str(imatrix(model)),
                             str(copy_of(model, "BF16")), f"{path}.part", p, str(THREADS)], check=True,
                            capture_output=True)
             os.rename(f"{path}.part", path)
@@ -588,17 +624,22 @@ def preset(model: str) -> None:
     note(f"{short(model)} preset {p}: held-out accuracy {res[p]['accuracy']:.2f}, KL {res[p]['kl']:.4f}")
 
 
+def summary(r: dict, orig: dict) -> dict:
+    """A held-out test's numbers as the result files store them (flips against the original's answers)."""
+    return {"accuracy": stats.acc(r["correct"]), "kl": r["kl"], "ppl": r["ppl"],
+            "flips": stats.flips(r["correct"], orig["correct"]),
+            "per_task": {t: 100 * float(np.mean(v)) for t, v in r["correct"].items()}}
+
+
 def final(model: str) -> int:
     """The GA's top 3, each distilled (the original as teacher) and undistilled, scored on all selection questions:
     the lowest score wins. Guard: not less accurate than the preset there. Then both on the held-out test, question
     by question. Overlapped: one distillation at a time (it needs most of the GPU) while everything already built is
     scored beside it, and the held-out tests run side by side."""
-    import threading
     from panther.distill import distill
     sm, bf16 = short(model), copy_of(model, "BF16")
-    items = json.loads(out(f"budget-{BUDGET}", f"list-{model}{SUFFIX}.json").read_text())
-    p = json.loads(out(f"budget-{BUDGET}", f"preset-{model}.json").read_text())["preset"]
-    files, rows, one = {}, {}, threading.Lock()
+    items, p = load("list", model, SUFFIX), load("preset", model)["preset"]
+    pf, pl, files, rows, one = preset_file(model, p), f"preset:{p}", {}, {}, threading.Lock()
 
     def scored(name: str, label: str, path: Path) -> None:
         rows[name] = r = score(model, None, label, path=path, full=True)
@@ -623,15 +664,15 @@ def final(model: str) -> int:
                     shutil.copy(files[plain], files[k])
         return jobs + [ex.submit(scored, k, f"v2t:{dg}", files[k])]
     with ThreadPoolExecutor(8) as ex, ThreadPoolExecutor(len(items)) as fx:
-        jobs = [ex.submit(score, model, None, f"preset:{p}", path=STORE / model / f"preset-{p}.gguf", full=True)]
+        jobs = [ex.submit(score, model, None, pl, path=pf, full=True)]
         for f in [fx.submit(finalist, k, it, ex) for k, it in items.items()]:
             jobs += f.result()
         for f in jobs:
             f.result()
     win = min(rows, key=lambda k: rows[k]["score"])
     item = items[win.split()[0]]
-    label = f"{'v2' if win.endswith('undistilled') else 'v2t'}:{digest(item['assignment'])}"
-    d, lo, hi = stats.compare(correct(model, label), correct(model, f"preset:{p}"))
+    label = label_of(win, item["assignment"])
+    d, lo, hi = stats.compare(correct(model, label), correct(model, pl))
     note(f"{sm} guard: {win} vs preset {p} on all selection questions: {d:+.2f} pts [{lo:+.2f}, {hi:+.2f}]")
     if hi < 0:
         note(f"{sm} guard: WORSE than the preset; not taken as our result")
@@ -641,17 +682,15 @@ def final(model: str) -> int:
         with gpu(path.stat().st_size + 12 * GIB, 4 * 3600):
             return test(model, path, lab)
     with ThreadPoolExecutor(2) as ex:  # side by side; the original's held-out results were recorded by refs
-        a, b = ex.submit(held, files[win], label), ex.submit(held, STORE / model / f"preset-{p}.gguf", f"preset:{p}")
+        a, b = ex.submit(held, files[win], label), ex.submit(held, pf, pl)
         orig = test(model, bf16, "original")
         ours, theirs = a.result(), b.result()
     d, lo, hi = stats.compare(ours["correct"], theirs["correct"])
     res = {"winner": win, "file": str(files[win]), "assignment": item["assignment"], "ram_gib": item["ram_gib"],
            "preset": p, "diff": d, "ci": [lo, hi], "verdict": stats.verdict(lo, hi)}
     for k, r in (("ours", ours), ("preset_test", theirs), ("original", orig)):
-        res[k] = {"accuracy": stats.acc(r["correct"]), "kl": r["kl"], "ppl": r["ppl"],
-                  "flips": stats.flips(r["correct"], orig["correct"]),
-                  "per_task": {t: 100 * float(np.mean(v)) for t, v in r["correct"].items()}}
-    out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").write_text(json.dumps(res, indent=1))
+        res[k] = summary(r, orig)
+    record("winner", model, SUFFIX).write_text(json.dumps(res, indent=1))
     for f in files.values():  # only the winner's file is kept
         if f != files[win]:
             f.unlink(missing_ok=True)
@@ -665,17 +704,13 @@ def final(model: str) -> int:
 
 def _pack(model: str, src: Path, tag: str, extra: dict | None = None) -> Path:
     """A Pi bundle: the file and a manifest with its hash, budget and predicted RAM (the winner's: same types)."""
-    w = json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())
-    d = DATA / "pi_bundle" / f"budget-{BUDGET}-{short(model).lower()}{tag}"
+    d = bundle_dir(model, tag)
     d.mkdir(parents=True, exist_ok=True)
     f = d / f"{model.lower()}-b{BUDGET}{tag}.gguf"
     shutil.copy(src, f)
-    h = sha256()
-    with open(f, "rb") as fh:
-        while c := fh.read(1 << 24):
-            h.update(c)
-    (d / "manifest.json").write_text(json.dumps({"file": f.name, "sha256": h.hexdigest(), "budget_gib": BUDGET,
-                                                 "predicted_ram_gib": w["ram_gib"], "context": CFG["context_tokens"],
+    (d / "manifest.json").write_text(json.dumps({"file": f.name, "sha256": digest_file(f), "budget_gib": BUDGET,
+                                                 "predicted_ram_gib": load("winner", model, SUFFIX)["ram_gib"],
+                                                 "context": CFG["context_tokens"],
                                                  "kv_cache_type": CFG["kv_cache_type"], **(extra or {})}, indent=1))
     return d
 
@@ -689,11 +724,11 @@ def _push(model: str, tag: str, d: Path) -> str:
 
 
 def bundle(model: str) -> None:
-    _pack(model, Path(json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())["file"]), SUFFIX)
+    _pack(model, Path(load("winner", model, SUFFIX)["file"]), SUFFIX)
 
 
 def upload(model: str) -> None:
-    _push(model, SUFFIX, DATA / "pi_bundle" / f"budget-{BUDGET}-{short(model).lower()}{SUFFIX}")
+    _push(model, SUFFIX, bundle_dir(model, SUFFIX))
     note(f"{short(model)} Pi bundle uploaded")
 
 
@@ -701,10 +736,10 @@ def qatupload(model: str) -> None:
     """The EfficientQAT file (Stage 1 + 2) as its own Pi bundle and repo (<winner's repo>-qat); the contest's winner,
     its bundle and its repo are left as they are."""
     f = _qatfiles(model)["stage12"]
-    win = Path(json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())["file"])
+    win = Path(load("winner", model, SUFFIX)["file"])
     if abs(f.stat().st_size - win.stat().st_size) > 64 * 2**20:
         raise SystemExit(f"{f.name} is {f.stat().st_size} bytes, the winner {win.stat().st_size}: not the same types")
-    r = json.loads(out(f"budget-{BUDGET}", f"qat-{model}.json").read_text())["stage 1 + 2"]
+    r = load("qat", model)["stage 1 + 2"]
     d = _pack(model, f, f"{SUFFIX}-qat", {"method": "EfficientQAT (Block-AP weights only, then scales end to end)",
                                           "held_out_accuracy": round(r["held_out"]["accuracy"], 2),
                                           "vs_winner": {k: r["vs_winner"][k] for k in ("diff", "ci", "verdict")}})
@@ -716,11 +751,10 @@ def prep(model: str) -> None:
     """refs and preset once this model has its build turn and the 16-bit original and the importance matrix exist:
     they run on the GPU while the type copies are built on the CPU. A queued model waits, so it never takes the GPU
     from the model being built."""
-    while not ((STORE / model / ".turn").exists() and copy_of(model, "BF16").exists()
-               and (STORE / model / f"{model}.imatrix.gguf").exists()):
+    while not ((STORE / model / ".turn").exists() and copy_of(model, "BF16").exists() and imatrix(model).exists()):
         time.sleep(60)
     for s in ("refs", "preset"):
-        with lock(f"{model}-{s}" if s == "refs" else f"{model}-{BUDGET}-{s}"):
+        with lock(step_lock(model, s)):
             STEPS[s](model)
 
 
@@ -770,14 +804,6 @@ def corpus(model: str) -> None:
     note(f"{short(model)} QAT corpus: FineWeb-Edu, {len(docs)} documents ({len(used)} held out); samples drawn")
 
 
-def digest_file(f: Path) -> str:
-    h = sha256()
-    with open(f, "rb") as fh:
-        while b := fh.read(1 << 24):
-            h.update(b)
-    return h.hexdigest()
-
-
 def qatdata(model: str) -> None:
     """CPU, with internet: the original (if its 16-bit file is gone) and the token samples."""
     if not copy_of(model, "BF16").exists():
@@ -816,9 +842,10 @@ def _stage2(model: str, src: Path, dst: Path, what: str) -> None:
                 lr=E2E_LR, train_norms=False)
 
 
-def drop_copies(model: str) -> None:
-    """The model's type copies removed, as when its contest ends (the 16-bit original, the importance matrix and the
-    presets stay; the record of what was rounded is archived first). Not while a contest of this model is running."""
+def drop_copies(model: str, refs: bool = False) -> None:
+    """The model's type copies removed (the 16-bit original, the importance matrix and the presets stay; the record
+    of what was rounded is archived first), and with refs the original's reference outputs: the end of a contest
+    (./panther, command `clean`). Not while another contest of this model is running."""
     d = STORE / model
     r = d / "rounded.json"
     if r.exists():
@@ -826,10 +853,10 @@ def drop_copies(model: str) -> None:
         a.mkdir(parents=True, exist_ok=True)
         shutil.copy2(r, a / f"{model}-{time.strftime('%Y%m%dT%H%M', time.localtime(r.stat().st_mtime))}.json")
         r.unlink()
-    for g in d.glob(f"{model}-*.gguf"):
+    for g in [*d.glob(f"{model}-*.gguf"), *((DATA / "reference" / model).glob("*.kld") if refs else [])]:
         if not g.name.endswith("-BF16.gguf"):
             g.unlink()
-    note(f"{short(model)} type copies removed (the starting file is built)")
+    note(f"{short(model)} type copies removed")
 
 
 def qat(model: str, lean: bool = False) -> None:
@@ -837,7 +864,7 @@ def qat(model: str, lean: bool = False) -> None:
     step started from); Stage 1 (Block-AP); Stage 2 (scales only, end to end, KL to the original instead of the
     paper's cross-entropy) on that; both files tested like the winner. The control (qatcontrol) runs beside it."""
     from panther.blockap import train
-    w = json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())["assignment"]
+    w = load("winner", model, SUFFIX)["assignment"]
     f, cache, bf16, sm = _qatfiles(model), DATA / "cache" / "blockap" / model, copy_of(model, "BF16"), short(model)
     if not f["start"].exists():  # the type copies are needed only to build the starting file
         store(model, sorted(set(w.values())))
@@ -851,10 +878,9 @@ def qat(model: str, lean: bool = False) -> None:
         shutil.rmtree(cache, ignore_errors=True)
         note(f"{sm} QAT stage 1 done")
     _stage2(model, f["stage1"], f["stage12"], "stage 2 after stage 1")
-    files = {"stage 1 + 2": (f["stage12"], f"qat12:{BUDGET}"), "stage 1 only": (f["stage1"], f"qat1:{BUDGET}")}
-    if lean:  # only the result that matters (what Stage 1 alone and the control show is known from the 14B)
-        del files["stage 1 only"]
-    qateval(model, files)
+    # lean: only the result that matters (what Stage 1 alone and the control show is known from the 14B)
+    qateval(model, {"stage 1 + 2": (f["stage12"], f"qat12:{BUDGET}"),
+                    **({} if lean else {"stage 1 only": (f["stage1"], f"qat1:{BUDGET}")})})
 
 
 def qatcontrol(model: str) -> None:
@@ -870,12 +896,9 @@ def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
     """Each file as the final step tests the winner: all selection questions, the guard against the preset, the
     held-out test; then question by question against the current winner and the preset."""
     sm, bf16 = short(model), copy_of(model, "BF16")
-    p = json.loads(out(f"budget-{BUDGET}", f"preset-{model}.json").read_text())["preset"]
-    pf, pl = STORE / model / f"preset-{p}.gguf", f"preset:{p}"
-    win = json.loads(out(f"budget-{BUDGET}", f"winner-{model}{SUFFIX}.json").read_text())
-    wf, wl = Path(win["file"]), f"{'v2' if win['winner'].endswith('undistilled') else 'v2t'}:{digest(win['assignment'])}"
-    rj = out(f"budget-{BUDGET}", f"qat-{model}.json")
-    with lock(f"{model}-refs"):
+    p, win, rj = load("preset", model)["preset"], load("winner", model, SUFFIX), record("qat", model)
+    pf, pl, wf, wl = preset_file(model, p), f"preset:{p}", Path(win["file"]), label_of(win["winner"], win["assignment"])
+    with lock(step_lock(model, "refs")):
         refs(model)  # the original's reference outputs (a finished contest's were cleaned up)
     for name, (path, label) in files.items():
         if rj.exists() and name in json.loads(rj.read_text()):
@@ -887,10 +910,7 @@ def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
             ours, theirs, winner, orig = (test(model, path, label), test(model, pf, pl), test(model, wf, wl),
                                           test(model, bf16, "original"))
         vw, vp = stats.compare(ours["correct"], winner["correct"]), stats.compare(ours["correct"], theirs["correct"])
-        r = {"file": str(path), "selection": sel, "guard_vs_preset": g,
-                     "held_out": {"accuracy": stats.acc(ours["correct"]), "kl": ours["kl"], "ppl": ours["ppl"],
-                                  "flips": stats.flips(ours["correct"], orig["correct"]),
-                                  "per_task": {k: 100 * float(np.mean(v)) for k, v in ours["correct"].items()}},
+        r = {"file": str(path), "selection": sel, "guard_vs_preset": g, "held_out": summary(ours, orig),
                      "vs_winner": {"diff": vw[0], "ci": vw[1:], "verdict": stats.verdict(*vw[1:]),
                                    "winner_accuracy": stats.acc(winner["correct"])},
                      "vs_preset": {"diff": vp[0], "ci": vp[1:], "verdict": stats.verdict(*vp[1:]), "preset": p,
@@ -906,26 +926,22 @@ def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
 
 
 STEPS = {"store": store, "error": error, "refs": refs, "preset": preset, "ga": ga, "final": final, "bundle": bundle}
+ALONE = {"fetch": fetch, "upload": upload, "save": save, "prep": prep, "qatdata": qatdata, "qatcontrol": qatcontrol,
+         "qatupload": qatupload, "qat": lambda model: qat(model, lean="lean" in sys.argv[4:]),
+         "clean": lambda model: drop_copies(model, refs=True)}  # not timed, no lock
 
 
 def main() -> int:
     global BUDGET
     cmd, b, model = sys.argv[1:4]
     BUDGET = int(b)
-    if cmd in ("fetch", "upload", "save", "qatdata", "qat", "qatcontrol", "qatupload"):
-        if cmd == "qat":
-            qat(model, lean="lean" in sys.argv[4:])
-            return 0
-        {"fetch": fetch, "upload": upload, "save": save, "qatdata": qatdata,
-         "qatcontrol": qatcontrol, "qatupload": qatupload}[cmd](model)
-        return 0
-    if cmd == "prep":
-        prep(model)
+    if cmd in ALONE:
+        ALONE[cmd](model)
         return 0
     for s in STEPS if cmd == "run" else [cmd]:
         t0 = time.time()
         note(f"{short(model)} step {s}: start")
-        with lock(f"{model}-{s}" if s in ("store", "error", "refs") else f"{model}-{BUDGET}-{s}"):
+        with lock(step_lock(model, s)):
             if STEPS[s](model) == 2:
                 return 2
         note(f"{short(model)} step {s}: done in {(time.time() - t0) / 60:.0f} min")

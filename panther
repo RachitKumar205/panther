@@ -18,9 +18,10 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 . "$ROOT/deploy/server/local.env"
 W="${PANTHER_WORK:-/s3/panther/work}"
+usage() { sed -n 2,15p "$0"; }
 
 if [ ! -d "$W" ]; then  # your machine: sync the code, then the same command on the server
-  case "${1:-}" in test) cd "$ROOT" && exec uv run pytest -q ;; ""|help) sed -n 2,15p "$0"; exit 0 ;; esac
+  case "${1:-}" in test) cd "$ROOT" && exec uv run pytest -q ;; ""|help) usage; exit 0 ;; esac
   SSH="ssh -o ControlPath=$PANTHER_SSH_CONTROL -o ProxyCommand=false -o BatchMode=yes"
   $SSH "$PANTHER_HOST" true 2>/dev/null || { echo "No connection to the server; open it first (deploy/server/README.md)."; exit 1; }
   rsync -a --delete -e "$SSH" --exclude .git/ --exclude .venv/ --exclude /data/ --exclude __pycache__/ \
@@ -30,19 +31,23 @@ fi
 
 DATA="$W/data"; LOG="$DATA/logs/panther.log"; IMAGE=localhost/panther; CPUS="${PANTHER_CPUS:-40}"; MEM="${PANTHER_MEM:-64g}"
 P=(podman --root "$W/containers/storage" --runroot "/run/user/$(id -u)/panther" --events-backend file --tmpdir "$W/tmp/libpod")
+R=(/opt/venv/bin/python scripts/server/pipeline.py)
+BOX=(--userns keep-id --cap-drop all --security-opt no-new-privileges --read-only -v "$W/repo:/work/repo:ro,z"
+     --log-driver k8s-file)  # every container: no privileges, read-only, the code mounted read-only
 mkdir -p "$DATA/logs" "$W/tmp/libpod"; export TMPDIR="$W/tmp"
 log() { echo "$(TZ=Asia/Kolkata date +%H:%M) $*" >> "$LOG"; echo "$*"; }
 healthy() { [ "$(curl -sL -o /dev/null -w '%{http_code}' --max-time 20 "$PANTHER_HEALTH_URL")" = 200 ]; }
 ours() { "${P[@]}" ps --format '{{.Names}}' --filter "status=$1" | grep '^panther-' | grep -vE '^panther-(status|dashboard)$'; }
 model() { grep -ioE "name: [^ ]*-${1%@*}-[^ ]*" "$W/repo/configs/models.yaml" | head -1 | cut -d' ' -f2; }
+parse() { size="${1%@*}"; b="${1#*@}"; m="$(model "$1")"; }  # 14b@7 -> size 14b, b 7, m the model's name
+detach() { (setsid nohup "$0" "$@" >/dev/null 2>&1 < /dev/null &); }  # so the command returns at once
 
 job() {  # job cpu|gpu NAME CMD...: one container, waited for; returns its exit code. Log: data/logs/NAME.log
   local kind="$1" name="panther-$2"; shift 2
   healthy || { log "GitLab is not healthy; not starting $name"; return 1; }
-  local a=(--userns keep-id --cap-drop all --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,size=16g
-           --shm-size 2g --pids-limit 4096 --cpus "$CPUS" --memory "$MEM" --memory-swap "$MEM"
-           -v "$W/repo:/work/repo:ro,z" -v "$DATA:/work/data:rw,z" -e "PANTHER_THREADS=$CPUS"
-           -e "PANTHER_HF_REPO=$PANTHER_HF_REPO" --log-driver k8s-file --log-opt max-size=20mb)
+  local a=("${BOX[@]}" --tmpfs /tmp:rw,size=16g --shm-size 2g --pids-limit 4096 --cpus "$CPUS" --memory "$MEM"
+           --memory-swap "$MEM" -v "$DATA:/work/data:rw,z" -e "PANTHER_THREADS=$CPUS"
+           -e "PANTHER_HF_REPO=$PANTHER_HF_REPO" --log-opt max-size=20mb)
   [ "$kind" = cpu ] && a+=(--network pasta) || a+=(--device nvidia.com/gpu=all --security-opt label=disable
                                                     --network none -e HF_HUB_OFFLINE=1)
   "${P[@]}" rm -f "$name" >/dev/null 2>&1
@@ -55,10 +60,9 @@ dashboard() {  # the read-only web dashboard: kept running (pause and stop leave
   # published only at PANTHER_DASHBOARD_BIND (default loopback; the reverse proxy's network gateway for a public URL)
   healthy || { log "GitLab is not healthy; not starting the dashboard"; return 1; }
   "${P[@]}" rm -f panther-dashboard >/dev/null 2>&1
-  "${P[@]}" run -d --name panther-dashboard --restart on-failure --userns keep-id --cap-drop all \
-    --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,size=64m --pids-limit 256 --cpus 2 --memory 1g \
-    --memory-swap 1g --network pasta -p "${PANTHER_DASHBOARD_BIND:-127.0.0.1}:43800:43800" \
-    -v "$W/repo:/work/repo:ro,z" -v "$DATA:/work/data:ro,z" --log-driver k8s-file --log-opt max-size=5mb \
+  "${P[@]}" run -d --name panther-dashboard --restart on-failure "${BOX[@]}" --tmpfs /tmp:rw,size=64m \
+    --pids-limit 256 --cpus 2 --memory 1g --memory-swap 1g --network pasta \
+    -p "${PANTHER_DASHBOARD_BIND:-127.0.0.1}:43800:43800" -v "$DATA:/work/data:ro,z" --log-opt max-size=5mb \
     "$IMAGE:current" /opt/venv/bin/python scripts/server/dashboard.py --data /work/data --host 0.0.0.0 --port 43800 \
     >/dev/null && echo "dashboard: http://${PANTHER_DASHBOARD_BIND:-127.0.0.1}:43800 on the server${PANTHER_DASHBOARD_DOMAIN:+, https://$PANTHER_DASHBOARD_DOMAIN}"
 }
@@ -66,7 +70,7 @@ dashboard() {  # the read-only web dashboard: kept running (pause and stop leave
 turn() { mkdir -p "$DATA/store/$1"; touch "$DATA/store/$1/.turn"; }  # lets the model's early GPU step begin
 contest() {  # contest SIZE B MODEL. Downloading and building type copies (the disk-heavy part) take turns, one
   # model at a time; everything after runs in parallel with the other contests, sharing the GPU through its ledger.
-  local id="$1-b$2" R=(/opt/venv/bin/python scripts/server/pipeline.py) fd ok=1 sp="" pp="" rc
+  local id="$1-b$2" fd ok=1 sp="" pp="" rc
   mkdir -p "$DATA/locks"; log "$id: queued (waiting its turn to download and build the type copies)"
   job gpu "$id-prep" "${R[@]}" prep "$2" "$3" & pp=$!  # refs + preset as soon as the original exists, beside the copies
   local types; types="$(grep '^formats:' "$W/repo/configs/search.yaml" | tr ',' '\n' | wc -l)"
@@ -95,9 +99,7 @@ contest() {  # contest SIZE B MODEL. Downloading and building type copies (the d
   then log "$id: done"; else log "$id: FAILED or stopped (its files are kept, to resume)"; return; fi
   [ -n "$sp" ] && wait "$sp"
   pgrep -f "panther _contest [^ ]+ [0-9]+ $3\$" | grep -qv "^$$\$" || pgrep -f "pipeline.py save [0-9]+ $3" >/dev/null ||
-    { mkdir -p "$DATA/archive/rounded"; f="$DATA/store/$3/rounded.json"  # the record goes with the copies it describes
-      [ -f "$f" ] && cp -p "$f" "$DATA/archive/rounded/$3-$(date -r "$f" +%Y%m%dT%H%M).json" && rm -f "$f"
-      find "$DATA/store/$3" "$DATA/reference/$3" \( \( -name "$3-*.gguf" ! -name "*-BF16.gguf" \) -o -name "*.kld" \) -delete 2>/dev/null; }
+    job cpu "$id-clean" "${R[@]}" clean "$2" "$3"  # the type copies and reference outputs go; their record is archived
 }
 
 guard() {  # pauses everything while GitLab is unhealthy (3 bad checks), resumes after 5 good ones
@@ -118,22 +120,20 @@ case "${1:-}" in
     shift
     "${P[@]}" image exists "$IMAGE:current" || "$0" build
     [ "$("${P[@]}" ps --format '{{.Names}}' --filter name='^panther-dashboard$')" ] || dashboard
-    for d in _guard _status; do  # detached, so this command returns at once
-      pgrep -f "panther $d" >/dev/null || (setsid nohup "$0" "$d" >/dev/null 2>&1 < /dev/null &)
-    done
+    for d in _guard _status; do pgrep -f "panther $d" >/dev/null || detach "$d"; done
     for c in "$@"; do
-      m="$(model "$c")"; b="${c#*@}"
+      parse "$c"
       [ -n "$m" ] && [[ "$b" =~ ^[0-9]+$ ]] || { echo "unknown contest '$c' (write it like 7b@3)"; continue; }
-      if pgrep -f "panther _contest ${c%@*} $b $m\$" >/dev/null; then echo "$c is already running"; continue; fi
-      (setsid nohup "$0" _contest "${c%@*}" "$b" "$m" >/dev/null 2>&1 < /dev/null &)
+      if pgrep -f "panther _contest $size $b $m\$" >/dev/null; then echo "$c is already running"; continue; fi
+      detach _contest "$size" "$b" "$m"
       echo "started $c ($m at $b GiB)"
     done ;;
   pause) touch "$DATA/PAUSED"; ours running | xargs -r "${P[@]}" pause >/dev/null; log "paused by the user" ;;
   resume) rm -f "$DATA/PAUSED"; ours paused | xargs -r "${P[@]}" unpause >/dev/null; log "resumed by the user" ;;
   stop)
-    pat="panther _contest ${2:+${2%@*} ${2#*@} }"
-    pkill -f "$pat" ; sleep 1
-    ours running | grep "${2:+panther-${2%@*}-b${2#*@}-}" | xargs -r "${P[@]}" stop -t 30 >/dev/null
+    parse "${2:-}"
+    pkill -f "panther _contest ${2:+$size $b }"; sleep 1
+    ours running | grep "${2:+panther-$size-b$b-}" | xargs -r "${P[@]}" stop -t 30 >/dev/null
     log "stopped ${2:-every contest}" ;;
   status)
     "${P[@]}" ps --format '{{.Names}}\t{{.Status}}' | grep '^panther-'
@@ -149,24 +149,24 @@ case "${1:-}" in
     "${P[@]}" tag "$IMAGE:$tag" "$IMAGE:current" ;;
   _contest) contest "$2" "$3" "$4" ;;
   qat)  # EfficientQAT's Stage 1 on a finished contest's winner (an experiment): ./panther qat 14b@5
-    m="$(model "$2")"; [ -n "$m" ] || { echo "unknown contest '$2' (write it like 14b@5)"; exit 1; }
-    (setsid nohup "$0" _qat "${2%@*}" "${2#*@}" "$m" "${3:-}" >/dev/null 2>&1 < /dev/null &); echo "started QAT for $2 ($m)${3:+, $3}" ;;
-  _qat) R=(/opt/venv/bin/python scripts/server/pipeline.py); log "$2-b$3: QAT started"
-    job cpu "$2-b$3-qatdata" "${R[@]}" qatdata "$3" "$4" || { log "$2-b$3: QAT FAILED or stopped (files kept)"; exit; }
-    if [ "${5:-}" = lean ]; then  # no control and no Stage 1-only test: only Stage 1 + 2's result
-      job gpu "$2-b$3-qat" "${R[@]}" qat "$3" "$4" lean; a=$?; b=0
-    else
-      job gpu "$2-b$3-qatctl" "${R[@]}" qatcontrol "$3" "$4" & c=$!  # the control, beside Stage 1
-      job gpu "$2-b$3-qat" "${R[@]}" qat "$3" "$4"; a=$?; wait "$c"; b=$?
+    parse "$2"; [ -n "$m" ] || { echo "unknown contest '$2' (write it like 14b@5)"; exit 1; }
+    detach _qat "$size" "$b" "$m" "${3:-}"; echo "started QAT for $2 ($m)${3:+, $3}" ;;
+  _qat) id="$2-b$3" a=1 b=0; log "$id: QAT started"
+    if job cpu "$id-qatdata" "${R[@]}" qatdata "$3" "$4"; then
+      if [ "${5:-}" = lean ]; then  # no control and no Stage 1-only test: only Stage 1 + 2's result
+        job gpu "$id-qat" "${R[@]}" qat "$3" "$4" lean; a=$?
+      else
+        job gpu "$id-qatctl" "${R[@]}" qatcontrol "$3" "$4" & c=$!  # the control, beside Stage 1
+        job gpu "$id-qat" "${R[@]}" qat "$3" "$4"; a=$?; wait "$c"; b=$?
+      fi
     fi
-    if [ "$a" = 0 ] && [ "$b" = 0 ]; then log "$2-b$3: QAT done"; else log "$2-b$3: QAT FAILED or stopped (files kept, to resume)"; fi ;;
+    if [ "$a" = 0 ] && [ "$b" = 0 ]; then log "$id: QAT done"; else log "$id: QAT FAILED or stopped (files kept, to resume)"; fi ;;
   exec) shift; job gpu "exec-$$" "$@" ;;
   cexec) shift; job cpu "cexec-$$" "$@" ;;  # one command in a CPU container (network, no GPU)
-  save) job cpu "save-${2%@*}" /opt/venv/bin/python scripts/server/pipeline.py save 0 "$(model "$2@0")" ;;
-  upload) job cpu "upload-${2/@/-b}" /opt/venv/bin/python scripts/server/pipeline.py upload "${2#*@}" "$(model "$2")" ;;
-  qatupload) job cpu "qatupload-${2/@/-b}" /opt/venv/bin/python scripts/server/pipeline.py qatupload "${2#*@}" "$(model "$2")" ;;
+  save) parse "$2"; job cpu "save-$size" "${R[@]}" save 0 "$m" ;;
+  upload|qatupload) parse "$2"; job cpu "$1-$size-b$b" "${R[@]}" "$1" "$b" "$m" ;;
   dashboard) dashboard ;;
   _guard) guard ;;
   _status) job cpu status /opt/venv/bin/python scripts/server/status.py ;;
-  *) sed -n 2,15p "$0" ;;
+  *) usage ;;
 esac
