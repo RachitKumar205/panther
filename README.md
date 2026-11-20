@@ -256,7 +256,9 @@ importance_c the mean squared input of column c. Used only to repair genomes and
    comes out WIN or LOSE by chance.
 5. **Reported, deciding nothing**: accuracy (the mean of the 5 task accuracies) and ours − preset in accuracy points,
    perplexity, same top word %. The result file stores `relative` and `relative_ci`, `diff` and `ci` (the same minus
-   100: negative is better than the preset), `verdict`, and `accuracy_diff`.
+   100: negative is better than the preset), `verdict`, and `accuracy_diff`. Also `accuracy_kept` (ours and the
+   preset's held-out accuracy as % of the original's) and `weight_check` (the relative score, its interval and the
+   verdict again with the KL weight at 5 and at 20, from the same measurements), both on the final log line.
 
 ### The competitor (preset step)
 
@@ -344,6 +346,7 @@ was picked, and whether the guard was passed, may have been affected.
 | 12 | Final | The guard no longer stops a contest. The winner is compared with the preset on all selection questions as before; if ours is clearly worse (the 95 % interval entirely below 0) that is logged as a warning, and the held-out test runs anyway, so every contest ends in a reported WIN, TIE or LOSE. Before, a contest that would lose ended with no verdict, so the record showed only the contests that passed. |
 | 13 | Final | **The verdict is the relative score on held-out data**: our fitness ÷ the preset's × 100, with flips on the held-out questions and KL on the test split (100 = the preset's damage, lower is better). Its 95 % interval comes from the same standard error the search uses (9): ±1.96 standard errors of the difference, from the per-question flips (paired) and the two KL runs. WIN if the whole interval is below 100, LOSE if it is all above, TIE otherwise. Accuracy, its difference from the preset, perplexity and same top word % are reported next to it and decide nothing. One rule throughout: the search, picking the winner, the guard and the verdict all use the same relative fitness (the guard on selection data, the verdict on held-out data). Replaces the accuracy difference with a bootstrap interval. At 95 %, about 1 contest in 20 where the two files are truly equal still comes out WIN or LOSE by chance. |
 | 14 | Pi | The Pi's result line says FITS or OVER: whether the real peak RAM is within the bundle's budget. Reported on the page next to the verdict; it does not change the verdict. |
+| 15 | Final | Reported next to the verdict, deciding nothing: **accuracy kept**, each file's held-out accuracy ÷ the original's × 100, for ours and the preset; and whether the verdict stays the same with the KL weight at 5 and 20 instead of 10 (the weight is a choice, so its effect is shown). The relative score already places the original at 0 and the preset at 100. |
 
 ### The dataset (decision 6)
 

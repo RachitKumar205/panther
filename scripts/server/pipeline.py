@@ -428,13 +428,32 @@ def relative(r: dict, base: float) -> dict:
     return {**r, "relative": 100 * r["score"] / base}
 
 
-def versus(a: dict, b: dict, orig: dict[str, np.ndarray]) -> dict:
+def versus(a: dict, b: dict, orig: dict[str, np.ndarray], w: float = KL_WEIGHT) -> dict:
     """a against b (each with "correct", "kl", "kl_se"; the same questions and text): a's relative score (100 = b's
     damage) and its 95% interval, from the same SE as the GA's. diff and ci are that minus 100 (negative = better
-    than b), so the dashboard draws them around 0 as before."""
-    rel, lo, hi = stats.relative(a["correct"], b["correct"], orig, a["kl"], a["kl_se"], b["kl"], b["kl_se"], KL_WEIGHT)
+    than b), so the dashboard draws them around 0 as before. w: the KL weight."""
+    rel, lo, hi = stats.relative(a["correct"], b["correct"], orig, a["kl"], a["kl_se"], b["kl"], b["kl_se"], w)
     return {"relative": rel, "relative_ci": [lo, hi], "diff": rel - 100, "ci": [lo - 100, hi - 100],
             "verdict": stats.verdict(lo, hi), "unit": "relative score - 100"}
+
+
+def beside(a: dict, b: dict, orig: dict) -> dict:
+    """Reported next to a's verdict against b, deciding nothing: each one's held-out accuracy as % of the original's
+    (accuracy_kept), and the verdict again with the KL weight at 5 and 20 (weight_check), from the same numbers."""
+    o = stats.acc(orig["correct"])
+    kept = {"ours": 100 * stats.acc(a["correct"]) / o, "preset": 100 * stats.acc(b["correct"]) / o}
+    wc = {str(w): {"relative": v["relative"], "ci": v["relative_ci"], "verdict": v["verdict"]}
+          for w in (5, 20) for v in [versus(a, b, orig["correct"], w)]}
+    return {"accuracy_kept": kept, "weight_check": wc}
+
+
+def beside_text(c: dict, verdict: str) -> str:
+    """The log line's tail for beside()'s numbers."""
+    k, w = c["accuracy_kept"], c["weight_check"]
+    same = all(x["verdict"] == verdict for x in w.values())
+    return (f"; accuracy kept {k['ours']:.1f} vs {k['preset']:.1f}% of the original; "
+            + ("same verdict at KL weight 5 and 20" if same
+               else f"verdict at KL weight 5: {w['5']['verdict']}, 20: {w['20']['verdict']}"))
 
 
 def _score_job(job):
@@ -740,7 +759,8 @@ def final(model: str) -> int:
     # better than the preset); the accuracy difference (accuracy_diff) is reported, not judged
     v = versus(ours, theirs, orig["correct"])
     res = {"winner": win, "file": str(files[win]), "assignment": item["assignment"], "ram_gib": item["ram_gib"],
-           "preset": p, **v, "accuracy_diff": stats.acc(ours["correct"]) - stats.acc(theirs["correct"]),
+           "preset": p, **v, **beside(ours, theirs, orig),
+           "accuracy_diff": stats.acc(ours["correct"]) - stats.acc(theirs["correct"]),
            "selection": rows[win], "preset_score": base, "guard": {**g, "warning": warn}}
     for k, r in (("ours", ours), ("preset_test", theirs), ("original", orig)):
         res[k] = summary(r, orig)
@@ -753,7 +773,7 @@ def final(model: str) -> int:
          f"{v['diff']:+.2f} rel [{v['ci'][0]:+.2f}, {v['ci'][1]:+.2f}] {v['verdict']} (relative score "
          f"{v['relative']:.1f}, 100 = the preset), flips {res['ours']['flips']:.2f} vs "
          f"{res['preset_test']['flips']:.2f}%, same top word "
-         f"{res['ours']['same_top']:.2f} vs {res['preset_test']['same_top']:.2f}%")
+         f"{res['ours']['same_top']:.2f} vs {res['preset_test']['same_top']:.2f}%{beside_text(res, v['verdict'])}")
     return 0
 
 
@@ -1079,7 +1099,8 @@ def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
         vw, vp = versus(ours, winner, orig["correct"]), versus(ours, theirs, orig["correct"])
         r = {"file": str(path), "label": label, "selection": sel, "guard_vs_preset": g, "held_out": summary(ours, orig),
              "vs_winner": {**vw, "winner_accuracy": stats.acc(winner["correct"])},
-             "vs_preset": {**vp, "preset": p, "preset_accuracy": stats.acc(theirs["correct"])},
+             "vs_preset": {**vp, **beside(ours, theirs, orig), "preset": p,
+                           "preset_accuracy": stats.acc(theirs["correct"])},
              "original_accuracy": stats.acc(orig["correct"])}
         with lock(f"{model}-qateval"):  # the main job and the control write the same file
             res = json.loads(rj.read_text()) if rj.exists() else {}
@@ -1087,7 +1108,8 @@ def qateval(model: str, files: dict[str, tuple[Path, str]]) -> None:
         note(f"{sm} QAT {name}: held-out {r['held_out']['accuracy']:.2f} (winner {stats.acc(winner['correct']):.2f}, "
              f"preset {p} {stats.acc(theirs['correct']):.2f}, original {stats.acc(orig['correct']):.2f}) | vs winner "
              f"{vw['diff']:+.2f} rel [{vw['ci'][0]:+.2f}, {vw['ci'][1]:+.2f}] {vw['verdict']}, vs preset "
-             f"{vp['diff']:+.2f} rel [{vp['ci'][0]:+.2f}, {vp['ci'][1]:+.2f}] {vp['verdict']}")
+             f"{vp['diff']:+.2f} rel [{vp['ci'][0]:+.2f}, {vp['ci'][1]:+.2f}] {vp['verdict']}"
+             f"{beside_text(r['vs_preset'], vp['verdict'])}")
 
 
 STEPS = {"store": store, "error": error, "refs": refs, "preset": preset, "ga": ga, "final": final, "bundle": bundle}
