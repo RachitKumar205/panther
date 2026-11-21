@@ -1,0 +1,9 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart TB
+    pop["Population (best 16)"] --> child["Children: 30% mutate · 70% two-point slice"]
+    child --> rep["Repair into the RAM window"]
+    rep --> sol["+ 1 CP-SAT proposal"]
+    sol --> score["Build in RAM, score, delete"]
+    score --> stop{"15 in a row with no new best?"}
+    stop -- no --> pop
+    stop -- yes --> fin["Best 3 finalists → distillation"]

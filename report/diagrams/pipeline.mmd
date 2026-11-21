@@ -1,0 +1,9 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart TB
+    d0["0 · Data<br/>four disjoint sets"] --> d1["1 · Model<br/>13 GPTQ type copies"]
+    d1 --> d2["2 · Presets<br/>RAM model, competitor"]
+    d2 --> d3["3 · Fitness<br/>flips% + 10·KL"]
+    d3 --> d4["4 · Search<br/>GA + CP-SAT"]
+    d4 --> d5["5 · Distill<br/>block scales + norms"]
+    d5 --> d6["6 · QAT (optional)<br/>Block-AP"]
+    d6 --> d7["7 · Verdict<br/>winner, WIN / TIE / LOSE"]

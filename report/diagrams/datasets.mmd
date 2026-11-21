@@ -1,0 +1,12 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart LR
+    subgraph sets["Four disjoint sets"]
+        GA["GA set"]
+        WIN["winner set"]
+        DIST["distill set"]
+        VER["verdict set"]
+    end
+    GA --> s["search fitness"]
+    WIN --> p["choose preset + winner"]
+    DIST --> t["imatrix · GPTQ · distill"]
+    VER --> v["verdict: WIN / TIE / LOSE"]

@@ -1,0 +1,6 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart TB
+    gen["Genome<br/>matrix → type"] --> copy["Copy each<br/>matrix's bytes"]
+    tc["13 type copies<br/>GPTQ, byte-exact"] --> copy
+    copy --> f["Candidate .gguf<br/>size known exactly"]
+    f --> sc["Score<br/>flips% + 10·KL"]
