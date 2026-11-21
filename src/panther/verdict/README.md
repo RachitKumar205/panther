@@ -105,7 +105,7 @@ result = verdict.run(contest, Path(chosen["file"]), preset_record)        # resu
 |---|---|
 | `winner.py` | `Winner`: build and distill the finalists, score them all at once, keep the lowest |
 | `verdict.py` | `Verdict` (`measure`, `run`), `judge` (the relative score, its interval, WIN/TIE/LOSE), `Measured` |
-| `gsm8k.py` | `GSM8K` (answers, the original's recorded once), `LlamaServer`, `correct` |
+| `gsm8k.py` | `GSM8K` (answers, the original's recorded once), `LlamaServer` (also used by the data part, with `chat` on, to have the original answer the chat prompts in its own template: `--jinja` and `/apply-template`), `correct` |
 
 ## Tests (`tests/verdict/`)
 

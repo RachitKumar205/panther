@@ -37,3 +37,13 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+# On Linux (anton) torch is the CUDA 12.9 build, matching the image's CUDA toolkit (deploy/server/Containerfile) and
+# the server's driver, as Rachit pinned it. PyPI's default Linux wheel targets a newer CUDA.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu129", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true

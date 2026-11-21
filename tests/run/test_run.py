@@ -36,8 +36,9 @@ def calls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tuple]:
         def build(self):
             seen.append(("Dataset.build",))
 
-        def for_model(self, m):
+        def for_model(self, m, qat_windows=1024):  # as many QAT windows as asked for
             seen.append(("Dataset.for_model", m.name))
+            sets.qat_tokens = np.zeros((qat_windows, 4))
             return sets
 
     class Model:

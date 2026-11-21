@@ -51,7 +51,7 @@ def run(size: str, budget_gib: int, qat: int) -> dict:
     dataset = Dataset()
     step(f"{name}: the model (16-bit original, importance matrix, type copies)")
     m.build(dataset.web_distill)
-    sets = dataset.for_model(m)
+    sets = dataset.for_model(m, qat_windows=qat) if qat else dataset.for_model(m)
     budget = Budget(m, budget_gib)
 
     step(f"{name}: the preset")
@@ -71,7 +71,8 @@ def run(size: str, budget_gib: int, qat: int) -> dict:
             if not best.exists():  # the winner's step reuses it
                 search.genes.build(finalists[0]["genome"], best.with_name(best.name + ".part"))
                 os.replace(best.with_name(best.name + ".part"), best)
-            BlockAP(m, sets.qat_tokens[:qat], sets.qat_validation).run(best, trained)
+            assert len(sets.qat_tokens) == qat, f"{len(sets.qat_tokens)} QAT samples, {qat} asked for"
+            BlockAP(m, sets.qat_tokens, sets.qat_validation).run(best, trained)
             Distill(m, sets.distill).run(trained, distilled)
             trained.unlink()
         extra = (distilled,)
