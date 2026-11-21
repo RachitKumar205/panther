@@ -18,8 +18,8 @@ only after its design is agreed.
 | 2 | Presets: which are built, which one competes; the RAM model | [`panther.presets`](src/panther/presets/README.md) | written, tested |
 | 3 | Fitness: flips % + 10 × KL against the original, relative to the preset | [`panther.fitness`](src/panther/fitness/README.md) | written, tested |
 | 4 | Search: start candidates, slicing, mutation, repair, stop | [`panther.search`](src/panther/search/README.md) | written, tested |
-| 5 | Distillation: block-scale multipliers trained against the original | | next |
-| 6 | QAT (optional) | | |
+| 5 | Distillation: one multiplier per block of 256 weights and every norm, trained against the original, written back into the file | [`panther.distill`](src/panther/distill/README.md) | written, tested |
+| 6 | QAT (optional): Block-AP, the weights trained block by block on the grid (Rachit's, ported) | | next |
 | 7 | The winner (on the GA set) and the verdict (on the verdict set) | | |
 | 8 | Running it: `panther run 14b@5`, output folder, upload, the Pi | | |
 
