@@ -13,25 +13,26 @@ only after its design is agreed.
 
 | # | Part | Module | Status |
 |---|---|---|---|
-| 0 | Data: the GA set, the distill set and the verdict set | | on hold |
+| 0 | Data: the GA set, the winner set, the distill set and the verdict set | | on hold |
 | 1 | The model: download, 16-bit original, importance matrix, 13 type copies (GPTQ) | [`panther.model`](src/panther/model/README.md) | written, tested |
 | 2 | Presets: which are built, which one competes; the RAM model | [`panther.presets`](src/panther/presets/README.md) | written, tested |
 | 3 | Fitness: flips % + 10 × KL against the original, relative to the preset | [`panther.fitness`](src/panther/fitness/README.md) | written, tested |
 | 4 | Search: start candidates, slicing, mutation, repair, stop | [`panther.search`](src/panther/search/README.md) | written, tested |
 | 5 | Distillation: one multiplier per block of 256 weights and every norm, trained against the original, written back into the file | [`panther.distill`](src/panther/distill/README.md) | written, tested |
 | 6 | QAT (optional): Block-AP, the weights trained block by block on llama.cpp's own grids (Rachit's, ported leaner) | [`panther.qat`](src/panther/qat/README.md) | written, tested |
-| 7 | The winner (on the GA set) and the verdict (on the verdict set) | | next |
-| 8 | Running it: `panther run 14b@5`, output folder, upload, the Pi | | |
+| 7 | The winner (on the winner set) and the verdict (on the verdict set): WIN / TIE / LOSE with a 95 % interval | [`panther.verdict`](src/panther/verdict/README.md) | written, tested |
+| 8 | Running it: `panther run 14b@5`, output folder, upload, the Pi | | next |
 
-## The data: three sets that never share a document, prompt or question
+## The data: four sets that never share a document, prompt or question
 
 | Set | Used for | Holds |
 |---|---|---|
-| **GA set** | fitness during the search, choosing the preset, picking the winner | text (chat answers and web text) and benchmark questions (all, and a 900-question subset for the search) |
+| **GA set** | the search's fitness | its own text (chat answers and web text) and the search's 900 benchmark questions |
+| **winner set** | choosing the preset and the winner | its own text and benchmark questions |
 | **distill set** | everything that is built or trained: the importance matrix, GPTQ, distillation | text (chat answers and web text) |
 | **verdict set** | the verdict only, once per contest | text and benchmark questions (plus GSM8K) |
 
-Nothing is trained on the GA set or the verdict set, and nothing chooses anything with the verdict set. QAT's large
+Nothing is trained on the GA, winner or verdict sets, and nothing chooses anything with the verdict set. QAT's large
 text is separate again.
 
 ## Working on it

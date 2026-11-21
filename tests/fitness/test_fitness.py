@@ -75,6 +75,9 @@ def test_each_chunks_kl_is_recovered_from_the_running_mean_and_every_chunk_is_re
     negative = out.replace("       0.00740 ±", "      -0.00740 ±", 1)  # a chunk where the file beats the original
     monkeypatch.setattr(fitness, "perplexity", lambda *a: negative)
     assert len(fitness.kl_chunks(Path("x.gguf"))[2]) == 48
+    nan = out.replace("0.00740 ±    0.00355", "0.00740 ±       -nan", 1)  # llama.cpp prints -nan for one chunk's ±
+    monkeypatch.setattr(fitness, "perplexity", lambda *a: nan)
+    assert len(fitness.kl_chunks(Path("x.gguf"))[2]) == 48
     monkeypatch.setattr(fitness, "perplexity", lambda *a: out.replace("  48 ", "  # ", 1))
     with pytest.raises(AssertionError, match="47 of 48 chunks"):
         fitness.kl_chunks(Path("x.gguf"))
@@ -171,5 +174,6 @@ def test_jobs_wait_for_their_share_and_one_larger_than_everything_runs_alone() -
     for t in threads:
         t.join()
     assert log.index("a out") < log.index("b in")  # b's GPU share was only free once a finished
-    assert log.index("b out") < log.index("c in")  # c is larger than everything: it ran alone
+    c_in = log.index("c in")  # c is larger than everything: it ran alone (b may go before or after it)
+    assert log[c_in + 1] == "c out" and all(log.index(f"{x} out") < c_in for x in "ab" if log.index(f"{x} in") < c_in)
     assert r.used_gpu == r.used_ram == 0
