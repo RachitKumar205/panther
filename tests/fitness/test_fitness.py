@@ -64,6 +64,22 @@ def test_answers_for_fewer_questions_than_the_file_holds_fail(fitness: Fitness, 
         fitness.answers(Path("x.gguf"), "mmlu")
 
 
+def test_each_chunks_kl_is_recovered_from_the_running_mean_and_every_chunk_is_read(fitness, monkeypatch) -> None:
+    monkeypatch.setattr(fitness, "kl_base", lambda: Path("base.kld"))
+    out = (Path(__file__).parents[1] / "fixtures/kl_q6k_48chunks.log").read_text()
+    monkeypatch.setattr(fitness, "perplexity", lambda *a: out)
+    mean, _, each = fitness.kl_chunks(Path("x.gguf"))
+    assert len(each) == 48 and each[0] == pytest.approx(0.00634)
+    assert each.mean() == pytest.approx(mean, abs=1e-5)  # the chunks average to the summary's mean
+    assert each.min() > 0.003 and each.max() < 0.013  # each chunk's own KL, not the running mean (~0.0058)
+    negative = out.replace("       0.00740 ±", "      -0.00740 ±", 1)  # a chunk where the file beats the original
+    monkeypatch.setattr(fitness, "perplexity", lambda *a: negative)
+    assert len(fitness.kl_chunks(Path("x.gguf"))[2]) == 48
+    monkeypatch.setattr(fitness, "perplexity", lambda *a: out.replace("  48 ", "  # ", 1))
+    with pytest.raises(AssertionError, match="47 of 48 chunks"):
+        fitness.kl_chunks(Path("x.gguf"))
+
+
 def test_kl_and_same_top_are_read_from_llama_perplexitys_summary(fitness: Fitness, monkeypatch) -> None:
     monkeypatch.setattr(fitness, "kl_base", lambda: Path("base.kld"))
     out = (Path(__file__).parents[1] / "fixtures/kl_q6k_48chunks.log").read_text()

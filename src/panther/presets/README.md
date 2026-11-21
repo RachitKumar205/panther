@@ -19,7 +19,8 @@ For one model and one budget, `Presets(model).best(budget, score)`:
 2. **Build the ones whose size fits** (`llama-quantize --imatrix original.gguf <PRESET>`), then check the **built
    file's** size against the budget: the file is what the Pi loads.
 3. **Score every preset whose file fits** with the fitness ([`panther.fitness`](../fitness/README.md): flips % +
-   10 × KL on the GA set's text and all its questions; lower is better).
+   10 × KL on the winner set's text and questions; lower is better). The winner set, not the GA set: choosing the best of
+   22 on the search's questions would reward the luckiest, as choosing the winner would (part 7).
 4. **The lowest score competes.** In practice this is nearly always the largest preset that fits, but IQ and K
    presets of similar size can swap places, so it is measured, not assumed.
 5. **If none fits**, the smallest preset competes anyway and the result is marked **unfair** (`"unfair": true`): it
@@ -74,7 +75,7 @@ from panther.presets import Budget, Presets
 
 m = Model.load("14b")                     # part 1 has built its original and importance matrix
 budget = Budget(m, 5)
-competitor = Presets(m).best(budget, Fitness(m, ga_text, ga_questions))  # the GA set, all its questions
+competitor = Presets(m).best(budget, Fitness(m, winner_text, winner_questions))  # the winner set
 budget.fits(path.stat().st_size), budget.ram(path.stat().st_size)
 ```
 

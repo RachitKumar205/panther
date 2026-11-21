@@ -1,8 +1,9 @@
 # Fitness (`panther.fitness`)
 
 Part 3 of the pipeline. One number per file that says how much quantizing changed it, lower is better. It is the
-only fitness in the pipeline: choosing the preset (part 2), ranking candidates in the search (part 4) and picking the
-winner (part 7) all call it, on the **GA set**. The verdict (part 7) uses the same formula on the **verdict set**.
+only fitness in the pipeline: ranking candidates in the search (part 4) calls it on the **GA set**; choosing the
+preset (part 2) and picking the winner (part 7) on the **winner set**. The verdict (part 7) uses the same formula on
+the **verdict set**.
 
 ## The score
 
@@ -61,19 +62,18 @@ can be deleted with it.
 
 Files, so the data can be decided separately:
 
-- the **GA set's text**: one text file (chat answers and web text);
-- the **GA set's questions**, per task, in llama.cpp's formats: one set of files with all of them (presets, the
-  winner) and one with the search's 900 (MMLU 300; HellaSwag, ARC, WinoGrande 200 each). The 900 are their own files:
-  told to run fewer than all questions of a file, llama-perplexity picks them itself, and the results could not be
-  matched to questions.
-- later, the **verdict set's** text and questions, for part 7.
+- the **GA set**: a text file (chat answers and web text) and its questions per task in llama.cpp's formats: the
+  search's 900 (MMLU 300; HellaSwag, ARC, WinoGrande 200 each). They are files of their own: told to run fewer than
+  all questions of a file, llama-perplexity picks them itself, and the results could not be matched to questions.
+- the **winner set**: its own text and questions, the same way (choosing the preset and the winner);
+- the **verdict set**: its own text and questions, for part 7.
 
 ## Decisions
 
 | | Decision | Why | Before (Rachit's master) |
 |---|---|---|---|
 | A | score = flips % + 10 × KL, flips averaged per task | | same |
-| B | Two question sets: the search's 900, and all of the GA set's questions for presets and the winner | each search candidate stays fast; the choices that matter use more questions (less noise). One `Fitness` class, made with either set | same |
+| B | The search's 900 questions (the GA set) for speed; the winner set's for choosing the preset and the winner | each search candidate stays fast; the choices that matter use other questions than the ones the finalists were chosen on (no reward for luck), and more of them. One `Fitness` class, made with either set | the 900 and all selection questions, which included the 900 |
 | C | No "first look" | every candidate gets the full measurement; no hand-set margin | a candidate was scored on a third of the questions first and dropped if it looked clearly worse |
 | D | Every question in a file is run; the 900 are their own files | every result maps to known questions | `--multiple-choice-tasks 300` on the full files |
 | E | No error bars in fitness | the search compares plain scores; error bars only in the verdict | a standard error decided the search's improvements |

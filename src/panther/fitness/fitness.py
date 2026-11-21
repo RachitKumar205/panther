@@ -80,10 +80,23 @@ class Fitness:
 
     def kl(self, file: Path) -> tuple[float, float]:
         """(mean KL, same top word %) against the original's next-word probabilities on the text."""
+        return self.kl_chunks(file)[:2]
+
+    def kl_chunks(self, file: Path) -> tuple[float, float, np.ndarray]:
+        """(mean KL, same top word %, each chunk's KL). llama-perplexity prints, after each chunk, the mean KL of the
+        chunks so far (m_i): chunk i's own KL is i·m_i − (i−1)·m_(i−1). Its 5 decimals make each chunk's KL a little
+        noisy, which can only widen an error bar made from them."""
         out = self.perplexity(file, KL_CONTEXT, "--kl-divergence-base", self.kl_base(), "--kl-divergence",
                               "-c", str(KL_CONTEXT), "-b", str(KL_CONTEXT))
+        # chunk, PPL ± x, ln(PPL ratio) ± x, then the running mean KL
+        running = np.array([float(m) for m in re.findall(
+            r"^\s*\d+\s+[0-9.]+\s+±\s+[0-9.]+\s+-?[0-9.]+\s+±\s+[0-9.]+\s+(-?[0-9.]+)\s+±", out, re.M)])
+        chunks = int(re.search(r"computing over (\d+) chunks", out)[1])
+        assert len(running) == chunks, f"{file.name}: KL for {len(running)} of {chunks} chunks"
+        i = np.arange(1, chunks + 1)
+        each = i * running - np.concatenate([[0.0], (i[:-1]) * running[:-1]])
         return (float(re.search(r"Mean\s+KLD:\s*(-?[0-9.]+)", out)[1]),
-                float(re.search(r"Same top p:\s*([0-9.]+)", out)[1]))
+                float(re.search(r"Same top p:\s*([0-9.]+)", out)[1]), each)
 
     def kl_base(self) -> Path:
         """The original's next-word probabilities on the text, recorded once."""

@@ -57,7 +57,7 @@ class Presets:
 
     def best(self, budget: Budget, fitness: Fitness) -> dict:
         """The competitor for this budget: of the presets whose file fits, the one with the lowest fitness score
-        (fitness: on the GA set's text and all its questions). If none fits, the smallest competes anyway, and the
+        (fitness: on the winner set's text and questions). If none fits, the smallest competes anyway, and the
         record says it is unfair (it has more RAM than we are allowed). Chosen once: saved to
         data/contests/<model>@<budget>/preset.json."""
         record = DATA / "contests" / f"{self.model.name}@{budget.gib:g}" / "preset.json"  # 5 and 5.0: @5
