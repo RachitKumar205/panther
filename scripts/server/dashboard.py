@@ -6,8 +6,8 @@ GET /            the page (scripts/server/dashboard/)
 GET /api/logs?n=3000     the last n lines of every log, oldest first: [{"src": "main" | "b5" ..., "line": ...}]
 GET /api/logs/stream     server-sent events: each new log line as it is written (checked every second)
 GET /api/state   everything the page shows, as JSON: contests and their steps, verdicts and held-out tables, the
-                 Pi's results, GPU memory and the runs' claims, disk, events and notes; "problems": files that could
-                 not be read (the rest of the page still shows).
+                 Pi's results, the QAT finalists block by block, GPU memory and the runs' claims, disk, events and
+                 notes; "problems": files that could not be read (the rest of the page still shows).
 
 The Pi's results come from pi/<contest>.txt in the public Hugging Face repo <user>/panther-status (user: the part of
 PANTHER_HF_REPO before "/"), fetched every 5 minutes into the temporary directory, merged over data/pi/*.txt (older
@@ -177,6 +177,51 @@ def events(n: int) -> list[str]:
     return [x for _, x in sorted(dict.fromkeys(rows), key=lambda r: -r[0])[:n]]
 
 
+def qat(ls: list[str]) -> tuple[int, int, float] | None:
+    """The QAT finalist's Block-AP in this run's final step, if it has one: (blocks done, blocks, minutes a block,
+    measured once a block is done; 4 until then)."""
+    i = max((k for k, x in enumerate(ls) if " step final: start" in x), default=None)
+    q = ls[i:] if i is not None else []
+    n = next((int(m.group(1)) for x in q if (m := re.search(r"block-ap: .* (\d+) blocks$", x))), 0)
+    first = next((clock(x) for x in q if "block-ap block 0: step 0" in x), None)
+    ends = [clock(x) for x in q if re.search(r"block-ap block \d+: validation MSE", x)]
+    return (len(ends), n, ((ends[-1] - first) % 1440) / len(ends) if ends and first is not None else 4.0) if n else None
+
+
+def qats(ln: list[tuple[int, str, list[str]]]) -> list[dict]:
+    """Each contest's QAT finalist, block by block, from its progress lines after this run's final step began: each
+    block's checks [step, train, validation], its error before -> after, the file's, the best step, an early stop,
+    whether the file's block was kept; the run's samples and epochs, Block-AP's ETA, the distillation, the score."""
+    out, t = [], ist()
+    for b, sm, ls in ln:
+        if not (q := qat(ls)):
+            continue
+        ls = ls[max((k for k, x in enumerate(ls) if " step final: start" in x), default=0):]
+        e = {"id": f"{sm.lower()}@{b}", "done": q[0], "total": q[1], "minutes": q[2], "blocks": {}}
+        for x in ls:
+            if m := re.search(r"block-ap: .*?(\d+) epochs x (\d+) samples", x):
+                e["epochs"], e["samples"] = int(m.group(1)), int(m.group(2))
+            elif m := re.search(r"qat distill update (\d+)/(\d+): .* (\S+)$", x):
+                e["distill"] = [int(m.group(1)), int(m.group(2)), float(m.group(3))]
+            elif m := re.search(r" final (\S+ qat): (.*)", x):
+                e["final"] = f"{m.group(1)}: {m.group(2)}"
+            elif m := re.search(r"block-ap block (\d+): (.*)", x):
+                k, s = e["blocks"].setdefault(m.group(1), {"block": int(m.group(1)), "checks": []}), m.group(2)
+                if r := re.match(r"step (\d+)(?:/\d+, train MSE (\S+))?, validation (\S+)$", s):
+                    k["checks"].append([int(r.group(1)), r.group(2) and float(r.group(2)), float(r.group(3))])
+                elif r := re.match(r"stopping early at step (\d+)", s):
+                    k["stopped"] = int(r.group(1))
+                elif s.startswith("trained "):
+                    k["kept"] = True
+                elif r := re.match(r"validation MSE (\S+) -> (\S+) \(best at step (\d+); .*the file's (\S+)\)", s):
+                    k.update(zip(("before", "after", "best", "file"), map(float, r.groups())), best=int(r.group(3)))
+        e["blocks"] = list(e["blocks"].values())
+        end = t.tm_hour * 60 + t.tm_min + (q[1] - q[0]) * q[2]
+        e["eta"] = f"{int(end // 60) % 24:02d}:{int(end % 60):02d}" if q[0] < q[1] else None
+        out.append(e)
+    return out
+
+
 def steps(b: int, sm: str, ls: list[str], halt: tuple[str, int] | None) -> tuple[list[dict], str]:
     """A contest's steps (state, minutes spent and left) and its ETA. halt: ("failed" | "stopped", minute) when the
     run ended without finishing; the step it was in shows that state, timed up to the end."""
@@ -202,6 +247,10 @@ def steps(b: int, sm: str, ls: list[str], halt: tuple[str, int] | None) -> tuple
         elif st == "start":
             spent = (now - at) % 1440
             left = max(1.0, typ - spent)
+            if s == "final" and (q := qat(ls)):  # Block-AP's blocks left, then its distillation and the held-out test
+                left = (q[1] - q[0]) * q[2] + 25
+                row["what"] = (f"QAT finalist: Block-AP block {min(q[0] + 1, q[1])} of {q[1]} ({q[2]:.1f} min a block),"
+                               " then distilled; held-out verdict vs the preset")
             out.append({**row, "state": "running", "spent": spent, "left": left})
             clk = now + left
         else:
@@ -383,7 +432,7 @@ def state() -> dict:
         t = ist()
         out = {"now": time.strftime("%d %b %H:%M:%S", t), "contests": contests(log, ln),
                "pi": pi(), "pi_status": {k: PI[k] for k in ("repo", "at", "error")}, "system": system(),
-               "events": events(400)}
+               "events": events(400), "qats": qats(ln)}
         return {**out, "problems": list(dict.fromkeys(PROBLEMS))}
 
 

@@ -2,7 +2,7 @@
 // Airflow are: a sidebar of sections, list pages that lead to detail pages, and tabs on a detail page.
 //   #/                          overview: what is running and when it ends, headline numbers, latest results
 //   #/contests                  every contest, filterable and sortable
-//   #/contests/<id>[/steps|/events]   one contest: results, step timeline, its events
+//   #/contests/<id>[/steps|/qat|/events]   one contest: results, step timeline, its QAT finalist, its events
 //   #/system                    GPU, the runs' claims, disk, the Pi, files that could not be read
 //   #/logs                      every log, streamed live (server-sent events), searchable
 // Plain DOM and SVG, no libraries.
@@ -156,10 +156,30 @@ function timeline(c, nowStr) {
     <div class="axis"><div></div><div>${clock ? ticks.map((m) => `<span style="left:${X(m)}">${hhmm(m)}</span>`).join("") : ""}</div><div></div></div></div>`;
 }
 
+// the QAT finalist (the GA's best genome trained by Block-AP, then distilled), block by block: errors as Block-AP logs
+// them (5 decimals; small ones in e-notation), each block's change from its start, green better and red worse
+const mse = (v) => (v == null ? "–" : v < 0.01 ? v.toExponential(2) : v.toFixed(5));
+const pct = (b) => sgn(((b.after - b.before) / b.before) * 100, 1) + "%";
+function qatTab(q) {
+  const d = q.distill, cur = q.blocks.find((b) => b.after == null), last = cur?.checks.at(-1);
+  const cell = (b) => { const p = (b.after - b.before) / b.before;
+    return b.after == null ? `<i class="cell now" title="block ${b.block}: training"></i>` : `<i class="cell${b.kept ? " kept" : ""}" title="block ${b.block}: ${pct(b)}${b.kept ? ", kept the file's" : ""}"${b.kept ? "" : ` style="background:color-mix(in srgb, ${p < 0 ? "var(--win)" : "var(--lose)"} ${Math.round(20 + 75 * Math.min(1, Math.abs(p) / 0.6))}%, var(--sunk))"`}></i>`; };
+  return `<div class="grid cols-4">
+      ${kpi("Block-AP blocks", `${q.done}<small>/ ${q.total}</small>`, q.eta ? `ends ~${esc(q.eta)} · ${q.minutes.toFixed(1)} min a block` : `${q.minutes.toFixed(1)} min a block`, prog(q.done / q.total))}
+      ${kpi("Training", `${q.samples ?? "–"}<small>samples</small>`, `${q.epochs ?? "–"} epochs${last ? ` · block ${cur.block} at step ${last[0]}, validation ${mse(last[2])}` : ""}`)}
+      ${kpi("Distillation", d ? `${d[0]}<small>/ ${d[1]} updates</small>` : "–", d ? `KL ${d[2].toFixed(4)}` : "after Block-AP", d ? prog(d[0] / d[1]) : "")}
+      ${kpi("QAT finalist", q.final ? esc(q.final.match(/score (\S+)/)?.[1] ?? "–") : "–", esc(q.final || "not scored yet"))}
+    </div>
+    <div class="card pad section"><h2>Validation change by block <span class="muted">green better, red worse, striped: the file's kept</span></h2>
+      <div class="strip">${Array.from({ length: q.total }, (_, i) => { const b = q.blocks.find((x) => x.block === i); return b ? cell(b) : `<i class="cell" title="block ${i}: waiting"></i>`; }).join("")}</div></div>
+    <div class="card tw section"><table><thead><tr><th>Block</th><th class="n">Validation</th><th class="n hide-s">The file's</th><th class="n">Change</th><th class="n hide-s">Best step</th><th></th></tr></thead><tbody>
+      ${q.blocks.slice().reverse().map((b) => `<tr><td>${b.block}</td><td class="n">${mse(b.checks[0]?.[2] ?? b.before)} → ${b.after == null ? `<span class="muted">${mse(b.checks.at(-1)?.[2])}</span>` : mse(b.after)}</td><td class="n hide-s">${mse(b.file)}</td><td class="n">${b.after == null ? badge("running") : pct(b)}</td><td class="n hide-s">${b.best ?? "–"}</td><td class="muted small">${[b.stopped ? `stopped early at ${b.stopped}` : "", b.kept ? "kept the file's" : ""].filter(Boolean).join(" · ")}</td></tr>`).join("") || '<tr><td colspan="6" class="empty">No block yet.</td></tr>'}</tbody></table></div>`;
+}
+
 pages.contest = (st, el, [id, tab]) => {
   const c = (st.contests || []).find((x) => x.id === id);
   if (!c) { el.innerHTML = `<div class="empty">No contest called ${esc(id)}.</div>`; return; }
-  const v = c.verdict, h = c.held_out, p = (st.pi || []).find((x) => x.contest === c.id);
+  const v = c.verdict, h = c.held_out, p = (st.pi || []).find((x) => x.contest === c.id), q = (st.qats || []).find((x) => x.id === c.id);
   tab = tab || (v ? "" : "steps");
   const base = `#/contests/${c.id}`;
   const lane = `${c.size.toLowerCase()}-b${c.budget}`;
@@ -170,6 +190,8 @@ pages.contest = (st, el, [id, tab]) => {
       <div class="card tw section"><table><thead><tr><th>Step</th><th>Status</th><th class="n">Began</th><th class="n">Took</th></tr></thead><tbody>
       ${c.steps.map((s) => `<tr><td>${esc(LABEL[s.name] || s.name)}</td><td>${badge(s.state)}</td><td class="n">${s.began ?? "–"}</td><td class="n">${s.state === "done" ? dur(s.took) : s.state === "running" ? `${dur(s.spent)} so far` : s.state === "waiting" ? `~${dur(s.left)}` : `${dur(s.spent)}, then ${s.state}`}</td></tr>`).join("")}
       </tbody></table></div>`;
+  } else if (tab === "qat" && q) {
+    body = qatTab(q);
   } else if (tab === "events") {
     body = `<div class="card">${feed(evs.slice(0, 60))}</div>`;
   } else if (v) {
@@ -194,7 +216,7 @@ pages.contest = (st, el, [id, tab]) => {
   el.innerHTML = `
     <div class="ph"><h1>${esc(c.size)} @ ${c.budget} GiB</h1>${badge(c.state)}${v ? verdict(v.verdict) : ""}
       <div class="sub">${esc(c.model || "")}${v ? ` · against ${esc(v.preset)}` : ""}${c.state === "running" ? ` · ends ~${esc(c.eta)}` : ""}</div></div>
-    ${tabs(base, [...(v ? [["", "Results"]] : []), ["steps", "Steps"], ["events", `Events <span class="muted">${evs.length}</span>`]], tab)}
+    ${tabs(base, [...(v ? [["", "Results"]] : []), ["steps", "Steps"], ...(q ? [["qat", "QAT"]] : []), ["events", `Events <span class="muted">${evs.length}</span>`]], tab)}
     ${body}`;
 };
 
