@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from panther.fitness import KL_WEIGHT, Fitness, Score
-from panther.fitness import fitness as fitness_module
+from panther.fitness.resources import Resources
 from panther.model import Model
 from panther.model import model as model_module
 from tests.fitness.questions import ga_set, write_multiple_choice, write_text, write_winogrande
@@ -46,18 +48,18 @@ def test_relative_score_is_a_share_of_the_preset() -> None:
 def test_running_accuracy_gives_each_questions_right_or_wrong(fitness: Fitness, monkeypatch, tmp_path: Path) -> None:
     right = [True, False, False, True, True, False, True, True, False, False, False, True]
     lines = [f"{i}\t{100 * sum(right[:i]) / i:.8f}" for i in range(1, 13)]
-    monkeypatch.setattr(fitness_module, "perplexity", lambda *a: "noise\n" + "\n".join(lines) + "\nmore noise")
+    monkeypatch.setattr(fitness, "perplexity", lambda *a: "noise\n" + "\n".join(lines) + "\nmore noise")
     assert fitness.answers(Path("x.gguf"), "mmlu").tolist() == right
 
 
 def test_winogrande_lines_give_chosen_against_correct(fitness: Fitness, monkeypatch) -> None:
     lines = [f"{i}\t50.0000\t -5.6   -5.7  {c}  {r}" for i, (c, r) in enumerate([(1, 1), (1, 2)] * 5, 1)]
-    monkeypatch.setattr(fitness_module, "perplexity", lambda *a: "\n".join(lines))
+    monkeypatch.setattr(fitness, "perplexity", lambda *a: "\n".join(lines))
     assert fitness.answers(Path("x.gguf"), "winogrande").tolist() == [True, False] * 5
 
 
 def test_answers_for_fewer_questions_than_the_file_holds_fail(fitness: Fitness, monkeypatch) -> None:
-    monkeypatch.setattr(fitness_module, "perplexity", lambda *a: "1\t100.00000000\n2\t50.00000000")
+    monkeypatch.setattr(fitness, "perplexity", lambda *a: "1\t100.00000000\n2\t50.00000000")
     with pytest.raises(AssertionError, match="2 of 12 questions"):
         fitness.answers(Path("x.gguf"), "mmlu")
 
@@ -65,7 +67,7 @@ def test_answers_for_fewer_questions_than_the_file_holds_fail(fitness: Fitness, 
 def test_kl_and_same_top_are_read_from_llama_perplexitys_summary(fitness: Fitness, monkeypatch) -> None:
     monkeypatch.setattr(fitness, "kl_base", lambda: Path("base.kld"))
     out = (Path(__file__).parents[1] / "fixtures/kl_q6k_48chunks.log").read_text()
-    monkeypatch.setattr(fitness_module, "perplexity", lambda *a: out)
+    monkeypatch.setattr(fitness, "perplexity", lambda *a: out)
     assert fitness.kl(Path("x.gguf")) == (0.005810, 95.453)
 
 
@@ -110,3 +112,48 @@ def test_another_text_or_question_file_gets_its_own_record(fitness: Fitness, m: 
     fitness.score(m.original)
     other.score(m.original)
     assert len(list(fitness.reference.iterdir())) == 5 + 3
+
+
+# --- running at once ---
+
+def test_a_files_measurements_run_at_once(fitness: Fitness, monkeypatch) -> None:
+    running, most = [0], [0]
+    lock = threading.Lock()
+    right = "\n".join(f"{i}\t100.00000000" for i in range(1, 13))
+    wino = "\n".join(f"{i}\t50.0\t -5.6   -5.7  1  1" for i in range(1, 11))
+
+    def measure(file, positions, *args):
+        with lock:
+            running[0] += 1
+            most[0] = max(most[0], running[0])
+        time.sleep(0.05)
+        with lock:
+            running[0] -= 1
+        return "Mean    KLD:   0.1 ± 0.0\nSame top p: 90.0 ± 0.1 %" if "--kl-divergence" in args else \
+            wino if "--winogrande" in args else right
+    monkeypatch.setattr(fitness, "perplexity", measure)
+    monkeypatch.setattr(fitness, "kl_base", lambda: Path("base.kld"))
+    monkeypatch.setattr(fitness, "original_answers", lambda task: np.ones(10 if task == "winogrande" else 12, bool))
+    assert fitness.score(Path("x.gguf")).kl == 0.1
+    assert most[0] == 5  # KL and four tasks together
+
+
+def test_jobs_wait_for_their_share_and_one_larger_than_everything_runs_alone() -> None:
+    r = Resources()
+    r.gpu, r.ram = 10, 10
+    log = []
+
+    def job(name: str, gpu: int, ram: int) -> None:
+        with r.hold(gpu, ram):
+            log.append(f"{name} in")
+            time.sleep(0.05)
+            log.append(f"{name} out")
+    threads = [threading.Thread(target=job, args=a) for a in (("a", 6, 1), ("b", 6, 1), ("c", 20, 20))]
+    for t in threads:
+        t.start()
+        time.sleep(0.01)
+    for t in threads:
+        t.join()
+    assert log.index("a out") < log.index("b in")  # b's GPU share was only free once a finished
+    assert log.index("b out") < log.index("c in")  # c is larger than everything: it ran alone
+    assert r.used_gpu == r.used_ram == 0

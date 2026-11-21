@@ -83,7 +83,7 @@ budget.fits(path.stat().st_size), budget.ram(path.stat().st_size)
 | File | What |
 |---|---|
 | `budget.py` | `Budget`: the RAM model for one model and budget (`ram`, `fits`) |
-| `presets.py` | `Presets`: the 22 presets of one model (`size`, `build`, `best`, `delete_unused`) |
+| `presets.py` | `Presets`: the 22 presets of one model (`dry_run`, `size`, `layout`, `build`, `best`, `delete_unused`); `layout` gives the search its starting candidates |
 
 ## Tests (`tests/presets/`)
 

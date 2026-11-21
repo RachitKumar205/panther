@@ -53,7 +53,9 @@ def plain(w: np.ndarray, h: np.ndarray, quantizer, type_: str) -> np.ndarray:
 def gptq(w: np.ndarray, h: np.ndarray, quantizer, type_: str) -> tuple[np.ndarray, Recording]:
     """GPTQ's codes, and the record of what it asked the quantizer."""
     recording = Recording(quantizer)
-    return GPTQ(torch.from_numpy(h)).round(torch.from_numpy(w), type_, recording), recording
+    codes, values = GPTQ(torch.from_numpy(h)).round(torch.from_numpy(w), type_, recording)
+    assert np.array_equal(values, np.concatenate(recording.values, axis=1))  # round() returns the decoded values
+    return codes, recording
 
 
 @pytest.fixture
@@ -108,3 +110,12 @@ def test_llama_cpp_gptq_beats_plain_rounding(case, type_: str) -> None:
     w, h = case
     _, used = gptq(w, h, Quantizer(), type_)
     assert output_error(w, np.concatenate(used.values, axis=1), h) < output_error(w, plain(w, h, Quantizer(), type_), h)
+
+
+def test_output_error_is_the_mean_squared_change_of_the_matrixs_output(case) -> None:
+    w, h = case
+    _, used = gptq(w, h, Grid(), "x")
+    values = np.concatenate(used.values, axis=1)
+    error = GPTQ(torch.from_numpy(h)).output_error(torch.from_numpy(w), values)
+    assert error == pytest.approx(output_error(w, values, h), rel=1e-4)
+    assert GPTQ(torch.from_numpy(h)).output_error(torch.from_numpy(w), w) == 0

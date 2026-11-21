@@ -17,8 +17,8 @@ only after its design is agreed.
 | 1 | The model: download, 16-bit original, importance matrix, 13 type copies (GPTQ) | [`panther.model`](src/panther/model/README.md) | written, tested |
 | 2 | Presets: which are built, which one competes; the RAM model | [`panther.presets`](src/panther/presets/README.md) | written, tested |
 | 3 | Fitness: flips % + 10 × KL against the original, relative to the preset | [`panther.fitness`](src/panther/fitness/README.md) | written, tested |
-| 4 | Search: start candidates, crossover, mutation, repair, stop | | next |
-| 5 | Distillation: block-scale multipliers trained against the original | | |
+| 4 | Search: start candidates, slicing, mutation, repair, stop | [`panther.search`](src/panther/search/README.md) | written, tested |
+| 5 | Distillation: block-scale multipliers trained against the original | | next |
 | 6 | QAT (optional) | | |
 | 7 | The winner (on the GA set) and the verdict (on the verdict set) | | |
 | 8 | Running it: `panther run 14b@5`, output folder, upload, the Pi | | |

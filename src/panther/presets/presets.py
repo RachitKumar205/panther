@@ -30,12 +30,20 @@ class Presets:
     def file(self, preset: str) -> Path:
         return self.dir / f"{preset}.gguf"
 
-    def size(self, preset: str) -> int:
-        """The preset's tensor bytes, by llama-quantize --dry-run (exact, nothing is quantized)."""
+    def dry_run(self, preset: str) -> str:
+        """What llama-quantize --dry-run prints for the preset: each tensor's type and the total size, nothing built."""
         out = subprocess.run(["llama-quantize", "--dry-run", "--imatrix", self.model.imatrix, self.model.original,
                               preset], check=True, capture_output=True, text=True)
-        mib = re.search(r"quant size\s*=\s*([0-9.]+) MiB", out.stdout + out.stderr).group(1)
-        return int(float(mib) * 2**20)
+        return out.stdout + out.stderr
+
+    def size(self, preset: str) -> int:
+        """The preset's tensor bytes (exact)."""
+        return int(float(re.search(r"quant size\s*=\s*([0-9.]+) MiB", self.dry_run(preset))[1]) * 2**20)
+
+    def layout(self, preset: str) -> dict[str, str]:
+        """The type the preset gives each matrix: {"blk.0.attn_q.weight": "IQ3_S", ...}."""
+        return {name: type_.upper()
+                for name, type_ in re.findall(r"\] +(\S+) +- .*\((\w+)\)$", self.dry_run(preset), re.M)}
 
     def build(self, preset: str) -> Path:
         """The preset file, made by llama-quantize from the original and the importance matrix."""

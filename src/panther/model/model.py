@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import gguf
+import numpy as np
 import torch
 import yaml
 from huggingface_hub import HfApi, snapshot_download
@@ -54,6 +56,7 @@ class Model:
     original: Path = field(init=False)  # the 16-bit GGUF: "the original" from the conversion on
     imatrix: Path = field(init=False)
     types: Path = field(init=False)  # the type copies: types/<TYPE>.gguf
+    errors: Path = field(init=False)  # each matrix's output error in each type (errors.json), for the search
 
     def __post_init__(self) -> None:
         self.dir = DATA / "models" / self.name
@@ -61,6 +64,7 @@ class Model:
         self.original = self.dir / "original.gguf"
         self.imatrix = self.dir / "imatrix.gguf"
         self.types = self.dir / "types"
+        self.errors = self.dir / "errors.json"
 
     @classmethod
     def load(cls, name: str) -> Model:
@@ -115,7 +119,8 @@ class Model:
 
     def make_type_copies(self, text: Path) -> None:
         """Every missing type copy: llama-quantize writes the whole model in the type, then GPTQ overwrites every
-        layer matrix and the output layer with error-compensated codes. A stopped build's leftovers are redone."""
+        layer matrix and the output layer with error-compensated codes. Records each matrix's output error in each
+        type (errors.json). A stopped build's leftovers are redone."""
         todo = [t for t in TYPES if not self.copy(t).exists()]
         if not todo:
             return
@@ -139,6 +144,7 @@ class Model:
         for name in matrices:
             readers[input_of(name)].append(name)
 
+        errors = json.loads(self.errors.read_text()) if self.errors.exists() else {}
         quantizer = Quantizer()
         device = "cuda" if torch.cuda.is_available() else "cpu"
         done = set()
@@ -149,11 +155,25 @@ class Model:
                     w = torch.from_numpy(gguf.quants.dequantize(original[name].data, original[name].tensor_type))
                     for t, tensors in copies.items():
                         assert tensors[name].tensor_type.name == t
-                        codes = gptq.round(w.to(device), t, quantizer)
+                        codes, values = gptq.round(w.to(device), t, quantizer)
                         tensors[name].data[...] = codes.reshape(tensors[name].data.shape)
+                        errors.setdefault(name, {})[t] = gptq.output_error(w.to(device), values)
                     done.add(name)
             del hessians  # free this group's H before the next group is collected (they share the GPU)
         assert done == set(matrices), f"no GPTQ codes for {sorted(set(matrices) - done)}"
+
+        # The word table has no input: its output error is each row's change, weighted by how often that token
+        # appears in text (the same units: the squared change per token of what the matrix hands on).
+        counts = np.bincount(self.tokens(text), minlength=original["token_embd.weight"].shape[1])
+        table = gguf.quants.dequantize(original["token_embd.weight"].data, original["token_embd.weight"].tensor_type)
+        for t, tensors in copies.items():
+            if t not in NEEDS_IMPORTANCE:  # those types are never given to the word table
+                word_table = tensors["token_embd.weight"]
+                rounded = gguf.quants.dequantize(word_table.data, word_table.tensor_type)
+                change = ((table - rounded) ** 2).sum(axis=1)  # per row
+                errors.setdefault("token_embd.weight", {})[t] = float(counts @ change / counts.sum())
+        self.errors.with_suffix(".part").write_text(json.dumps(errors))
+        os.replace(self.errors.with_suffix(".part"), self.errors)
 
         for f in files:
             f.data.flush()
@@ -163,8 +183,8 @@ class Model:
     def hessians(self, text: Path, modules: list[str]) -> Iterator[dict[str, torch.Tensor]]:
         """H for each module's input: the original (the download, by transformers) reads the first 65,536 tokens of
         text. A group of modules at a time, as many H as half the free GPU memory holds."""
-        ids = AutoTokenizer.from_pretrained(self.hf)(text.read_text(), return_tensors="pt").input_ids[0]
-        ids = ids[: SEQUENCES * SEQUENCE_LENGTH].view(SEQUENCES, SEQUENCE_LENGTH)  # fails if the text is too short
+        ids = torch.from_numpy(self.tokens(text)[: SEQUENCES * SEQUENCE_LENGTH])
+        ids = ids.view(SEQUENCES, SEQUENCE_LENGTH)  # fails if the text is too short
         model = AutoModelForCausalLM.from_pretrained(self.hf, dtype=torch.bfloat16, device_map="cuda").eval()
         room = torch.cuda.mem_get_info()[0] // 2
         group, size = [], 0
@@ -176,6 +196,10 @@ class Model:
             group.append(name)
             size += h_bytes
         yield collect_hessians(model, ids, group)
+
+    def tokens(self, text: Path) -> np.ndarray:
+        """text as the original's token ids."""
+        return np.array(AutoTokenizer.from_pretrained(self.hf)(text.read_text()).input_ids)
 
     def delete_type_copies(self) -> None:
         """Frees disk. build() makes them again from the kept download (no network)."""

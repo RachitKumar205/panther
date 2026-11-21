@@ -19,6 +19,7 @@ download (once, kept)  →  convert  →  importance matrix  →  type copies (l
 | convert | the 16-bit GGUF; from here on this file *is* "the original" | llama.cpp's `convert_hf_to_gguf.py --outtype bf16` | `original.gguf` |
 | importance matrix | runs the original over the distill set's web text; for every matrix, the output layer included, records each input column's mean squared value (how much each column matters) | `llama-imatrix -c 512 --process-output` | `imatrix.gguf` |
 | type copies | for each of the 13 types: llama-quantize writes the whole model in that type, then GPTQ overwrites every layer matrix and the output layer with error-compensated codes | `llama-quantize --pure`, then our GPTQ calling llama.cpp's quantizer | `types/<TYPE>.gguf` |
+| | and records each matrix's **output error** in each type, which the search's repair steps by (see below) | | `errors.json` |
 
 **Every step is skipped if its file exists.** Every file is written under a `.part` name and renamed when complete,
 so a stopped build never leaves a file that looks finished. A stopped type-copy build redoes all the copies that were
@@ -75,6 +76,11 @@ Measured on Qwen2.5 7B (13 Nov, every matrix in one type, drift = KL from the or
 | Q3_K | 0.134 | 0.064 | −52 % |
 | Q2_K | 0.241 | 0.214 | −11 % |
 | IQ2_XS | 0.333 | 0.302 | −9 % |
+
+**The output error (`errors.json`).** For every matrix and type, GPTQ also records how much the matrix's output
+changes: E[‖(W − Q)x‖²] = trace((W − Q) H (W − Q)ᵀ), from the same W, Q and H it rounds with. The word table has no
+input: its error is each row's change weighted by how often that token appears in the distill set's text (the same
+units: the squared change per token of what the matrix hands on). The search's repair steps by it (part 4).
 
 GPTQ on the GPU and on the CPU can pick a few different codes (the error propagation's floating-point sums differ
 slightly); a build uses the GPU when there is one.
@@ -158,6 +164,8 @@ Run with `uv run pytest tests/model`. Tests that need llama.cpp are skipped wher
 - **GPTQ maths** (stand-in quantizer): with uncorrelated inputs GPTQ equals plain rounding; with correlated inputs it
   lowers the output error; each block gets its own columns' importance; the returned codes are the quantizer's; an
   unused column is zeroed.
+- **Output error**: equals the mean squared change of the matrix's output; recorded for every matrix in every type it
+  may take, growing as bits fall; the word table's counts only the tokens that occur.
 - **GPTQ with llama.cpp**, every type: the codes, decoded by gguf-py (an independent decoder), are exactly the values
   GPTQ compensated for; GPTQ beats plain rounding.
 - **H**: equals the mean outer product of what each input sees, for a layer input and for the output layer; every

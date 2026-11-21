@@ -12,6 +12,8 @@ dependencies = [
     "transformers>=4.45",
     "accelerate>=1.0",
     "huggingface_hub>=0.34",
+    "psutil>=5.9",
+    "ortools>=9.10",
 ]
 
 [dependency-groups]

@@ -42,6 +42,13 @@ All by llama.cpp's `llama-perplexity`:
      question's line.
    - flips = where its right/wrong differs from the original's; then the score.
 
+**Running at once.** A file's five measurements (KL and the four tasks) run at the same time, and the search scores
+several files at once. Every llama-perplexity run first waits for its share of what was free when the run started
+(`Resources`): GPU memory of its file plus 10 % and 4 GiB, and RAM for its next-word probabilities over every position
+it reads at once (float32; 5 sequences of 4,096 positions for the tasks, measured at 12.6 GB on the 1.5B) plus 1 GiB.
+A run larger than everything waits until nothing else runs, then runs alone. The original's records are made once,
+by whichever caller comes first; the others wait for them.
+
 **KL covers half the text.** llama-perplexity scores only the second half of each 2,048-token chunk; the first half
 is the context. So each scored token has at least 1,024 tokens before it, and the text needs twice the tokens one
 wants scored.
@@ -88,7 +95,8 @@ s.relative(preset_score)                         # 100 = the preset's damage
 
 | File | What |
 |---|---|
-| `fitness.py` | `Score` (the numbers, `relative`), `Fitness` (`score`, `kl`, `answers`, the original's records), `perplexity` (runs llama-perplexity) |
+| `fitness.py` | `Score` (the numbers, `relative`), `Fitness` (`score`, `kl`, `answers`, `perplexity`, the original's records) |
+| `resources.py` | `Resources`: the GPU memory and RAM shared by everything running at once (`hold`, `reserve`) |
 
 ## Tests (`tests/fitness/`)
 
@@ -99,3 +107,5 @@ s.relative(preset_score)                         # 100 = the preset's damage
   small question files in llama.cpp's formats: the original scores 0; a quantized file drifts, its score adds up, and
   Q2_K drifts more than Q8_0; every question is answered; the original's records are made once and reused; another
   text or question file gets its own record.
+- **Running at once**: a file's five measurements run together; a job waits for its share of GPU memory and RAM,
+  and one larger than everything runs alone.

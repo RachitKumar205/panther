@@ -39,26 +39,35 @@ class GPTQ:
 
     def __init__(self, h: torch.Tensor) -> None:
         """h: the mean of x xᵀ over the calibration tokens (columns x columns)."""
-        h = h.clone().float()
+        self.h = h.clone().float()
+        h = self.h.clone()
         self.importance = torch.diag(h).clone()  # each column's mean squared input; 0: a column never used
         unused = self.importance == 0
         h[unused, unused] = 1  # keeps H invertible; those columns' weights are zeroed in round()
         h += DAMPING * torch.mean(torch.diag(h)) * torch.eye(len(h), device=h.device)
         self.u = torch.linalg.cholesky(torch.cholesky_inverse(torch.linalg.cholesky(h)), upper=True)
 
-    def round(self, w: torch.Tensor, type_: str, quantizer: Quantizer) -> np.ndarray:
-        """The codes of w (rows x columns) in type_, each block's error moved onto the columns after it."""
+    def round(self, w: torch.Tensor, type_: str, quantizer: Quantizer) -> tuple[np.ndarray, np.ndarray]:
+        """(codes, values) of w (rows x columns) in type_, each block's error moved onto the columns after it. values:
+        what the codes decode to."""
         w = w.clone().float()
         w[:, self.importance == 0] = 0
-        codes = []
+        codes, decoded = [], []
         for a in range(0, w.shape[1], BLOCK):
             b = a + BLOCK
             block_codes, values = quantizer.quantize(w[:, a:b].cpu().numpy(), self.importance[a:b].cpu().numpy(), type_)
             codes.append(block_codes)
+            decoded.append(values)
             error = torch.linalg.solve_triangular(self.u[a:b, a:b], w[:, a:b] - torch.from_numpy(values).to(w.device),
                                                   upper=True, left=False)
             w[:, b:] -= error @ self.u[a:b, b:]
-        return np.concatenate(codes, axis=1)
+        return np.concatenate(codes, axis=1), np.concatenate(decoded, axis=1)
+
+    def output_error(self, w: torch.Tensor, values: np.ndarray) -> float:
+        """How much the matrix's output changes, averaged over the calibration tokens: E[‖(W − Q)x‖²] =
+        trace((W − Q) H (W − Q)ᵀ). The search's repair steps by it."""
+        d = w.float() - torch.from_numpy(values).to(w.device)
+        return float(((d @ self.h) * d).sum())
 
 
 def collect_hessians(model: torch.nn.Module, ids: torch.Tensor, modules: list[str],

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -124,6 +125,7 @@ def stored(m: Model, monkeypatch: pytest.MonkeyPatch) -> Model:
     write_original(m.original)
     write_imatrix(m.original, m.imatrix)
     monkeypatch.setattr(Model, "hessians", fake_hessians)
+    monkeypatch.setattr(Model, "tokens", lambda self, text: np.random.default_rng(0).integers(0, 200, 5000))
     return m
 
 
@@ -145,7 +147,30 @@ def test_every_type_copy_holds_gptq_codes_and_the_original_elsewhere(stored: Mod
         for name in ("blk.1.ffn_down.weight", "output.weight"):  # in full: their bytes are GPTQ's codes
             [h] = next(fake_hessians(stored, None, [input_of(name)])).values()
             w = torch.from_numpy(gguf.quants.dequantize(original[name].data, original[name].tensor_type))
-            assert np.array_equal(copy[name].data, GPTQ(h.to(device)).round(w.to(device), t, Quantizer()))
+            assert np.array_equal(copy[name].data, GPTQ(h.to(device)).round(w.to(device), t, Quantizer())[0])
+
+
+@needs_llama
+def test_every_matrixs_output_error_is_recorded_in_every_type_it_may_take(stored: Model) -> None:
+    stored.make_type_copies(Path("unused"))
+    errors = json.loads(stored.errors.read_text())
+    matrices = {x.name for x in gguf.GGUFReader(stored.original).tensors if len(x.shape) == 2}
+    assert set(errors) == matrices
+    for name, by_type in errors.items():
+        allowed = [t for t in TYPES if not (name == "token_embd.weight" and t in NEEDS_IMPORTANCE)]
+        assert list(by_type) == allowed or set(by_type) == set(allowed)
+        assert by_type["Q2_K"] > by_type["Q4_K"] > by_type["Q8_0"] > 0  # fewer bits, more error
+
+
+@needs_llama
+def test_the_word_tables_error_counts_only_tokens_that_occur(stored: Model, monkeypatch) -> None:
+    monkeypatch.setattr(Model, "tokens", lambda self, text: np.array([5, 5, 5]))  # only token 5
+    stored.make_type_copies(Path("unused"))
+    original = {x.name: x for x in gguf.GGUFReader(stored.original).tensors}["token_embd.weight"]
+    rounded = {x.name: x for x in gguf.GGUFReader(stored.copy("Q4_K")).tensors}["token_embd.weight"]
+    row = (gguf.quants.dequantize(original.data, original.tensor_type)[5]
+           - gguf.quants.dequantize(rounded.data, rounded.tensor_type)[5])
+    assert json.loads(stored.errors.read_text())["token_embd.weight"]["Q4_K"] == pytest.approx(float((row**2).sum()))
 
 
 @needs_llama
