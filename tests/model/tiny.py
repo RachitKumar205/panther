@@ -11,8 +11,12 @@ import gguf
 import numpy as np
 import pytest
 import torch
+from tokenizers.pre_tokenizers import ByteLevel
 
-HIDDEN, INTER, LAYERS, VOCAB, HEADS, KV_HEADS = 256, 512, 2, 64, 4, 2
+# A byte-level vocabulary (one token per byte, plus one merge, which llama.cpp requires): any text tokenizes, so
+# llama-perplexity can run on this model.
+TOKENS = [*sorted(ByteLevel.alphabet()), "th"]
+HIDDEN, INTER, LAYERS, VOCAB, HEADS, KV_HEADS = 256, 512, 2, len(TOKENS), 4, 2
 KV = KV_HEADS * HIDDEN // HEADS
 SHAPES = {"attn_q": (HIDDEN, HIDDEN), "attn_k": (KV, HIDDEN), "attn_v": (KV, HIDDEN), "attn_output": (HIDDEN, HIDDEN),
           "ffn_gate": (INTER, HIDDEN), "ffn_up": (INTER, HIDDEN), "ffn_down": (HIDDEN, INTER)}
@@ -20,6 +24,8 @@ SHAPES = {"attn_q": (HIDDEN, HIDDEN), "attn_k": (KV, HIDDEN), "attn_v": (KV, HID
 needs_llama = pytest.mark.skipif(not (shutil.which("llama-quantize") and find_library("ggml-base")),
                                  reason="needs llama.cpp (llama-quantize and libggml-base)")
 needs_ggml = pytest.mark.skipif(not find_library("ggml-base"), reason="needs llama.cpp's libggml-base")
+needs_perplexity = pytest.mark.skipif(not (shutil.which("llama-perplexity") and shutil.which("llama-quantize")),
+                                      reason="needs llama.cpp (llama-perplexity and llama-quantize)")
 
 
 def bf16(a: np.ndarray) -> np.ndarray:
@@ -40,9 +46,9 @@ def write_original(path: Path, tied: bool = False, seed: int = 0) -> None:
     w.add_file_type(gguf.LlamaFileType.MOSTLY_BF16)
     w.add_tokenizer_model("gpt2")
     w.add_tokenizer_pre("qwen2")
-    w.add_token_list([f"t{i}" for i in range(VOCAB)])
+    w.add_token_list(TOKENS)
     w.add_token_types([1] * VOCAB)
-    w.add_token_merges([])
+    w.add_token_merges(["t h"])
 
     def matrix(name: str, rows: int, cols: int) -> None:
         w.add_tensor(name, bf16(rng.normal(0, 0.05, (rows, cols))), raw_dtype=gguf.GGMLQuantizationType.BF16)

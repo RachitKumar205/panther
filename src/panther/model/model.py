@@ -33,7 +33,7 @@ TYPES = ("IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "Q2_K", "IQ3_XXS", "Q3_
 NEEDS_IMPORTANCE = {"IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS"}
 # llama-quantize takes a preset name; with --pure these four presets are their type everywhere.
 PRESET_NAME = {"Q3_K": "Q3_K_S", "IQ2_S": "IQ2_M", "Q4_K": "Q4_K_S", "Q5_K": "Q5_K_S"}
-# GPTQ's calibration: 128 sequences of 512 tokens of the train split's web text.
+# GPTQ's calibration: 128 sequences of 512 tokens of the distill set's web text.
 SEQUENCES, SEQUENCE_LENGTH = 128, 512
 
 
@@ -76,7 +76,7 @@ class Model:
     # --- the steps; each is skipped if its file exists, and writes under a .part name renamed when complete ---
 
     def build(self, text: Path) -> None:
-        """Every step. text: the train split's web text."""
+        """Every step. text: the distill set's web text."""
         self.download()
         self.convert()
         self.make_imatrix(text)

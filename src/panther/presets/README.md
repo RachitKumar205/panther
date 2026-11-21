@@ -18,13 +18,14 @@ For one model and one budget, `Presets(model).best(budget, score)`:
    have (its tensor bytes) in under a millisecond.
 2. **Build the ones whose size fits** (`llama-quantize --imatrix original.gguf <PRESET>`), then check the **built
    file's** size against the budget: the file is what the Pi loads.
-3. **Score every preset whose file fits** with the fitness (`score`, from part 3: lower is better).
+3. **Score every preset whose file fits** with the fitness ([`panther.fitness`](../fitness/README.md): flips % +
+   10 × KL on the GA set's text and all its questions; lower is better).
 4. **The lowest score competes.** In practice this is nearly always the largest preset that fits, but IQ and K
    presets of similar size can swap places, so it is measured, not assumed.
 5. **If none fits**, the smallest preset competes anyway and the result is marked **unfair** (`"unfair": true`): it
    has more RAM than our file is allowed. The contest still runs, so very small budgets can still be tried.
-6. **The choice is saved** to `data/contests/<model>@<budget>/preset.json` (the preset, its file, every score, its
-   RAM, unfair or not) and returned from there on later calls, so it is made once.
+6. **The choice is saved** to `data/contests/<model>@<budget>/preset.json` (the preset, its file, its RAM, unfair or
+   not, and every scored preset's fitness: score, flips, KL, same top word, flips per task) and returned from there on later calls, so it is made once.
 
 Presets live in `data/models/<model>/presets/<PRESET>.gguf` and are shared by all of a model's budgets (`14b@5` and
 `14b@7` reuse each other's). Each is written under a `.part` name and renamed when complete, and built once.
@@ -68,11 +69,12 @@ Context, KV cache type and overhead are settings in `configs/search.yaml`.
 
 ```python
 from panther.model import Model
+from panther.fitness import Fitness
 from panther.presets import Budget, Presets
 
 m = Model.load("14b")                     # part 1 has built its original and importance matrix
 budget = Budget(m, 5)
-competitor = Presets(m).best(budget, score)   # score(file) -> fitness, from part 3
+competitor = Presets(m).best(budget, Fitness(m, ga_text, ga_questions))  # the GA set, all its questions
 budget.fits(path.stat().st_size), budget.ram(path.stat().st_size)
 ```
 
@@ -85,7 +87,8 @@ budget.fits(path.stat().st_size), budget.ram(path.stat().st_size)
 
 ## Tests (`tests/presets/`)
 
-On part 1's tiny model, with the real llama-quantize (skipped where llama.cpp is not installed) and a stand-in score.
+On part 1's tiny model, with the real llama-quantize (skipped where llama.cpp is not installed) and a stand-in for
+`Fitness` (its own tests are in `tests/fitness/`).
 
 - **RAM model**: the KV cache is keys and values of every layer at the context in 8 bits; it uses the head width the
   GGUF states (the Mistral 24B case); RAM = file + KV cache + overhead; fits up to exactly 1.005 × the budget.

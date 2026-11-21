@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 
 import gguf
-import numpy as np
 import pytest
 
+from panther.fitness import Score
 from panther.model import Model
 from panther.model import model as model_module
 from panther.presets import PRESETS, Budget, Presets
@@ -80,6 +80,18 @@ def test_every_preset_name_is_one_llama_quantize_knows(m: Model) -> None:
     assert all(Presets(m).size(p) > 0 for p in PRESETS)
 
 
+class StandIn:
+    """Stands in for part 3's Fitness: each file's score from a function of its name; records what it scored."""
+
+    def __init__(self, score=lambda name: 1.0) -> None:
+        self.by_name, self.scored = score, []
+
+    def score(self, file: Path) -> Score:
+        self.scored.append(file.stem)
+        value = self.by_name(file.stem)
+        return Score(value, value, 0.0, 100.0, {})
+
+
 def budget_between(m: Model, small: str, large: str) -> Budget:
     """A budget the small preset's file fits and the large one's does not (the tiny model needs fractions of a GiB)."""
     presets = Presets(m)
@@ -92,41 +104,38 @@ def budget_between(m: Model, small: str, large: str) -> Budget:
 def test_the_competitor_is_the_fitting_preset_with_the_lowest_score(m: Model) -> None:
     presets = Presets(m)
     budget = budget_between(m, "Q3_K_M", "Q4_K_S")
-    scored = []
-
-    def score(file: Path) -> float:
-        scored.append(file.stem)
-        return {"Q2_K": 1.0, "IQ3_XS": 0.5}.get(file.stem, 2.0)  # IQ3_XS: best here, though not the largest
-    result = presets.best(budget, score)
+    fitness = StandIn(lambda name: {"Q2_K": 1.0, "IQ3_XS": 0.5}.get(name, 2.0))  # IQ3_XS best, not the largest
+    result = presets.best(budget, fitness)
+    scored = fitness.scored
     built = [p for p in PRESETS if presets.file(p).exists()]  # only presets whose dry-run size fits were built
     fitting = [p for p in built if budget.fits(presets.file(p).stat().st_size)]
     assert result["preset"] == "IQ3_XS" and not result["unfair"]
     assert set(scored) == set(fitting) and "Q4_K_S" not in scored and "Q3_K_M" in scored
     assert "Q8_0" not in built
-    assert result["scores"]["Q2_K"] == 1.0 and result["ram_gib"] <= 1.005 * budget.gib
+    assert result["scores"]["Q2_K"]["score"] == 1.0 and result["ram_gib"] <= 1.005 * budget.gib
 
 
 @needs_llama
 def test_the_choice_is_saved_and_reused(m: Model, tmp_path: Path) -> None:
     presets = Presets(m)
     budget = budget_between(m, "Q3_K_M", "Q4_K_S")
-    first = presets.best(budget, lambda f: 1.0)
+    first = presets.best(budget, StandIn())
     assert json.loads((tmp_path / f"contests/{m.name}@{budget.gib:g}/preset.json").read_text()) == first
-    assert presets.best(budget, lambda f: pytest.fail("scored again")) == first
+    assert presets.best(budget, StandIn(lambda name: pytest.fail("scored again"))) == first
 
 
 @needs_llama
-def test_a_whole_budget_names_one_record_and_numpy_scores_are_saved(m: Model, tmp_path: Path) -> None:
-    Presets(m).best(Budget(m, 1), lambda f: np.float32(0.5))
+def test_a_whole_budget_names_one_record(m: Model, tmp_path: Path) -> None:
+    Presets(m).best(Budget(m, 1), StandIn())
     assert (tmp_path / f"contests/{m.name}@1/preset.json").exists()
-    assert Presets(m).best(Budget(m, 1.0), lambda f: pytest.fail("scored again"))["scores"]["IQ1_S"] == 0.5
+    assert Presets(m).best(Budget(m, 1.0), StandIn(lambda name: pytest.fail("scored again")))
 
 
 @needs_llama
 def test_if_none_fits_the_smallest_competes_and_is_marked_unfair(m: Model) -> None:
     presets = Presets(m)
     budget = Budget(m, 0.001)  # below the KV cache and overhead alone
-    result = presets.best(budget, lambda f: 1.0)
+    result = presets.best(budget, StandIn())
     assert result["preset"] == min(PRESETS, key=presets.size) and result["unfair"]
     assert result["ram_gib"] > budget.gib
 
@@ -135,7 +144,7 @@ def test_if_none_fits_the_smallest_competes_and_is_marked_unfair(m: Model) -> No
 def test_presets_no_contest_chose_are_deleted(m: Model) -> None:
     presets = Presets(m)
     budget = budget_between(m, "Q3_K_M", "Q4_K_S")
-    chosen = presets.best(budget, lambda f: 0.0 if f.stem == "Q2_K" else 1.0)["preset"]
+    chosen = presets.best(budget, StandIn(lambda name: 0.0 if name == "Q2_K" else 1.0))["preset"]
     presets.build("Q8_0")
     presets.delete_unused()
     assert [f.stem for f in presets.dir.glob("*.gguf")] == [chosen]

@@ -6,9 +6,10 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 
+from panther.fitness import Fitness
 from panther.model import Model
 from panther.model.model import DATA
 from panther.presets.budget import Budget
@@ -46,20 +47,22 @@ class Presets:
             os.replace(part, self.file(preset))
         return self.file(preset)
 
-    def best(self, budget: Budget, score: Callable[[Path], float]) -> dict:
-        """The competitor for this budget: of the presets whose file fits, the one with the lowest score (fitness,
-        lower is better). If none fits, the smallest competes anyway, and the record says it is unfair (it has more
-        RAM than we are allowed). Chosen once: saved to data/contests/<model>@<budget>/preset.json."""
+    def best(self, budget: Budget, fitness: Fitness) -> dict:
+        """The competitor for this budget: of the presets whose file fits, the one with the lowest fitness score
+        (fitness: on the GA set's text and all its questions). If none fits, the smallest competes anyway, and the
+        record says it is unfair (it has more RAM than we are allowed). Chosen once: saved to
+        data/contests/<model>@<budget>/preset.json."""
         record = DATA / "contests" / f"{self.model.name}@{budget.gib:g}" / "preset.json"  # 5 and 5.0: @5
         if record.exists():
             return json.loads(record.read_text())
         sizes = {p: self.size(p) for p in PRESETS}
         fitting = [p for p in PRESETS if budget.fits(sizes[p]) and budget.fits(self.build(p).stat().st_size)]
         candidates = fitting or [min(PRESETS, key=sizes.get)]
-        scores = {p: float(score(self.build(p))) for p in candidates}  # a plain float, for JSON
-        preset = min(scores, key=scores.get)
-        result = {"preset": preset, "file": str(self.file(preset)), "scores": scores, "unfair": not fitting,
-                  "ram_gib": budget.ram(self.file(preset).stat().st_size) / 2**30}
+        scores = {p: fitness.score(self.build(p)) for p in candidates}
+        preset = min(scores, key=lambda p: scores[p].score)
+        result = {"preset": preset, "file": str(self.file(preset)), "unfair": not fitting,
+                  "ram_gib": budget.ram(self.file(preset).stat().st_size) / 2**30,
+                  "scores": {p: asdict(s) for p, s in scores.items()}}
         record.parent.mkdir(parents=True, exist_ok=True)
         record.with_suffix(".part").write_text(json.dumps(result, indent=1))
         os.replace(record.with_suffix(".part"), record)

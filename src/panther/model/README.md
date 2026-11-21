@@ -17,7 +17,7 @@ download (once, kept)  →  convert  →  importance matrix  →  type copies (l
 |---|---|---|---|
 | download | the original's weights at the commit pinned in `configs/models.yaml` (about 2 bytes per weight). Done once and kept: everything after it runs from it without the network | `huggingface_hub.snapshot_download` | `hf/` (`hf/.downloaded` when complete) |
 | convert | the 16-bit GGUF; from here on this file *is* "the original" | llama.cpp's `convert_hf_to_gguf.py --outtype bf16` | `original.gguf` |
-| importance matrix | runs the original over the train split's web text; for every matrix, the output layer included, records each input column's mean squared value (how much each column matters) | `llama-imatrix -c 512 --process-output` | `imatrix.gguf` |
+| importance matrix | runs the original over the distill set's web text; for every matrix, the output layer included, records each input column's mean squared value (how much each column matters) | `llama-imatrix -c 512 --process-output` | `imatrix.gguf` |
 | type copies | for each of the 13 types: llama-quantize writes the whole model in that type, then GPTQ overwrites every layer matrix and the output layer with error-compensated codes | `llama-quantize --pure`, then our GPTQ calling llama.cpp's quantizer | `types/<TYPE>.gguf` |
 
 **Every step is skipped if its file exists.** Every file is written under a `.part` name and renamed when complete,
@@ -56,7 +56,7 @@ like every layer matrix:
 Plain rounding rounds every weight on its own. But what matters is the matrix's **output**, and the inputs it gets
 are correlated, so an error in one column can be partly cancelled by adjusting others. GPTQ does that:
 
-1. **H** = the mean of x xᵀ over 65,536 tokens (128 × 512) of the train split's web text, x being what the original
+1. **H** = the mean of x xᵀ over 65,536 tokens (128 × 512) of the distill set's web text, x being what the original
    (loaded from the download by transformers) feeds that matrix. q/k/v read the same input and share one H; so do
    gate/up; the output layer reads the final hidden state. H is collected for a group of inputs at a time (as many as
    fit in half the free GPU memory).
@@ -124,7 +124,7 @@ will give the first number).
 from panther.model import Model
 
 m = Model.load("14b")                # or the full name from configs/models.yaml
-m.build(Path("train-web.txt"))       # the train split's web text (the data part makes it)
+m.build(Path("distill-web.txt"))     # the distill set's web text (the data part makes it)
 m.original, m.imatrix, m.copy("Q4_K")
 m.delete_type_copies()
 ```
