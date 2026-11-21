@@ -33,10 +33,11 @@ def correct(completion: str, answer: str) -> bool:
 
 
 class LlamaServer:
-    """llama-server on a GGUF, for as long as the `with` block lasts. It holds its share of GPU memory and RAM."""
+    """llama-server on a GGUF, for as long as the `with` block lasts. It holds its share of GPU memory and RAM.
+    chat: each prompt is a user's message, put in the model's own chat template (the GGUF's)."""
 
-    def __init__(self, file: Path, resources: Resources) -> None:
-        self.file, self.resources = file, resources
+    def __init__(self, file: Path, resources: Resources, chat: bool = False) -> None:
+        self.file, self.resources, self.chat = file, resources, chat
 
     def __enter__(self) -> LlamaServer:
         size = self.file.stat().st_size
@@ -47,7 +48,7 @@ class LlamaServer:
             self.url = f"http://127.0.0.1:{s.getsockname()[1]}"
         self.process = subprocess.Popen(
             ["llama-server", "-m", self.file, "--port", self.url.rsplit(":", 1)[1], "-np", str(SLOTS),
-             "-c", str(SLOTS * CONTEXT), "-ngl", "99", "--no-webui"],
+             "-c", str(SLOTS * CONTEXT), "-ngl", "99", "--no-webui", *(["--jinja"] if self.chat else [])],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         while True:  # until it answers; it fails loudly if it stops (a port taken, a broken file)
             assert self.process.poll() is None, f"llama-server on {self.file.name} stopped (exit {self.process.poll()})"
@@ -63,12 +64,19 @@ class LlamaServer:
         self.hold.__exit__(*exc)
 
     def complete(self, prompts: list[str]) -> list[str]:
-        """Greedy completions, 8 at once."""
-        def one(prompt: str) -> str:
-            body = {"prompt": prompt, "n_predict": TOKENS, "temperature": 0, "stop": STOP, "cache_prompt": False}
-            request = urllib.request.Request(self.url + "/completion", json.dumps(body).encode(),
+        """Greedy completions, 8 at once. chat: the whole exchange (the templated message, then the answer; the end of
+        the model's turn stops it)."""
+        def post(path: str, body: dict) -> dict:
+            request = urllib.request.Request(self.url + path, json.dumps(body).encode(),
                                              {"Content-Type": "application/json"})
-            return json.loads(urllib.request.urlopen(request, timeout=3600).read())["content"]
+            return json.loads(urllib.request.urlopen(request, timeout=3600).read())
+
+        def one(prompt: str) -> str:
+            if self.chat:
+                prompt = post("/apply-template", {"messages": [{"role": "user", "content": prompt}]})["prompt"]
+            body = {"prompt": prompt, "n_predict": TOKENS, "temperature": 0, "stop": [] if self.chat else STOP,
+                    "cache_prompt": False}
+            return (prompt if self.chat else "") + post("/completion", body)["content"]
         with ThreadPoolExecutor(SLOTS) as pool:
             return list(pool.map(one, prompts))
 

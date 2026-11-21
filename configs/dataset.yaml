@@ -1,0 +1,82 @@
+# The data (src/panther/data). Every source is pinned to a Hugging Face commit. The dataset's folder is named by
+# this file's content: a changed definition builds a new dataset, never reusing an old one.
+
+seed: 20261121
+
+# Counts web tokens when filling the web sets (tokenizer files only). Every Qwen2.5 size shares it.
+tokenizer: {repo: Qwen/Qwen2.5-1.5B-Instruct, revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306}
+
+# FineWeb-Edu documents, each hashed (with the seed) into one shard per set, so no document is in two sets. A set
+# takes whole documents of its shard in hash order until its token target; documents outside doc_tokens are skipped.
+# qat: (4,096 + 64) windows of 2,048 tokens.
+web:
+  repo: HuggingFaceFW/fineweb-edu
+  revision: 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
+  files: [sample/10BT/000_00000.parquet]
+  doc_tokens: [128, 8192]
+  tokens: {distill: 300000, ga: 100000, winner: 100000, verdict: 150000, qat: 8519680}
+
+# First messages of OpenAssistant conversations (Apache-2.0): English, first prompter messages, not deleted, review
+# passed, 20-1000 characters. Deduplicated; any sharing overlap_words consecutive words with a benchmark question is
+# dropped; then a fixed shuffle is cut into the sets. Each model answers them itself (greedy, in its chat template).
+chat:
+  repo: OpenAssistant/oasst1
+  revision: fdf72ae0827c1cda404aff25b6603abec9e3399b
+  file: data/train-00000-of-00001-b42a775f407cee45.parquet
+  chars: [20, 1000]
+  overlap_words: 8
+  prompts: {distill: 300, ga: 150, winner: 150, verdict: 150}
+
+# Benchmark questions (flips and accuracy only; never trained on).
+#   verdict: a seeded sample of the official test set (all: every question)
+#   ga:      from the non-test splits in `from` (the search's 900)
+#   winner:  more from the same pool, none of the GA's (capped at what is left)
+#   fewshot: worked examples that are part of how a question is asked
+# Selection questions (ga, winner) skip any question whose text is in the full test split or the few-shot examples.
+benchmarks:
+  mmlu:
+    repo: cais/mmlu
+    revision: c30699e8356da336a370243923dbaf21066bb9fe
+    files: {dev: all/dev-00000-of-00001.parquet, validation: all/validation-00000-of-00001.parquet,
+            test: all/test-00000-of-00001.parquet}
+    verdict: {split: test, n: 2000}
+    from: [validation]
+    ga: 300
+    winner: 1000
+    fewshot: {split: dev, n: all}  # the standard 5 per subject, in every MMLU prompt
+  hellaswag:
+    repo: Rowan/hellaswag
+    revision: 218ec52e09a7e7462a5400043bb9a69a41d06b76
+    files: {train: data/train-00000-of-00001.parquet, validation: data/validation-00000-of-00001.parquet}
+    verdict: {split: validation, n: 2000}
+    from: [train]
+    ga: 200
+    winner: 800
+  arc_challenge:
+    repo: allenai/ai2_arc
+    revision: 210d026faf9955653af8916fad021475a3f00453
+    files: {train: ARC-Challenge/train-00000-of-00001.parquet,
+            validation: ARC-Challenge/validation-00000-of-00001.parquet,
+            test: ARC-Challenge/test-00000-of-00001.parquet}
+    verdict: {split: test, n: all}
+    from: [train, validation]
+    ga: 200
+    winner: 800
+  winogrande:
+    repo: allenai/winogrande
+    revision: 01e74176c63542e6b0bcb004dcdea22d94fb67b5
+    files: {train: winogrande_xl/train-00000-of-00001.parquet,
+            validation: winogrande_xl/validation-00000-of-00001.parquet}
+    verdict: {split: validation, n: all}
+    from: [train]
+    ga: 200
+    winner: 800
+  gsm8k:  # the verdict only: answering by generation is too slow for every candidate
+    repo: openai/gsm8k
+    revision: 740312add88f781978c0658806c59bc2815b9866
+    files: {train: main/train-00000-of-00001.parquet, test: main/test-00000-of-00001.parquet}
+    verdict: {split: test, n: 500}
+    fewshot: {split: train, n: 5}
+
+# QAT's samples (part 6): windows of the model's own tokens from the qat web text.
+qat: {length: 2048, validation: 64}
