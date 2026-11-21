@@ -1,5 +1,5 @@
-# Pinned model revisions (Hugging Face commit SHAs) and the llama.cpp build they are measured with.
-# configs/model_configs/*.json vendored so geometry is known offline.
+# Pinned model revisions (Hugging Face commit SHAs, resolved 2026-11-10).
+# config.json for each is vendored in configs/model_configs/ so geometry checks run offline.
 models:
   - name: Qwen2.5-1.5B-Instruct
     repo: Qwen/Qwen2.5-1.5B-Instruct
@@ -12,10 +12,10 @@ models:
     revision: cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8
   - name: Mistral-24B-Instruct
     repo: mistralai/Mistral-Small-24B-Instruct-2501
-    revision: 9527884be6e5616bdd54de542f9ae13384489724
+    revision: 9527884be6e5616bdd54de542f9ae13384489724  # resolved 2026-11-12; Apache-2.0
   - name: Mistral-22B-Instruct
     repo: mistralai/Mistral-Small-Instruct-2409
-    revision: 4600506f6b13c7ef89e61a54263f4c9bf483de30
+    revision: 4600506f6b13c7ef89e61a54263f4c9bf483de30  # resolved 2026-11-14; Mistral Research License (non-commercial)
 
 llama_cpp:
   repo: https://github.com/ggml-org/llama.cpp

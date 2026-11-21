@@ -1,5 +1,3 @@
-# Reference implementation of the previous pipeline (read-only reference).
-panther-old/
 
 # Python / uv
 __pycache__/

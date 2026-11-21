@@ -13,6 +13,6 @@ contests:
   7: {searched: [Qwen2.5-14B-Instruct, Mistral-22B-Instruct, Mistral-24B-Instruct]}
 
 # Quantization types a matrix may take, and those needing importance-matrix data
-# (never used for the token embedding, or the output layer without imatrix_process_output).
+# (never used for the token embedding).
 formats: [IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, Q2_K, IQ3_XXS, Q3_K, IQ3_S, IQ4_XS, Q4_K, Q5_K, Q6_K, Q8_0]
 requires_imatrix: [IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS]
