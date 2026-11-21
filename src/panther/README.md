@@ -196,6 +196,13 @@ the file's scales, decoded exactly as llama.cpp decodes them), with the gradient
 scales stay as the file has them (training them drifted on the 14B); distillation trains them afterwards. Every 512
 steps the block is validated on 64 held-back samples and the best point is kept.
 
+**Speed** (measured 21 Nov on the 14B, the same bytes and numbers either way): every sample's hidden states (two
+caches, original and quantized) are held on the GPU and in RAM when both fit the run's claim beside the block in
+training (14B: up to 2,048 samples), otherwise on disk. /s3 reads 1.9 GB/s alone but only ~540 MB/s reading and
+writing together, which made 3/4 of a step (~290 ms); in memory a step is the compute (~85 ms). A matrix's
+quantized weights are decoded once per new codes (every 16 steps, and at a check), not every step (~25 % of the
+compute). 14B Block-AP: ~16 h at 4,096 samples on disk, ~2 h at 2,048 in memory.
+
 **Precision**, each number in the one that suits its job:
 
 | What | Precision | Why |
@@ -238,8 +245,9 @@ activations to 8 bits).
 
 1. Each of the best 3 genomes is built undistilled (the same file the search scored, so its results are reused) and
    distilled (one distillation at a time, while the files already built are scored beside it). With `qat[=N]`
-   (decision 22) a 7th: the best genome's undistilled file trained by Block-AP on the N QAT samples
-   (`rewrite/<model>/qat/tokens-N.npz`, drawn in the fetch container), then distilled. The files are scored on all
+   (decision 22) the best genome's undistilled file is trained by Block-AP on the N QAT samples
+   (`rewrite/<model>/qat/tokens-N.npz`, drawn in the fetch container), then distilled, and it is the only file
+   distilled: it competes with the 3 undistilled files. The files are scored on all
    selection questions and the select text; the lowest score wins.
 2. **Guard**: the winner's relative score against the preset on all selection questions and the select text, with
    its 95 % interval; if the whole interval is above 100, a warning is logged and stored (`guard.warning`). The

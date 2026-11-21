@@ -64,19 +64,25 @@ def final(model: str, budget: int) -> None:
                             lambda m: note(f"{name} {m}"))
             labels[name] = f"d:{sha(files[name])[:12]}"
             jobs.append(ex.submit(scored, name))
-        for k in items:
-            distilled(k, files[f"{k} undistilled"])
+        k = next(iter(items))  # the GA's best
+        for j in [] if QAT else items:  # with QAT, only its finalist is distilled (the undistilled still compete)
+            distilled(j, files[f"{j} undistilled"])
         if QAT:  # optional (./panther run SIZE@B qat[=N]): the best genome's file trained by Block-AP, then distilled
             from panther.blockap import train
-            k, h = next(iter(items)), Model(model).matrices[0].cols
+            h = Model(model).matrices[0].cols
             stage1 = path(model, "tuned", f"{budget}-{digest([sha(files[f'{k} undistilled']), qat_ins(model)])}"
                                           "-blockap.gguf")
             if not stage1.exists():
                 cache, t = DATA / "cache" / "blockap" / stage1.stem, np.load(qat_file(model, QAT))
-                disk(2 * 2 * QAT * 2048 * h, "Block-AP's hidden-state caches (2 x samples x 2,048 x hidden, 16-bit)")
-                with hold(40 * GIB, trained(model)[1]):  # a block in training (a resume: every trained block too)
+                c = QAT * 2048 * h * 2  # one hidden-state cache (samples x 2,048 x hidden, 16-bit)
+                need = (40 * GIB + c, trained(model)[1] + c)  # a block in training (a resume: every trained block too)
+                memory = need[0] <= hold.total[0] and need[1] <= hold.total[1]  # original's on the GPU, quantized in RAM
+                if not memory:
+                    disk(2 * c, "Block-AP's hidden-state caches (2 x samples x 2,048 x hidden, 16-bit)")
+                    need = (40 * GIB, trained(model)[1])
+                with hold(*need):
                     train(bf16, files[f"{k} undistilled"], t["block"], t["val"], stage1, cache,
-                          lambda m: note(f"{k} {m}"))
+                          lambda m: note(f"{k} {m}"), memory)
                 shutil.rmtree(cache)
             distilled(f"{k} qat", stage1)
         preset_sel = jobs[0].result()

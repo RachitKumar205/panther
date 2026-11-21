@@ -73,7 +73,7 @@ class QLinear(torch.nn.Module):
 
     def __init__(self, lin: torch.nn.Linear, t: str, raw: np.ndarray, rows: torch.Tensor | None = None):
         super().__init__()
-        self.t, self.n, self.codes = t, 0, None
+        self.t, self.n, self.codes, self.dec = t, 0, None, None
         w = lin.weight.detach().float()
         self.W = torch.nn.Parameter((w if rows is None else w[rows]).clone())  # kept in the file's row order
         self.register_buffer("back", None if rows is None else torch.argsort(rows))  # to PyTorch's order
@@ -84,7 +84,9 @@ class QLinear(torch.nn.Module):
         if self.codes is None or self.n % RECODE == 0:
             self.codes = fq.encode(self.t, self.W, self.st)
         self.n += 1
-        w = fq.fake(self.t, self.W, self.st, self.codes)
+        if self.dec is None or self.dec[0] is not self.codes:  # the codes' weights, decoded once per new codes
+            self.dec = (self.codes, fq.decode(self.t, {**self.st, **self.codes}))
+        w = self.dec[1] + (self.W - self.W.detach())  # exactly fq.fake(t, W, st, codes): its value, W's gradient
         if self.back is not None:
             w = w[self.back]
         return torch.nn.functional.linear(x, w.to(x.dtype), None if self.bias is None else self.bias.to(x.dtype))
@@ -114,9 +116,12 @@ def _run(layer, x, rope):
     return y[0] if isinstance(y, tuple) else y
 
 
-def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst: Path, cache: Path, log=print) -> Path:
+def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst: Path, cache: Path, log=print,
+          memory: bool = False) -> Path:
     """Block-AP on every layer matrix of `start` (a GGUF in fakequant's types) against `original` (the 16-bit
-    GGUF), on token samples (n x length); the trained codes and scales go into dst, a copy of start."""
+    GGUF), on token samples (n x length); the trained codes and scales go into dst, a copy of start. memory: the
+    hidden-state caches are held on the GPU (original) and in RAM (quantized) instead of on disk, whose ~540 MB/s for
+    reads and writes together made 3/4 of a 14B step; the same bytes either way."""
     import gguf
     from gguf.quants import dequantize
     from transformers import AutoModelForCausalLM
@@ -130,14 +135,20 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
     cache.mkdir(parents=True, exist_ok=True)
     assert n % BATCH == 0 and len(val) % BATCH == 0
     # bf16 bits, stored as int16 (numpy has no bf16): exact, and no fp16 overflow
-    mode = "r+" if (cache / "fp.npy").exists() else "w+"
-    fp, qn = (np.lib.format.open_memmap(cache / f"{k}.npy", mode, np.int16, (n, L, H)) for k in ("fp", "q"))
+    if memory:
+        fp, qn = (torch.empty((n, L, H), dtype=torch.bfloat16, device=d) for d in ("cuda", "cpu"))
+    else:
+        mode = "r+" if (cache / "fp.npy").exists() else "w+"
+        fp, qn = (np.lib.format.open_memmap(cache / f"{k}.npy", mode, np.int16, (n, L, H)) for k in ("fp", "q"))
     pos = torch.arange(L, device="cuda")[None].expand(BATCH, L)
     rope_layer = m.model.rotary_emb.cuda()
     rope = rope_layer(torch.zeros(1, device="cuda", dtype=torch.bfloat16), pos)
     rd, wr, pending = ThreadPoolExecutor(2), ThreadPoolExecutor(2), deque()
 
-    def put(arr, i, x):  # hidden states -> the disk cache, in the background; at most 8 batches wait in memory
+    def put(arr, i, x):  # hidden states -> the cache (on disk: in the background; at most 8 batches wait in memory)
+        if memory:
+            arr[i:i + len(x)] = x
+            return
         while len(pending) >= 8:
             pending.popleft().result()
         pending.append(wr.submit(arr.__setitem__, slice(i, i + len(x)),
@@ -147,8 +158,9 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
         while pending:
             pending.popleft().result()
 
-    def get(arr, i):
-        return rd.submit(lambda: torch.from_numpy(np.array(arr[i:i + BATCH])).view(torch.bfloat16))
+    def get(arr, i):  # in memory, a view: row i is only written after it is used (epoch 1's targets, xq run anew)
+        return rd.submit(lambda: arr[i:i + BATCH] if memory else
+                         torch.from_numpy(np.array(arr[i:i + BATCH])).view(torch.bfloat16))
 
     def saved(b: int) -> Path:
         return cache / f"block-{b}.npz"
@@ -172,8 +184,9 @@ def train(original: Path, start: Path, tokens: np.ndarray, val: np.ndarray, dst:
             return x, xq
         # the quantized cache is one block behind after a finished block ("lag"): the next block's first epoch
         # runs the block before it on what it reads and writes that back, instead of a pass of its own
-        lag = state.get("lag", 0) if (state.get("done"), state.get("clean"), state.get("n")) == (done, True, n) else 0
-        if (state.get("done"), state.get("clean"), state.get("n")) != (done, True, n):
+        kept = not memory and (state.get("done"), state.get("clean"), state.get("n")) == (done, True, n)
+        lag = state.get("lag", 0) if kept else 0
+        if not kept:
             if done:
                 log(f"block-ap: resuming after block {done - 1}; rebuilding the caches through the trained blocks")
             for i in range(0, n, BATCH):
