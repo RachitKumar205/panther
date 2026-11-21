@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Panther's one command. On your machine it syncs the code to the server and runs the same command there.
+#
+#   ./panther build                    build the image on the server (llama.cpp at the pinned commit, uv.lock)
+#   ./panther run 14b@5 [--qat N]      a contest (model size @ RAM budget in GiB), detached: fetch, then run
+#   ./panther logs 14b@5               follow that contest's log
+#   ./panther stop 14b@5               stop it; run it again to continue where it stopped
+#   ./panther status                   containers, GPU, disk
+#   ./panther test                     the tests, on your machine
+#
+# Settings: deploy/server/local.env (git-ignored; see deploy/server/local.env.example).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+. "$ROOT/deploy/server/local.env"
+W="${PANTHER_WORK:-/s3/panther/work}"
+
+if [ ! -d "$W" ]; then  # your machine: sync the code, then the same command on the server
+  case "${1:-help}" in
+    help) sed -n 2,11p "$0"; exit 0 ;;
+    test) cd "$ROOT" && exec uv run pytest -q ;;
+  esac
+  SSH="ssh -o ControlPath=$PANTHER_SSH_CONTROL -o ProxyCommand=false -o BatchMode=yes"
+  $SSH "$PANTHER_HOST" true || { echo "no connection to the server: open it first (deploy/README.md)"; exit 1; }
+  rsync -a --delete -e "$SSH" --exclude .git/ --exclude .venv/ --exclude /data/ --exclude __pycache__/ \
+    --exclude .pytest_cache/ --exclude .ruff_cache/ --exclude .claude/ "$ROOT/" "$PANTHER_HOST:$W/repo/"
+  exec $SSH "$PANTHER_HOST" "$W/repo/panther $(printf '%q ' "$@")"
+fi
+
+# --- on the server ---
+DATA="$W/data"
+IMAGE=localhost/panther:current
+P=(podman --root "$W/containers/storage" --runroot "/run/user/$(id -u)/panther" --events-backend file
+   --tmpdir "$W/tmp/libpod")
+mkdir -p "$DATA/logs" "$DATA/scratch" "$W/tmp/libpod"
+export TMPDIR="$W/tmp"
+
+contest() {  # 14b@5 -> size, id
+  [[ "${1:-}" =~ ^([0-9.]+[bB])@([0-9]+)$ ]] || { echo "write a contest like 14b@5, not '${1:-}'"; exit 1; }
+  size="${BASH_REMATCH[1],,}"; id="${size}@${BASH_REMATCH[2]}"
+}
+
+container() {  # container network|gpu NAME MEMORY COMMAND...: one container, waited for; its exit code
+  local kind="$1" name="panther-${2//@/-}" memory="$3"; shift 3
+  local a=(--name "$name" --userns keep-id --cap-drop all --security-opt no-new-privileges --read-only --init
+           -v "$W/repo:/work/repo:ro,z" -v "$DATA:/work/data:rw,z" --tmpfs /tmp:rw,size=16g --shm-size 2g
+           --pids-limit 4096 --cpus "${PANTHER_CPUS:-40}" --memory "$memory" --memory-swap "$memory"
+           -e "HF_TOKEN=${HF_TOKEN:-}")
+  case "$kind" in
+    network) a+=(--network pasta) ;;
+    gpu) a+=(--network none --device nvidia.com/gpu=all --security-opt label=disable -e HF_HUB_OFFLINE=1) ;;
+  esac
+  "${P[@]}" rm -f --ignore "$name" >/dev/null
+  "${P[@]}" run --rm "${a[@]}" "$IMAGE" "$@"
+}
+
+case "${1:-}" in
+  build)
+    commit="$(awk '/^llama_cpp:/{f=1} f&&/commit:/{print $2; exit}' "$W/repo/configs/models.yaml")"
+    "${P[@]}" build --memory 64g -t "$IMAGE" --build-arg "LLAMA_COMMIT=$commit" \
+      --build-arg "JOBS=${PANTHER_CPUS:-40}" -f "$W/repo/deploy/server/Containerfile" "$W/repo" ;;
+  run)
+    contest "${2:-}"; shift 2
+    "${P[@]}" image exists "$IMAGE" || "$0" build
+    (setsid nohup "$0" _run "$id" "$@" >> "$DATA/logs/$id.log" 2>&1 < /dev/null & echo $! > "$DATA/logs/$id.pid")
+    echo "started $id; ./panther logs $id" ;;
+  _run)  # detached: the fetch container (network, no GPU), then the run container (GPU, no network)
+    contest "$2"; run_args=("${@:3}")
+    echo "$(date '+%F %T') $id: started"
+    container network "$id-fetch" 32g /opt/venv/bin/python -m panther fetch "$size"
+    container gpu "$id-run" "${PANTHER_RAM:-100g}" /opt/venv/bin/python -m panther run "$id" "${run_args[@]}"
+    echo "$(date '+%F %T') $id: done" ;;
+  logs) contest "${2:-}"; exec tail -n 50 -f "$DATA/logs/$id.log" ;;
+  stop)
+    contest "${2:-}"
+    [ -f "$DATA/logs/$id.pid" ] && kill "$(cat "$DATA/logs/$id.pid")" 2>/dev/null || true
+    for step in fetch run; do "${P[@]}" stop -t 30 --ignore "panther-${id//@/-}-$step" >/dev/null; done
+    echo "$(date '+%F %T') $id: stopped (run it again to continue)" | tee -a "$DATA/logs/$id.log" ;;
+  status)
+    "${P[@]}" ps --format '{{.Names}}\t{{.Status}}' | grep '^panther-' || echo "no Panther container running"
+    nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader
+    df -h "$DATA" | tail -1 ;;
+  *) sed -n 2,11p "$0" ;;
+esac
