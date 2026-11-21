@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import random
+from functools import cache
 from pathlib import Path
 
 import gguf
@@ -15,6 +16,13 @@ from panther.model import TYPES, Model
 from panther.model.model import NEEDS_IMPORTANCE, bits
 from panther.presets import Budget
 from panther.presets.budget import GIB, TOP
+
+
+@cache
+def reader(path: Path) -> gguf.GGUFReader:
+    """A GGUF's reader, parsed once and kept: every candidate reads the same original and type copies."""
+    return gguf.GGUFReader(path)
+
 
 BOTTOM = 0.99  # a genome must use at least 0.99 × the budget (the top, 1.005 ×, is Budget's)
 
@@ -171,8 +179,8 @@ class Genes:
     def build(self, genome: Genome, path: Path) -> Path:
         """The genome's GGUF: each matrix's bytes copied from the type copy of its type; metadata, norms and biases
         from the original. No quantizing."""
-        original = gguf.GGUFReader(self.model.original)
-        copies = {t: {x.name: x for x in gguf.GGUFReader(self.model.copy(t)).tensors} for t in set(genome.values())}
+        original = reader(self.model.original)
+        copies = {t: {x.name: x for x in reader(self.model.copy(t)).tensors} for t in set(genome.values())}
         writer = gguf.GGUFWriter(path, original.fields["general.architecture"].contents())
         for f in original.fields.values():
             if not f.name.startswith("GGUF.") and f.name not in ("general.architecture", "general.file_type"):
