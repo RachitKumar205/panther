@@ -19,8 +19,8 @@ only after its design is agreed.
 | 3 | Fitness: flips % + 10 × KL against the original, relative to the preset | [`panther.fitness`](src/panther/fitness/README.md) | written, tested |
 | 4 | Search: start candidates, slicing, mutation, repair, stop | [`panther.search`](src/panther/search/README.md) | written, tested |
 | 5 | Distillation: one multiplier per block of 256 weights and every norm, trained against the original, written back into the file | [`panther.distill`](src/panther/distill/README.md) | written, tested |
-| 6 | QAT (optional): Block-AP, the weights trained block by block on the grid (Rachit's, ported) | | next |
-| 7 | The winner (on the GA set) and the verdict (on the verdict set) | | |
+| 6 | QAT (optional): Block-AP, the weights trained block by block on llama.cpp's own grids (Rachit's, ported leaner) | [`panther.qat`](src/panther/qat/README.md) | written, tested |
+| 7 | The winner (on the GA set) and the verdict (on the verdict set) | | next |
 | 8 | Running it: `panther run 14b@5`, output folder, upload, the Pi | | |
 
 ## The data: three sets that never share a document, prompt or question
