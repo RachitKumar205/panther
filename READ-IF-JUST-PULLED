@@ -35,8 +35,27 @@ GOOD TO KNOW
   deletable), so one big model at a time on 500 GB.
 - QAT is off by default. ./panther run 1.5b@1 --qat 1024 adds your Block-AP (ported, with all four of your fixes).
   Its disk cache is large: ~52 GB for the 1.5B at 1,024 samples, much more for the big models.
-- This is the first real run, so something may break. Every step fails loudly with a traceback in the log. Please
-  send us the log if it does.
+- This is the first real run, so something may break. Every step fails loudly with a traceback in the log. Whenever
+  it stops, please paste us the last ~50 lines of ./panther logs 1.5b@1. We fix it, you run the same command again,
+  and it continues where it stopped.
 - If 1.5b@1 gets through, next would be 7b@3.
+
+IF YOU (OR YOUR CLAUDE) WANT TO REUSE WHAT IS ALREADY DOWNLOADED ON ANTON
+
+Reuse raw downloads only, never anything made from them:
+
+- Datasets: nothing to do. Our containers use the same Hugging Face cache as yours (HF_HOME=/work/data/cache/hf
+  under the same data folder) and the same pinned revisions, so the dataset build reads them from the cache.
+- Model weights: our run keeps the downloaded Hugging Face weights in data/models/<model>/hf/ (GPTQ, the tokenizer,
+  distillation and QAT read them), so it downloads them once (3 GB for the 1.5B) unless they are already in the
+  cache. You may link your existing 16-bit GGUF to save the conversion, but only if it was converted at the
+  llama.cpp commit in configs/models.yaml:
+      ln -s ../../store/Qwen2.5-1.5B-Instruct/Qwen2.5-1.5B-Instruct-BF16.gguf data/models/Qwen2.5-1.5B-Instruct/original.gguf
+- Do NOT reuse or link: imatrix files, type copies, preset files, KL references (.kld), the old data/splits/, or
+  any records. They were made under the old definitions (14 types, no output-layer importance data, other
+  calibration text, another distillation loss). Our pipeline would treat them as done, skip remaking them, and the
+  results would be silently wrong.
+- Do not change the pipeline's code to point at the old layout: the paths are part of how each step knows it is
+  done.
 
 Thanks!
