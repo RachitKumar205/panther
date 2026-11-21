@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from panther.fitness import KL_WEIGHT, Fitness, Score
+from panther.fitness import resources as resources_module
 from panther.fitness.resources import Resources
 from panther.model import Model
 from panther.model import model as model_module
@@ -177,3 +178,11 @@ def test_jobs_wait_for_their_share_and_one_larger_than_everything_runs_alone() -
     c_in = log.index("c in")  # c is larger than everything: it ran alone (b may go before or after it)
     assert log[c_in + 1] == "c out" and all(log.index(f"{x} out") < c_in for x in "ab" if log.index(f"{x} in") < c_in)
     assert r.used_gpu == r.used_ram == 0
+
+
+def test_free_ram_respects_a_containers_memory_limit(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / "memory.max").write_text("10737418240\n")  # a 10 GiB limit
+    (tmp_path / "memory.current").write_text("4294967296\n")  # 4 GiB used
+    real = Path
+    monkeypatch.setattr(resources_module, "Path", lambda p: real(str(p).replace("/sys/fs/cgroup", str(tmp_path))))
+    assert Resources.free_ram() <= 6 * 1024**3
