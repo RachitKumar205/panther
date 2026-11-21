@@ -15,8 +15,8 @@ only after its design is agreed.
 |---|---|---|---|
 | 0 | Data: train / select / test splits (Q&A and web text), benchmark questions | | on hold |
 | 1 | The model: download, 16-bit original, importance matrix, 13 type copies (GPTQ) | [`panther.model`](src/panther/model/README.md) | written, tested |
-| 2 | Presets: which are built, which one competes | | next |
-| 3 | Fitness: flips % + 10 × KL, relative to the preset | | |
+| 2 | Presets: which are built, which one competes; the RAM model | [`panther.presets`](src/panther/presets/README.md) | written, tested |
+| 3 | Fitness: flips % + 10 × KL, relative to the preset | | next |
 | 4 | Search: start candidates, crossover, mutation, repair, stop | | |
 | 5 | Distillation: block-scale multipliers trained against the original | | |
 | 6 | QAT (optional) | | |
