@@ -1,0 +1,42 @@
+Hi Rachit! We rebuilt the pipeline on the `jia` branch (one plain package, a README per part, ~180 tests). It hasn't
+run end to end on a real model yet, and anton is yours. Could you run it?
+
+SETUP, ONCE
+
+    git fetch origin && git checkout jia
+    # keep your existing deploy/server/local.env: same variable names as yours
+    # add HF_TOKEN=... to it if your Hugging Face account needs it for the Mistral models
+    ./panther build          # the image: CUDA 12.9, llama.cpp at the pinned commit, our env from uv.lock
+
+FIRST RUN, THE SMALLEST CONTEST
+
+    ./panther run 1.5b@1     # fetch container (network: data + model), then run container (GPU, no network)
+    ./panther logs 1.5b@1    # follow it
+    ./panther stop 1.5b@1    # if it needs stopping
+
+If it stops for any reason (./panther stop, a crash, a reboot), just run ./panther run 1.5b@1 again: it continues
+where it stopped. The costliest place to stop is while the type copies are being built.
+
+WHAT IT DOES, IN ORDER
+
+1. Builds the dataset from pinned sources (four disjoint sets: GA, winner, distill, verdict).
+2. Downloads the model and makes 13 GPTQ type copies.
+3. Picks the preset on the winner set.
+4. Runs the genetic search on the GA set.
+5. Distills the 3 finalists, then picks the winner on the winner set.
+6. Gives a verdict against the preset on the verdict set: WIN / TIE / LOSE with a 95 % interval.
+
+The verdict prints at the end. Everything is saved under data/contests/Qwen2.5-1.5B-Instruct@1/ (preset.json,
+search.json, winner.json, verdict.json, winner.gguf).
+
+GOOD TO KNOW
+
+- Disk: ~13 GB for the 1.5B. The big models need ~190 GB each (the download is kept, the type copies are
+  deletable), so one big model at a time on 500 GB.
+- QAT is off by default. ./panther run 1.5b@1 --qat 1024 adds your Block-AP (ported, with all four of your fixes).
+  Its disk cache is large: ~52 GB for the 1.5B at 1,024 samples, much more for the big models.
+- This is the first real run, so something may break. Every step fails loudly with a traceback in the log. Please
+  send us the log if it does.
+- If 1.5b@1 gets through, next would be 7b@3.
+
+Thanks!
