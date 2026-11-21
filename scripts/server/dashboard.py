@@ -191,24 +191,26 @@ def qat(ls: list[str]) -> tuple[int, int, float] | None:
 def qats(ln: list[tuple[int, str, list[str]]]) -> list[dict]:
     """Each contest's QAT finalist, block by block, from its progress lines after this run's final step began: each
     block's checks [step, train, validation], its error before -> after, the file's, the best step, an early stop,
-    whether the file's block was kept; the run's samples and epochs, Block-AP's ETA, the distillation, the score."""
+    whether the file's block was kept; the run's samples, epochs and steps a block, Block-AP's ETA, every distillation
+    update [update, of, KL], the score, and its latest lines (checks left out)."""
     out, t = [], ist()
     for b, sm, ls in ln:
         if not (q := qat(ls)):
             continue
         ls = ls[max((k for k, x in enumerate(ls) if " step final: start" in x), default=0):]
-        e = {"id": f"{sm.lower()}@{b}", "done": q[0], "total": q[1], "minutes": q[2], "blocks": {}}
+        e = {"id": f"{sm.lower()}@{b}", "done": q[0], "total": q[1], "minutes": q[2], "blocks": {}, "distill": []}
         for x in ls:
             if m := re.search(r"block-ap: .*?(\d+) epochs x (\d+) samples", x):
                 e["epochs"], e["samples"] = int(m.group(1)), int(m.group(2))
             elif m := re.search(r"qat distill update (\d+)/(\d+): .* (\S+)$", x):
-                e["distill"] = [int(m.group(1)), int(m.group(2)), float(m.group(3))]
+                e["distill"].append([int(m.group(1)), int(m.group(2)), float(m.group(3))])
             elif m := re.search(r" final (\S+ qat): (.*)", x):
                 e["final"] = f"{m.group(1)}: {m.group(2)}"
             elif m := re.search(r"block-ap block (\d+): (.*)", x):
                 k, s = e["blocks"].setdefault(m.group(1), {"block": int(m.group(1)), "checks": []}), m.group(2)
-                if r := re.match(r"step (\d+)(?:/\d+, train MSE (\S+))?, validation (\S+)$", s):
-                    k["checks"].append([int(r.group(1)), r.group(2) and float(r.group(2)), float(r.group(3))])
+                if r := re.match(r"step (\d+)(?:/(\d+), train MSE (\S+))?, validation (\S+)$", s):
+                    k["checks"].append([int(r.group(1)), r.group(3) and float(r.group(3)), float(r.group(4))])
+                    e["steps"] = int(r.group(2) or e.get("steps", 0))
                 elif r := re.match(r"stopping early at step (\d+)", s):
                     k["stopped"] = int(r.group(1))
                 elif s.startswith("trained "):
@@ -216,6 +218,8 @@ def qats(ln: list[tuple[int, str, list[str]]]) -> list[dict]:
                 elif r := re.match(r"validation MSE (\S+) -> (\S+) \(best at step (\d+); .*the file's (\S+)\)", s):
                     k.update(zip(("before", "after", "best", "file"), map(float, r.groups())), best=int(r.group(3)))
         e["blocks"] = list(e["blocks"].values())
+        e["lines"] = [x for x in ls if re.search(r"block-ap|qat", x)
+                      and not re.search(r": step \d+|distill update", x)][-10:]
         end = t.tm_hour * 60 + t.tm_min + (q[1] - q[0]) * q[2]
         e["eta"] = f"{int(end // 60) % 24:02d}:{int(end % 60):02d}" if q[0] < q[1] else None
         out.append(e)

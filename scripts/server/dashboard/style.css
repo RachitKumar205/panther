@@ -34,7 +34,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 "Recursive", ui-sans-serif, system-ui, sans-serif; font-variation-settings: "MONO" 0, "CASL" 0; }
-.mono, time, .kpi .v, .badge, .pill, td.n, .v { font-variation-settings: "MONO" 1, "CASL" 0; font-variant-numeric: tabular-nums; }
+.mono, .num, .ticks, time, .kpi .v, .badge, .pill, td.n, .v { font-variation-settings: "MONO" 1, "CASL" 0; font-variant-numeric: tabular-nums; }
 .muted { color: var(--muted); } td.n { white-space: nowrap; } .small { font-size: 12px; }
 a { color: inherit; text-decoration: none; }
 a.link { color: var(--ink); text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; }
@@ -222,9 +222,16 @@ mark { background: var(--accent-soft); color: inherit; border-radius: 2px; }
   .kpi .v { font-size: 20px; } .ph h1 { font-size: 20px; }
   td, th { padding-left: 8px; padding-right: 8px; }
 }
-/* the QAT tab's block strip: one cell a block */
+/* charts (an experiment's block and distillation curves) */
+.chart { height: 210px; } .chart svg { width: 100%; height: 100%; display: block; }
+.chart .empty { height: 100%; display: grid; place-items: center; padding: 0; border: 1px dashed var(--rule); border-radius: 8px; }
+.ticks text { fill: var(--muted); font-size: 10.5px; } .ticks line { stroke: var(--rule); }
+.legend i { display: inline-block; width: 12px; height: 3px; border-radius: 2px; vertical-align: 3px; margin-right: 6px; }
+
+/* an experiment's block strip: one cell a block */
 .strip { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 4px; }
-.cell { display: block; height: 24px; border-radius: 4px; background: var(--sunk); }
+.cell { display: block; height: 24px; border-radius: 4px; background: var(--sunk); cursor: pointer; }
 .cell.kept { background: repeating-linear-gradient(135deg, var(--tie-soft) 0 3px, transparent 3px 6px), var(--sunk); }
 .cell.now { background: var(--run-soft); box-shadow: inset 0 0 0 1.5px var(--run); }
+.cell.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
 @media (max-width: 600px) { .strip { grid-template-columns: repeat(12, minmax(0, 1fr)); } }

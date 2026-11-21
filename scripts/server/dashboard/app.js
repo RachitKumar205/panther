@@ -2,7 +2,9 @@
 // Airflow are: a sidebar of sections, list pages that lead to detail pages, and tabs on a detail page.
 //   #/                          overview: what is running and when it ends, headline numbers, latest results
 //   #/contests                  every contest, filterable and sortable
-//   #/contests/<id>[/steps|/qat|/events]   one contest: results, step timeline, its QAT finalist, its events
+//   #/contests/<id>[/steps|/events]   one contest: results, step timeline, its events
+//   #/experiments               EfficientQAT runs: a contest's QAT finalist (Block-AP on its best genome, distilled)
+//   #/experiments/<id>[/blocks|/distill]   one run (e.g. 14b@5): its blocks, each block's checks, the distillation
 //   #/system                    GPU, the runs' claims, disk, the Pi, files that could not be read
 //   #/logs                      every log, streamed live (server-sent events), searchable
 // Plain DOM and SVG, no libraries.
@@ -15,7 +17,8 @@ const BPW = { IQ1_S: 1.56, IQ1_M: 1.75, IQ2_XXS: 2.06, IQ2_XS: 2.31, IQ2_S: 2.5,
   IQ4_XS: 4.25, Q4_K: 4.5, Q5_K: 5.5, Q6_K: 6.56, Q8_0: 8.5 };
 const TASKS = [["mmlu", "MMLU"], ["hellaswag", "HellaSwag"], ["arc_challenge", "ARC"], ["winogrande", "WinoGrande"], ["gsm8k", "GSM8K"]];
 const LABEL = { store: "Store", error: "Error estimates", refs: "References", preset: "Preset", ga: "Genetic search", final: "Final", bundle: "Pi bundle" };
-const ui = { state: null, last: 0, path: null, filter: "all", sort: null, asc: true, logq: "", logk: "all" };
+const ui = { state: null, last: 0, path: null, block: null, picked: false, filter: "all", sort: null, asc: true, logq: "", logk: "all" };
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const dark = () => document.documentElement.dataset.theme === "dark" || (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
 const typeColor = (t) => { const b = Math.min(1, Math.max(0, ((BPW[t] ?? 4) - 1.5) / 7)); return `hsl(${200 - 175 * b} ${42 + 18 * b}% ${dark() ? 58 : 44}%)`; };
 const mins = (s) => (s ? +s.slice(0, 2) * 60 + +s.slice(3, 5) : null);
@@ -35,6 +38,40 @@ const pifail = (p) => `<span class="badge failed" title="${esc(p.failed)}">Pi ch
 const fits = (p) => (p && p.fits ? ` <span class="badge ${p.fits.startsWith("FITS") ? "done" : "failed"}" title="real peak RAM within the bundle's budget?">${esc(p.fits)}</span>` : "");
 const tabs = (base, list, on) => `<nav class="tabs">${list.map(([k, n]) => `<a href="${base}${k ? "/" + k : ""}" class="${k === on ? "on" : ""}">${n}</a>`).join("")}</nav>`;
 
+// --- charts -----------------------------------------------------------------------------------------------------------
+function nice(lo, hi, n = 4) {
+  const span = hi - lo || Math.abs(hi) || 1, raw = span / n, mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => span / s <= n) || 10 * mag;
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-12; v += step) out.push(+v.toPrecision(12));
+  return out;
+}
+function chart(el, { series, refs = [], marks = [], vlines = [], xdomain = null, dots = false, xfmt = (x) => x, yfmt = (y) => y, empty = "no points yet" }) {
+  if (!el) return;
+  const w = el.clientWidth || 600, h = el.clientHeight || 200, L = 46, R = 10, T = 10, B = 22;
+  const pts = series.flatMap((s) => s.pts);
+  if (new Set(pts.map((p) => p[0])).size < (xdomain ? 1 : 2)) { el.innerHTML = `<div class="empty">${esc(empty)}</div>`; return; }
+  const ys = pts.map((p) => p[1]).concat(refs.map((r) => r.y)), xs = pts.map((p) => p[0]);
+  let y0 = Math.min(...ys), y1 = Math.max(...ys); const pad = (y1 - y0) * 0.15 || Math.abs(y1) * 0.1 || 1; y0 -= pad; y1 += pad;
+  const x0 = xdomain ? xdomain[0] : Math.min(...xs), x1 = xdomain ? xdomain[1] : Math.max(...xs) === x0 ? x0 + 1 : Math.max(...xs);
+  const X = (x) => L + ((x - x0) / (x1 - x0)) * (w - L - R), Y = (y) => T + (1 - (y - y0) / (y1 - y0)) * (h - T - B);
+  let s = `<svg viewBox="0 0 ${w} ${h}"><g class="ticks">`;
+  for (const t of nice(y0, y1, 4)) s += `<line x1="${L}" x2="${w - R}" y1="${Y(t)}" y2="${Y(t)}"/><text x="${L - 6}" y="${Y(t) + 3.5}" text-anchor="end">${esc(yfmt(t))}</text>`;
+  for (const t of (xdomain && xdomain[1] % 512 === 0 ? Array.from({ length: xdomain[1] / 512 + 1 }, (_, i) => i * 512).filter((t, i, a) => w > 520 || i % 2 === 0 || i === a.length - 1) : nice(x0, x1, Math.max(2, Math.floor(w / 110))))) s += `<text x="${X(t)}" y="${h - 5}" text-anchor="${X(t) > w - R - 14 ? "end" : X(t) < L + 14 ? "start" : "middle"}">${esc(xfmt(t))}</text>`;
+  s += `</g>`;
+  for (const r of refs) s += `<line x1="${L}" x2="${w - R}" y1="${Y(r.y)}" y2="${Y(r.y)}" stroke="${r.color}" stroke-dasharray="4 4"/><text x="${w - R}" y="${Y(r.y) - 5}" text-anchor="end" font-size="10.5" fill="${r.color}">${esc(r.label)}</text>`;
+  for (const se of series) {
+    if (!se.pts.length) continue;
+    const d = se.pts.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+    s += `<path d="${d}" fill="none" stroke="${se.color}" stroke-width="${se.width || 2}" ${se.dash ? `stroke-dasharray="${se.dash}"` : ""} stroke-linejoin="round"/>`;
+  }
+  for (const v of vlines) s += `<line x1="${X(v.x)}" x2="${X(v.x)}" y1="${T}" y2="${h - B}" stroke="${v.color}" stroke-dasharray="3 3"/><text x="${X(v.x) - 4}" y="${T + 10}" text-anchor="end" font-size="10.5" fill="${v.color}">${esc(v.label)}</text>`;
+  if (dots) for (const se of series) for (const p of se.pts) s += `<circle cx="${X(p[0]).toFixed(1)}" cy="${Y(p[1]).toFixed(1)}" r="2.5" fill="${se.color}"/>`;
+  for (const m of marks) s += `<circle cx="${X(m.x)}" cy="${Y(m.y)}" r="4.5" fill="${css("--panel")}" stroke="${m.color}" stroke-width="2"/>`;
+  el.innerHTML = s + `</svg>`;
+}
+const trend = (pts, k = 2) => pts.map((p, i) => { const w = pts.slice(Math.max(0, i - k), i + k + 1); return [p[0], w.reduce((a, q) => a + q[1], 0) / w.length]; });
+
 // --- shared pieces ------------------------------------------------------------------------------------------------------
 // diff and ci are drawn around 0 (the preset); relative scores and accuracy points each get their own scale
 function scale(cs) {
@@ -51,8 +88,24 @@ function forest(v, S) {
   const tip = rel(v) ? `relative score ${vnum(v)} (100 = the preset, lower is better), 95% interval ${vci(v)}` : `ours − preset ${sgn(v.diff)} points, 95% interval ${vci(v)}`;
   return `<div class="fp" style="--c:${col}" title="${esc(tip)}"><i class="z" style="left:${X(0)}"></i><i class="ln" style="left:${X(v.ci[0])};right:calc(100% - ${X(v.ci[1])})"></i><i class="pt" style="left:${X(v.diff)}"></i></div>`;
 }
+// a QAT run (the GA's best genome trained by Block-AP, then distilled; it competes as the finalist "ga1 qat"): its
+// blocks, then the distillation, then the score; a contest that failed or stopped first ends it the same way
+const qatById = (st, id) => (st.qats || []).find((q) => q.id === id);
+const qname = (q) => `${q.id.toUpperCase().replace("@", " @ ")} GiB`;
+const score = (q) => esc(q.final?.match(/score (\S+)/)?.[1] ?? "–");
+function qatState(q, st) {
+  const c = (st.contests || []).find((x) => x.id === q.id), done = q.blocks.filter((b) => b.after != null), d = q.distill.at(-1);
+  if (q.final) return { state: "done", step: "scored", done, c };
+  if (c && (c.state === "failed" || c.state === "stopped")) return { state: c.state, step: c.state, done, c };
+  if (done.length < q.total) return { state: "running", step: `Block-AP · block ${done.length + 1} of ${q.total}`, frac: done.length / q.total, eta: q.eta, etaWhat: "Block-AP ends", tab: "blocks", done, c };
+  return { state: "running", step: d ? `distillation · update ${d[0]} of ${d[1]}` : "distillation starting", frac: d ? d[0] / d[1] : 0, tab: "distill", done, c };
+}
 function jobs(st) {
   const out = [];
+  for (const q of st.qats || []) {
+    const qs = qatState(q, st);
+    if (qs.state === "running") out.push({ ...qs, name: `QAT · ${qname(q)}`, kind: "experiment", href: `#/experiments/${q.id}/${qs.tab}` });
+  }
   for (const c of (st.contests || []).filter((c) => c.state === "running")) {
     const r = c.steps.find((s) => s.state === "running");
     out.push({ name: `${c.size} @ ${c.budget} GiB`, kind: "contest", href: `#/contests/${c.id}/steps`, step: r ? LABEL[r.name] || r.name : "running",
@@ -63,7 +116,7 @@ function jobs(st) {
 function kind(x) {
   if (/ note: |: refused: /.test(x)) return "note";
   if (/FAILED|Traceback|stopped by the user/.test(x)) return "fail";
-  if (/held-out test vs|: done$/.test(x)) return "res";
+  if (/held-out test vs|: done$|validation MSE .* -> | qat: score/.test(x)) return "res";
   return "quiet";
 }
 function feed(list) {
@@ -156,30 +209,10 @@ function timeline(c, nowStr) {
     <div class="axis"><div></div><div>${clock ? ticks.map((m) => `<span style="left:${X(m)}">${hhmm(m)}</span>`).join("") : ""}</div><div></div></div></div>`;
 }
 
-// the QAT finalist (the GA's best genome trained by Block-AP, then distilled), block by block: errors as Block-AP logs
-// them (5 decimals; small ones in e-notation), each block's change from its start, green better and red worse
-const mse = (v) => (v == null ? "–" : v < 0.01 ? v.toExponential(2) : v.toFixed(5));
-const pct = (b) => sgn(((b.after - b.before) / b.before) * 100, 1) + "%";
-function qatTab(q) {
-  const d = q.distill, cur = q.blocks.find((b) => b.after == null), last = cur?.checks.at(-1);
-  const cell = (b) => { const p = (b.after - b.before) / b.before;
-    return b.after == null ? `<i class="cell now" title="block ${b.block}: training"></i>` : `<i class="cell${b.kept ? " kept" : ""}" title="block ${b.block}: ${pct(b)}${b.kept ? ", kept the file's" : ""}"${b.kept ? "" : ` style="background:color-mix(in srgb, ${p < 0 ? "var(--win)" : "var(--lose)"} ${Math.round(20 + 75 * Math.min(1, Math.abs(p) / 0.6))}%, var(--sunk))"`}></i>`; };
-  return `<div class="grid cols-4">
-      ${kpi("Block-AP blocks", `${q.done}<small>/ ${q.total}</small>`, q.eta ? `ends ~${esc(q.eta)} · ${q.minutes.toFixed(1)} min a block` : `${q.minutes.toFixed(1)} min a block`, prog(q.done / q.total))}
-      ${kpi("Training", `${q.samples ?? "–"}<small>samples</small>`, `${q.epochs ?? "–"} epochs${last ? ` · block ${cur.block} at step ${last[0]}, validation ${mse(last[2])}` : ""}`)}
-      ${kpi("Distillation", d ? `${d[0]}<small>/ ${d[1]} updates</small>` : "–", d ? `KL ${d[2].toFixed(4)}` : "after Block-AP", d ? prog(d[0] / d[1]) : "")}
-      ${kpi("QAT finalist", q.final ? esc(q.final.match(/score (\S+)/)?.[1] ?? "–") : "–", esc(q.final || "not scored yet"))}
-    </div>
-    <div class="card pad section"><h2>Validation change by block <span class="muted">green better, red worse, striped: the file's kept</span></h2>
-      <div class="strip">${Array.from({ length: q.total }, (_, i) => { const b = q.blocks.find((x) => x.block === i); return b ? cell(b) : `<i class="cell" title="block ${i}: waiting"></i>`; }).join("")}</div></div>
-    <div class="card tw section"><table><thead><tr><th>Block</th><th class="n">Validation</th><th class="n hide-s">The file's</th><th class="n">Change</th><th class="n hide-s">Best step</th><th></th></tr></thead><tbody>
-      ${q.blocks.slice().reverse().map((b) => `<tr><td>${b.block}</td><td class="n">${mse(b.checks[0]?.[2] ?? b.before)} → ${b.after == null ? `<span class="muted">${mse(b.checks.at(-1)?.[2])}</span>` : mse(b.after)}</td><td class="n hide-s">${mse(b.file)}</td><td class="n">${b.after == null ? badge("running") : pct(b)}</td><td class="n hide-s">${b.best ?? "–"}</td><td class="muted small">${[b.stopped ? `stopped early at ${b.stopped}` : "", b.kept ? "kept the file's" : ""].filter(Boolean).join(" · ")}</td></tr>`).join("") || '<tr><td colspan="6" class="empty">No block yet.</td></tr>'}</tbody></table></div>`;
-}
-
 pages.contest = (st, el, [id, tab]) => {
   const c = (st.contests || []).find((x) => x.id === id);
   if (!c) { el.innerHTML = `<div class="empty">No contest called ${esc(id)}.</div>`; return; }
-  const v = c.verdict, h = c.held_out, p = (st.pi || []).find((x) => x.contest === c.id), q = (st.qats || []).find((x) => x.id === c.id);
+  const v = c.verdict, h = c.held_out, p = (st.pi || []).find((x) => x.contest === c.id), q = qatById(st, c.id);
   tab = tab || (v ? "" : "steps");
   const base = `#/contests/${c.id}`;
   const lane = `${c.size.toLowerCase()}-b${c.budget}`;
@@ -190,8 +223,6 @@ pages.contest = (st, el, [id, tab]) => {
       <div class="card tw section"><table><thead><tr><th>Step</th><th>Status</th><th class="n">Began</th><th class="n">Took</th></tr></thead><tbody>
       ${c.steps.map((s) => `<tr><td>${esc(LABEL[s.name] || s.name)}</td><td>${badge(s.state)}</td><td class="n">${s.began ?? "–"}</td><td class="n">${s.state === "done" ? dur(s.took) : s.state === "running" ? `${dur(s.spent)} so far` : s.state === "waiting" ? `~${dur(s.left)}` : `${dur(s.spent)}, then ${s.state}`}</td></tr>`).join("")}
       </tbody></table></div>`;
-  } else if (tab === "qat" && q) {
-    body = qatTab(q);
   } else if (tab === "events") {
     body = `<div class="card">${feed(evs.slice(0, 60))}</div>`;
   } else if (v) {
@@ -215,9 +246,86 @@ pages.contest = (st, el, [id, tab]) => {
   } else body = `<div class="empty">This contest has no result${c.state === "dropped" ? ": it was dropped" : " yet"}.</div>`;
   el.innerHTML = `
     <div class="ph"><h1>${esc(c.size)} @ ${c.budget} GiB</h1>${badge(c.state)}${v ? verdict(v.verdict) : ""}
-      <div class="sub">${esc(c.model || "")}${v ? ` · against ${esc(v.preset)}` : ""}${c.state === "running" ? ` · ends ~${esc(c.eta)}` : ""}</div></div>
-    ${tabs(base, [...(v ? [["", "Results"]] : []), ["steps", "Steps"], ...(q ? [["qat", "QAT"]] : []), ["events", `Events <span class="muted">${evs.length}</span>`]], tab)}
+      <div class="sub">${esc(c.model || "")}${v ? ` · against ${esc(v.preset)}` : ""}${c.state === "running" ? ` · ends ~${esc(c.eta)}` : ""}${q ? ` · <a href="#/experiments/${esc(q.id)}">QAT finalist →</a>` : ""}</div></div>
+    ${tabs(base, [...(v ? [["", "Results"]] : []), ["steps", "Steps"], ["events", `Events <span class="muted">${evs.length}</span>`]], tab)}
     ${body}`;
+};
+
+pages.experiments = (st, el) => {
+  el.innerHTML = `<div class="ph"><h1>Experiments</h1><div class="sub">EfficientQAT: the GA's best genome trained block by block (Block-AP), then distilled; it competes as the QAT finalist</div></div>
+    <div class="card tw"><table><thead><tr><th>Run</th><th>Status</th><th class="hide-s">Progress</th><th class="n">QAT finalist</th><th>Contest</th></tr></thead>
+    <tbody>${(st.qats || []).map((q) => {
+      const x = qatState(q, st), v = x.c?.state === "done" && x.c.verdict;
+      return `<tr class="click" data-href="#/experiments/${esc(q.id)}"><td><b>${esc(qname(q))}</b></td><td>${badge(x.state)}</td>
+        <td class="hide-s" style="min-width:180px">${x.state === "running" ? `${prog(x.frac)}<div class="muted small">${esc(x.step)}${x.eta ? ` · ~${esc(x.eta)}` : ""}</div>` : `<span class="muted small">${esc(x.step)}</span>`}</td>
+        <td class="n" title="${esc(q.final || "")}">${score(q)}</td><td>${v ? `${verdict(v.verdict)} <span class="num">${vnum(v)}</span>` : '<span class="muted">pending</span>'}</td></tr>`;
+    }).join("") || '<tr><td colspan="5" class="empty">No experiments.</td></tr>'}</tbody></table></div>`;
+};
+
+// errors as Block-AP logs them (5 decimals; small ones in e-notation); a block's change from its start
+const mse = (v) => (v == null ? "–" : v < 0.01 ? v.toExponential(2) : v.toFixed(5));
+const pct = (b) => sgn(((b.after - b.before) / b.before) * 100, 1) + "%";
+function strip(q) {
+  return `<div class="strip" id="strip">${Array.from({ length: q.total }, (_, i) => {
+    const b = q.blocks.find((x) => x.block === i);
+    let cls = "cell", style = "", title = `block ${i}: waiting`;
+    if (b && b.after != null) {
+      const p = (b.after - b.before) / b.before;
+      title = `block ${i}: ${pct(b)}${b.kept ? " (kept the file's)" : ""}`;
+      if (b.kept) cls += " kept";
+      else style = `background:color-mix(in srgb, ${p < 0 ? "var(--win)" : "var(--lose)"} ${Math.round(20 + 75 * Math.min(1, Math.abs(p) / 0.6))}%, var(--sunk))`;
+    } else if (b) { cls += " now"; title = `block ${i}: training`; }
+    if (i === ui.block) cls += " sel";
+    return `<i class="${cls}" style="${style}" title="${esc(title)}" data-b="${i}"></i>`;
+  }).join("")}</div>`;
+}
+
+pages.qat = (st, el, [id, tab = ""]) => {
+  const q = qatById(st, id);
+  if (!q) { el.innerHTML = `<div class="empty">No experiment called ${esc(id)}.</div>`; return; }
+  const base = `#/experiments/${q.id}`, qs = qatState(q, st), done = qs.done, cur = q.blocks.find((b) => b.after == null), d = q.distill.at(-1);
+  if (ui.qatId !== q.id) { ui.qatId = q.id; ui.picked = false; }
+  const mean = done.length ? done.reduce((a, b) => a + (b.after - b.before) / b.before, 0) / done.length : 0;
+  if (!ui.picked || !q.blocks.some((b) => b.block === ui.block)) ui.block = (cur && cur.checks.length > 1 ? cur : done.at(-1) || cur || {}).block ?? null;
+  const dist = kpi("Distillation", d ? `${d[0]}<small>/ ${d[1]} updates</small>` : `<span class="muted">—</span>`, d ? `KL ${d[2].toFixed(4)}` : "after Block-AP", d ? prog(d[0] / d[1]) : "");
+  const fin = kpi("QAT finalist", score(q), esc(q.final?.replace(/^.*?score \S+ /, "") || "not scored yet"));
+  let body = "";
+  if (tab === "blocks") {
+    const b = q.blocks.find((x) => x.block === ui.block);
+    body = `<div class="card pad"><h2>Blocks</h2>${strip(q)}</div>
+      <div class="card pad section"><h2>Block ${ui.block ?? "–"} <span class="muted">${b ? (b.after != null ? `${mse(b.before)} → ${mse(b.after)} (${pct(b)})${b.stopped ? `, stopped early at ${b.stopped}` : ""}${b.kept ? ", kept the file's" : ""}` : "training") : ""}</span></h2>
+        <div class="chart" id="c-block"></div><div class="legend"><span><i style="background:var(--accent)"></i>validation error by step</span><span><i style="background:var(--muted)"></i>before training</span><span><i style="background:var(--tie)"></i>the file's</span><span><i style="background:var(--win);height:8px;width:8px;border-radius:50%"></i>kept point</span></div></div>
+      <div class="card tw section"><table><thead><tr><th>Block</th><th class="n">Validation</th><th class="n hide-s">The file's</th><th class="n">Change</th><th class="n hide-s">Best step</th><th></th></tr></thead><tbody>
+        ${q.blocks.slice().reverse().map((b) => `<tr class="click" data-block="${b.block}"><td>${b.block}</td><td class="n">${mse(b.checks[0]?.[2] ?? b.before)} → ${b.after == null ? `<span class="muted">${mse(b.checks.at(-1)?.[2])}</span>` : mse(b.after)}</td><td class="n hide-s">${mse(b.file)}</td><td class="n">${b.after == null ? badge("running") : pct(b)}</td><td class="n hide-s">${b.best ?? "–"}</td><td class="muted small">${[b.stopped ? `stopped early at ${b.stopped}` : "", b.kept ? "kept the file's" : ""].filter(Boolean).join(" · ")}</td></tr>`).join("") || '<tr><td colspan="6" class="empty">No block yet.</td></tr>'}
+      </tbody></table></div>`;
+  } else if (tab === "distill") {
+    body = `<div class="grid cols-2">${dist}${fin}</div>
+      <div class="card pad section"><h2>KL on the teacher's top 64 <span class="muted">by update, smoothed</span></h2><div class="chart" id="c-kl"></div></div>`;
+  } else {
+    body = `<div class="grid cols-4">
+        ${kpi("Block-AP · blocks", `${done.length}<small>/ ${q.total}</small>`, `${qs.eta ? `ends ~${esc(qs.eta)} · ` : ""}${q.minutes.toFixed(1)} min a block · ${q.samples ?? "–"} samples × ${q.epochs ?? "–"} epochs`, prog(done.length / q.total))}
+        ${kpi("Block-AP · error change", done.length ? `${sgn(mean * 100, 0)}<small>%</small>` : "–", "mean over finished blocks")}
+        ${dist}${fin}
+      </div>
+      <div class="card pad section"><h2>Blocks <a class="more" href="${base}/blocks">details →</a></h2>${strip(q)}</div>
+      <div class="card section"><h2>Latest lines</h2>${feed(q.lines.slice().reverse())}</div>`;
+  }
+  el.innerHTML = `
+    <div class="ph"><h1>QAT · ${esc(qname(q))}</h1>${badge(qs.state)}<div class="sub"><a href="#/contests/${esc(q.id)}">contest →</a>${qs.state === "running" ? ` · ${esc(qs.step)}` : ""}</div></div>
+    ${tabs(base, [["", "Overview"], ["blocks", "Blocks"], ["distill", "Distillation"]], tab)}
+    ${body}`;
+  const s = el.querySelector("#strip");
+  if (s) s.onclick = (e) => { const c = e.target.closest(".cell"); if (!c) return; ui.block = +c.dataset.b; ui.picked = true; if (tab !== "blocks") location.hash = `${base}/blocks`; else draw(); };
+  el.querySelectorAll("tr[data-block]").forEach((r) => (r.onclick = () => { ui.block = +r.dataset.block; ui.picked = true; draw(); scrollTo({ top: 0, behavior: "smooth" }); }));
+  const b = q.blocks.find((x) => x.block === ui.block), at = (k) => b.checks.find((c) => c[0] === k)?.[2];
+  chart(el.querySelector("#c-block"), {
+    series: b ? [{ color: css("--accent"), pts: b.checks.map((c) => [c[0], c[2]]) }] : [], xdomain: [0, q.steps || 2048], dots: true,
+    vlines: b && b.stopped ? [{ x: b.stopped, label: "stopped early", color: css("--muted") }] : [],
+    refs: b ? [{ y: b.checks[0]?.[2] ?? b.before, label: "before", color: css("--muted") }, ...(b.file != null ? [{ y: b.file, label: "", color: css("--tie") }] : [])].filter((r) => r.y != null) : [],
+    marks: b && b.best && at(b.best) != null ? [{ x: b.best, y: at(b.best), color: css("--win") }] : [],
+    yfmt: (y) => (+y < 0.01 && +y ? (+y).toExponential(1) : +(+y).toFixed(4)), empty: "first check after 512 steps",
+  });
+  chart(el.querySelector("#c-kl"), { series: [{ color: css("--accent"), pts: trend(q.distill.map((u) => [u[0], u[2]])) }], yfmt: (y) => (+y).toFixed(2), empty: "no updates yet" });
 };
 
 pages.system = (st, el) => {
@@ -334,8 +442,9 @@ pages.logs = (st, el, _, fresh) => {
 // --- router and shell ---------------------------------------------------------------------------------------------------
 function resolve() {
   const p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+  if (p[0] === "experiments" && p[1]) return { page: "qat", nav: "experiments", args: p.slice(1), crumbs: [["Experiments", "#/experiments"], [`QAT · ${p[1].toUpperCase().replace("@", " @ ")} GiB`]] };
   if (p[0] === "contests" && p[1]) return { page: "contest", nav: "contests", args: p.slice(1), crumbs: [["Contests", "#/contests"], [p[1].toUpperCase().replace("@", " @ ") + " GiB"]] };
-  const known = { contests: "Contests", system: "System", logs: "Logs" };
+  const known = { contests: "Contests", experiments: "Experiments", system: "System", logs: "Logs" };
   if (known[p[0]]) return { page: p[0], nav: p[0], args: [], crumbs: [[known[p[0]]]] };
   return { page: "overview", nav: "overview", args: [], crumbs: [["Overview"]] };
 }
@@ -349,6 +458,7 @@ function draw(fresh = false) {
   $("#running").hidden = !js.length;
   $("#running").textContent = js.length === 1 ? `${js[0].step}${js[0].eta ? ` · ~${js[0].eta}` : ""}` : `${js.length} running`;
   $("#cnt-con").textContent = js.filter((j) => j.kind === "contest").length || "";
+  $("#cnt-exp").textContent = js.some((j) => j.kind === "experiment") ? "●" : "";
   const ban = $("#banner"), low = sys.disk && sys.disk.free < 20e9;
   const bad = st.problems || [];
   ban.hidden = !pz.length && !st.error && !low && !bad.length;
