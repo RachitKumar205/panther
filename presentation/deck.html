@@ -1,0 +1,1320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Panther — CSD361 Final Presentation</title>
+<style>
+  /* ============================================================
+     Panther deck — light theme, blue accents
+     Slide canvas: 1280 × 720 (16:9), one slide per PDF page
+     ============================================================ */
+
+  :root {
+    --bg: #ffffff;
+    --bg-tint: #f5f8fe;
+    --ink: #0f172a;
+    --muted: #5b6b82;
+    --faint: #8a97ad;
+    --blue: #2563eb;
+    --blue-strong: #1e40af;
+    --blue-deep: #1e3a8a;
+    --blue-soft: #dbeafe;
+    --blue-pale: #eef4ff;
+    --teal: #0d9488;
+    --line: #e3e9f2;
+    --ok: #059669;
+    --bad: #dc2626;
+    --shadow: 0 10px 30px rgba(15, 23, 42, 0.07);
+    --radius: 16px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  @page { size: 1280px 720px; margin: 0; }
+
+  html, body {
+    background: #e9eef5;
+    font-family: "Inter", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* ---- slide shell -------------------------------------------------- */
+  .slide {
+    position: relative;
+    width: 1280px;
+    height: 720px;
+    overflow: hidden;
+    background: var(--bg);
+    break-after: page;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .slide__body {
+    position: relative;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 56px 72px 60px;
+  }
+
+  /* ---- typography --------------------------------------------------- */
+  .kicker {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--blue);
+  }
+  .kicker::before {
+    content: "";
+    width: 26px; height: 3px;
+    background: var(--blue);
+    border-radius: 2px;
+  }
+
+  .slide__title {
+    font-size: 40px;
+    line-height: 1.08;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    margin-top: 14px;
+  }
+
+  .lead {
+    font-size: 21px;
+    line-height: 1.5;
+    color: var(--muted);
+    max-width: 62ch;
+  }
+
+  /* ---- footer ------------------------------------------------------- */
+  .slide__foot {
+    position: absolute;
+    left: 72px; right: 72px; bottom: 26px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    color: var(--faint);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .slide__foot .page {
+    width: 30px; height: 30px;
+    display: grid; place-items: center;
+    border-radius: 50%;
+    background: var(--blue-pale);
+    color: var(--blue);
+    font-weight: 800;
+  }
+
+  /* ---- generic building blocks (used across slides) ------------------ */
+  .grid { display: grid; gap: 24px; }
+  .grid.cols-2 { grid-template-columns: 1fr 1fr; }
+  .grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .grid.cols-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+
+  .card {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 26px 28px;
+    box-shadow: var(--shadow);
+  }
+
+  .stat { font-size: 52px; font-weight: 800; letter-spacing: -0.03em; color: var(--ink); line-height: 1; }
+  .stat .unit { font-size: 22px; font-weight: 700; color: var(--muted); letter-spacing: 0; }
+  .stat-label { margin-top: 8px; font-size: 15px; color: var(--muted); font-weight: 600; }
+
+  .chip {
+    display: inline-block;
+    padding: 5px 11px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+    background: var(--blue-pale);
+    color: var(--blue-strong);
+  }
+
+  /* ---- intro slide: fit visual ---- */
+  .fit-visual-wrap { flex: 1; display: flex; align-items: center; min-height: 0; }
+  .fit-visual { width: 100%; height: auto; display: block; }
+  .stats { margin-top: 22px; }
+  .stats .stat { font-size: 38px; }
+  .stats .card { padding: 18px 24px; }
+
+  .callout {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    background: #ecfdf5;
+    border: 1px solid #a7f3d0;
+    border-radius: 12px;
+    padding: 14px 20px;
+    margin-top: 20px;
+    font-size: 18px;
+    font-weight: 600;
+    color: #065f46;
+  }
+  .callout strong { font-weight: 800; }
+  .callout .mark {
+    flex: none;
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    background: #059669;
+    color: #fff;
+    display: grid; place-items: center;
+    font-size: 16px;
+    font-weight: 800;
+  }
+
+  /* ---- problem slide: math & genome ---- */
+  .math-card {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 22px 24px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+  }
+  .math-card .tag { font-size: 13px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: var(--blue); margin-bottom: 12px; }
+  .math-card .formula { font-size: 22px; font-weight: 800; color: var(--ink); line-height: 1.3; letter-spacing: -0.01em; }
+  .math-card .formula sub { font-size: 0.62em; }
+  .math-card .note { margin-top: 10px; font-size: 15px; color: var(--muted); font-weight: 600; line-height: 1.4; }
+
+  .explain {
+    margin-top: 24px;
+    font-size: 19px;
+    line-height: 1.6;
+    color: var(--muted);
+  }
+  .explain strong { color: var(--ink); font-weight: 700; }
+
+  /* ---- lit review slide ---- */
+  .strand-col { display: flex; flex-direction: column; gap: 10px; }
+  .strand { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; color: var(--blue); }
+  .strand::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--blue); }
+  .method { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); box-shadow: var(--shadow); }
+  .method .m-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .method .m-name { font-size: 19px; font-weight: 800; color: var(--ink); }
+  .method .m-year { font-size: 13px; color: var(--faint); font-weight: 700; }
+  .method .m-idea { font-size: 14px; color: var(--muted); font-weight: 500; line-height: 1.35; }
+  .method .m-lim { align-self: flex-start; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 999px; background: #fff1f2; color: #be123c; }
+  .takeaway { margin-top: 22px; display: flex; align-items: center; gap: 12px; background: var(--blue-pale); border: 1px solid var(--blue-soft); border-radius: 12px; padding: 13px 20px; font-size: 17px; font-weight: 600; color: var(--blue-deep); }
+  .takeaway strong { font-weight: 800; }
+
+  /* ---- gap slide: 2x2 matrix ---- */
+  .gap-matrix { display: grid; grid-template-columns: 168px 1fr 1fr; grid-template-rows: auto 1fr 1fr; gap: 10px; margin-top: 26px; flex: 1; }
+  .gap-axis { display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+  .gap-axis--row { justify-content: flex-start; padding-left: 4px; }
+  .gap-cell { border: 1px solid var(--line); border-radius: 12px; background: var(--bg); box-shadow: var(--shadow); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 16px; text-align: center; }
+  .gap-cell .c-title { font-size: 18px; font-weight: 800; color: var(--ink); }
+  .gap-cell .c-sub { font-size: 13px; color: var(--muted); font-weight: 600; }
+  .gap-cell--empty { background: var(--blue); border-color: var(--blue); box-shadow: 0 14px 34px rgba(37,99,235,0.28); }
+  .gap-cell--empty .c-title { color: #fff; font-size: 22px; }
+  .gap-cell--empty .c-sub { color: #dbeafe; }
+
+  /* ---- contributions slide ---- */
+  .contribs { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr; gap: 20px; margin-top: 28px; flex: 1; align-content: center; }
+  .contrib { display: flex; flex-direction: column; gap: 8px; padding: 22px 24px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); box-shadow: var(--shadow); }
+  .contrib .c-num { font-size: 14px; font-weight: 800; color: var(--blue); letter-spacing: 0.1em; }
+  .contrib .c-title { font-size: 21px; font-weight: 800; color: var(--ink); }
+  .contrib .c-desc { font-size: 16px; color: var(--muted); line-height: 1.45; font-weight: 500; }
+  .contrib .c-desc strong { color: var(--ink); font-weight: 700; }
+
+  /* ---- methodology slide ---- */
+  .pipeline { display: flex; align-items: stretch; gap: 8px; margin-top: 28px; }
+  .stage { flex: 1 1 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 18px 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg); box-shadow: var(--shadow); text-align: center; }
+  .stage .s-num { font-size: 12px; font-weight: 800; color: var(--blue); letter-spacing: 0.08em; }
+  .stage .s-name { font-size: 17px; font-weight: 800; color: var(--ink); }
+  .stage .s-desc { font-size: 12px; color: var(--muted); font-weight: 600; line-height: 1.3; }
+  .stage--key { background: var(--blue); border-color: var(--blue); }
+  .stage--key .s-num { color: #bfdbfe; }
+  .stage--key .s-name { color: #fff; }
+  .stage--key .s-desc { color: #dbeafe; }
+  .parrow { flex: 0 0 auto; align-self: center; color: var(--blue); font-size: 24px; font-weight: 800; }
+
+  .ga-grid { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr; gap: 20px; margin-top: 28px; flex: 1; align-content: center; }
+  .ga-card { display: flex; flex-direction: column; gap: 10px; padding: 22px 24px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); box-shadow: var(--shadow); }
+  .ga-card .g-title { font-size: 19px; font-weight: 800; color: var(--ink); }
+  .ga-card .g-sub { display: block; font-size: 12px; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; color: var(--blue); margin-top: 3px; }
+  .ga-card ul { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+  .ga-card li { position: relative; padding-left: 15px; font-size: 15px; color: var(--muted); font-weight: 500; line-height: 1.4; }
+  .ga-card li::before { content: ""; position: absolute; left: 1px; top: 8px; width: 5px; height: 5px; border-radius: 50%; background: var(--blue); }
+  .ga-card li strong { color: var(--ink); font-weight: 700; }
+
+  /* ---- dataset slide ---- */
+  .dtable { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 26px; }
+  .dtable th { text-align: left; font-size: 13px; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); padding: 0 16px 12px; border-bottom: 2px solid var(--line); }
+  .dtable td { padding: 17px 16px; border-bottom: 1px solid var(--line); font-size: 16px; color: var(--muted); font-weight: 500; vertical-align: top; }
+  .dtable td:first-child { font-weight: 800; color: var(--ink); font-size: 17px; }
+  .dtable td.q { line-height: 1.5; }
+  .dtable tr:last-child td { border-bottom: none; }
+  .sdot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 10px; }
+
+  /* ---- setup slide ---- */
+  .spec-card { display: flex; flex-direction: column; gap: 10px; padding: 20px 22px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); box-shadow: var(--shadow); }
+  .spec-card .sp-title { font-size: 20px; font-weight: 800; color: var(--ink); }
+  .spec-card .sp-sub { font-size: 13px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--blue); }
+  .spec-card .sp-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+  .spec-card .sp-chip { font-size: 13.5px; font-weight: 700; padding: 5px 11px; border-radius: 999px; background: var(--blue-pale); color: var(--blue-strong); }
+  .spec-card .sp-chip--dark { background: #e0eaff; color: var(--blue-deep); }
+
+  /* ---- results slide ---- */
+  .sec-label { font-size: 13px; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; color: var(--blue); margin-bottom: 10px; }
+  .verdict { margin-top: 20px; }
+  .v-row { display: flex; align-items: center; gap: 16px; margin-bottom: 10px; }
+  .v-label { flex: 0 0 280px; font-size: 15px; font-weight: 700; color: var(--ink); }
+  .v-track { position: relative; flex: 1; height: 18px; background: #eef2f7; border-radius: 9px; }
+  .v-ci { position: absolute; top: 0; height: 18px; background: #2563eb; opacity: 0.35; border-radius: 9px; }
+  .v-dot { position: absolute; top: 3px; width: 12px; height: 12px; margin-left: -6px; background: #2563eb; border-radius: 50%; }
+  .v-base { position: absolute; top: -4px; bottom: -4px; border-left: 2px dashed #0d9488; }
+  .v-val { flex: 0 0 auto; font-size: 14px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+  .v-val strong { color: var(--ink); font-weight: 800; font-size: 16px; }
+  .v-win { flex: 0 0 auto; font-size: 12px; font-weight: 800; color: #fff; background: #059669; padding: 4px 12px; border-radius: 999px; }
+  .v-legend { display: flex; gap: 22px; margin-top: 2px; font-size: 13px; color: var(--muted); font-weight: 600; }
+  .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  .sw--blue { background: #2563eb; }
+  .sw--teal { background: #0d9488; }
+  .sw--gray { background: #94a3b8; }
+  .sw--light { background: #dbeafe; }
+  .acc-wrap { margin-top: 18px; }
+  .acc-chart { width: 100%; height: auto; display: block; }
+  .acc-legend { display: flex; gap: 20px; margin-top: 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
+
+  /* ---- ablation slide ---- */
+  .mix { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+  .mix-row { display: grid; grid-template-columns: 78px 1fr 28px; align-items: center; gap: 10px; }
+  .mix-name { font-size: 13.5px; font-weight: 700; color: var(--ink); }
+  .mix-track { height: 15px; background: #eef2f7; border-radius: 7px; overflow: hidden; }
+  .mix-fill { height: 100%; background: var(--blue); border-radius: 7px; }
+  .mix-count { font-size: 13px; font-weight: 700; color: var(--muted); text-align: right; }
+  .mix-note { margin-top: 10px; font-size: 13.5px; color: var(--muted); font-weight: 600; line-height: 1.4; }
+
+  /* ---- team slide ---- */
+  .members { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-top: 28px; flex: 1; align-content: center; }
+  .member { display: flex; flex-direction: column; gap: 6px; padding: 22px 24px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); box-shadow: var(--shadow); }
+  .member .m-name { font-size: 21px; font-weight: 800; color: var(--ink); }
+  .member .m-role { font-size: 12px; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; color: var(--blue); margin-top: 2px; }
+  .member ul { list-style: none; display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .member li { position: relative; padding-left: 15px; font-size: 15px; color: var(--muted); font-weight: 500; line-height: 1.4; }
+  .member li::before { content: ""; position: absolute; left: 1px; top: 8px; width: 5px; height: 5px; border-radius: 50%; background: var(--blue); }
+
+  /* ---- references slide ---- */
+  .refs { margin-top: 24px; column-count: 2; column-gap: 44px; }
+  .ref { break-inside: avoid; display: flex; gap: 10px; font-size: 14px; line-height: 1.5; color: var(--muted); margin-bottom: 11px; }
+  .ref .idx { flex: none; font-weight: 800; color: var(--blue); }
+  .ref em { color: var(--ink); font-style: normal; font-weight: 600; }
+  .ref .yr { color: var(--faint); font-weight: 600; }
+  .refs-note { margin-top: 14px; font-size: 14px; color: var(--muted); font-weight: 600; }
+  .refs-note strong { color: var(--ink); font-weight: 800; }
+
+  /* ============================================================
+     Slide 1 — Title
+     ============================================================ */
+  .slide--title {
+    background:
+      radial-gradient(900px 520px at 88% -8%, #e3edff 0%, rgba(227,237,255,0) 60%),
+      radial-gradient(760px 420px at -6% 108%, #e6f6f2 0%, rgba(230,246,242,0) 55%),
+      var(--bg);
+  }
+
+  .title__top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 44px 72px 0;
+  }
+  .title__top .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-weight: 800;
+    font-size: 18px;
+    color: var(--ink);
+  }
+  .title__top .brand .dot {
+    width: 34px; height: 34px;
+    border-radius: 9px;
+    background: linear-gradient(135deg, var(--blue) 0%, var(--teal) 100%);
+    display: grid; place-items: center;
+    color: #fff; font-size: 17px; font-weight: 900;
+  }
+
+  .title__center { margin: auto 72px; }
+  .wordmark {
+    font-size: 116px;
+    line-height: 0.95;
+    font-weight: 900;
+    letter-spacing: -0.045em;
+    color: var(--ink);
+  }
+  .subtitle {
+    margin-top: 26px;
+    font-size: 25px;
+    line-height: 1.42;
+    color: var(--muted);
+    max-width: 44ch;
+    font-weight: 500;
+  }
+  .subtitle strong { color: var(--ink); font-weight: 700; }
+
+  .title__genome {
+    padding: 0 72px 0;
+  }
+  .title__genome svg { width: 100%; height: 74px; display: block; }
+
+  .title__bottom {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding: 0 72px 40px;
+  }
+  .authors { font-size: 19px; font-weight: 700; color: var(--ink); }
+  .affil { margin-top: 5px; font-size: 15px; color: var(--muted); font-weight: 500; }
+  .course {
+    text-align: right;
+    font-size: 15px;
+    color: var(--faint);
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+
+  <!-- ============ SLIDE 1 · TITLE ============ -->
+  <section class="slide slide--title">
+    <div class="title__top">
+      <div class="brand"><span class="dot">P</span></div>
+      <span class="kicker">Final Project Presentation</span>
+    </div>
+
+    <div class="title__center">
+      <div class="wordmark">Panther</div>
+      <p class="subtitle">
+        Genetic-algorithm-driven <strong>multi-bit quantization</strong> of large
+        language models for efficient inference on <strong>resource-constrained</strong> hardware.
+      </p>
+    </div>
+
+    <div class="title__genome">
+      <svg viewBox="0 0 1136 74" preserveAspectRatio="none" aria-hidden="true">
+        <!-- mixed-precision genome: one bar per weight matrix, colour = bit-width -->
+        <g id="bars">
+          <rect x="0.0" y="21" width="9.7" height="53" rx="2" fill="#1e40af"/>
+          <rect x="12.7" y="12" width="9.7" height="62" rx="2" fill="#93c5fd"/>
+          <rect x="25.3" y="17" width="9.7" height="57" rx="2" fill="#93c5fd"/>
+          <rect x="38.0" y="22" width="9.7" height="52" rx="2" fill="#93c5fd"/>
+          <rect x="50.6" y="25" width="9.7" height="49" rx="2" fill="#1d4ed8"/>
+          <rect x="63.3" y="32" width="9.7" height="42" rx="2" fill="#1e40af"/>
+          <rect x="75.9" y="40" width="9.7" height="34" rx="2" fill="#93c5fd"/>
+          <rect x="88.6" y="28" width="9.7" height="46" rx="2" fill="#93c5fd"/>
+          <rect x="101.2" y="21" width="9.7" height="53" rx="2" fill="#3b82f6"/>
+          <rect x="113.9" y="30" width="9.7" height="44" rx="2" fill="#1d4ed8"/>
+          <rect x="126.6" y="4" width="9.7" height="70" rx="2" fill="#60a5fa"/>
+          <rect x="139.2" y="10" width="9.7" height="64" rx="2" fill="#93c5fd"/>
+          <rect x="151.9" y="19" width="9.7" height="55" rx="2" fill="#1d4ed8"/>
+          <rect x="164.5" y="36" width="9.7" height="38" rx="2" fill="#93c5fd"/>
+          <rect x="177.2" y="6" width="9.7" height="68" rx="2" fill="#1d4ed8"/>
+          <rect x="189.8" y="19" width="9.7" height="55" rx="2" fill="#93c5fd"/>
+          <rect x="202.5" y="19" width="9.7" height="55" rx="2" fill="#60a5fa"/>
+          <rect x="215.1" y="36" width="9.7" height="38" rx="2" fill="#3b82f6"/>
+          <rect x="227.8" y="37" width="9.7" height="37" rx="2" fill="#60a5fa"/>
+          <rect x="240.5" y="10" width="9.7" height="64" rx="2" fill="#1d4ed8"/>
+          <rect x="253.1" y="16" width="9.7" height="58" rx="2" fill="#1d4ed8"/>
+          <rect x="265.8" y="23" width="9.7" height="51" rx="2" fill="#60a5fa"/>
+          <rect x="278.4" y="12" width="9.7" height="62" rx="2" fill="#1d4ed8"/>
+          <rect x="291.1" y="17" width="9.7" height="57" rx="2" fill="#93c5fd"/>
+          <rect x="303.7" y="9" width="9.7" height="65" rx="2" fill="#bfdbfe"/>
+          <rect x="316.4" y="28" width="9.7" height="46" rx="2" fill="#1e40af"/>
+          <rect x="329.0" y="35" width="9.7" height="39" rx="2" fill="#bfdbfe"/>
+          <rect x="341.7" y="24" width="9.7" height="50" rx="2" fill="#3b82f6"/>
+          <rect x="354.4" y="38" width="9.7" height="36" rx="2" fill="#93c5fd"/>
+          <rect x="367.0" y="7" width="9.7" height="67" rx="2" fill="#93c5fd"/>
+          <rect x="379.7" y="28" width="9.7" height="46" rx="2" fill="#1e40af"/>
+          <rect x="392.3" y="15" width="9.7" height="59" rx="2" fill="#93c5fd"/>
+          <rect x="405.0" y="22" width="9.7" height="52" rx="2" fill="#1d4ed8"/>
+          <rect x="417.6" y="38" width="9.7" height="36" rx="2" fill="#3b82f6"/>
+          <rect x="430.3" y="37" width="9.7" height="37" rx="2" fill="#93c5fd"/>
+          <rect x="442.9" y="21" width="9.7" height="53" rx="2" fill="#1d4ed8"/>
+          <rect x="455.6" y="24" width="9.7" height="50" rx="2" fill="#60a5fa"/>
+          <rect x="468.3" y="6" width="9.7" height="68" rx="2" fill="#3b82f6"/>
+          <rect x="480.9" y="39" width="9.7" height="35" rx="2" fill="#60a5fa"/>
+          <rect x="493.6" y="6" width="9.7" height="68" rx="2" fill="#3b82f6"/>
+          <rect x="506.2" y="6" width="9.7" height="68" rx="2" fill="#93c5fd"/>
+          <rect x="518.9" y="18" width="9.7" height="56" rx="2" fill="#3b82f6"/>
+          <rect x="531.5" y="18" width="9.7" height="56" rx="2" fill="#93c5fd"/>
+          <rect x="544.2" y="21" width="9.7" height="53" rx="2" fill="#60a5fa"/>
+          <rect x="556.8" y="23" width="9.7" height="51" rx="2" fill="#1d4ed8"/>
+          <rect x="569.5" y="21" width="9.7" height="53" rx="2" fill="#60a5fa"/>
+          <rect x="582.2" y="32" width="9.7" height="42" rx="2" fill="#93c5fd"/>
+          <rect x="594.8" y="32" width="9.7" height="42" rx="2" fill="#1e40af"/>
+          <rect x="607.5" y="37" width="9.7" height="37" rx="2" fill="#60a5fa"/>
+          <rect x="620.1" y="28" width="9.7" height="46" rx="2" fill="#60a5fa"/>
+          <rect x="632.8" y="4" width="9.7" height="70" rx="2" fill="#93c5fd"/>
+          <rect x="645.4" y="17" width="9.7" height="57" rx="2" fill="#3b82f6"/>
+          <rect x="658.1" y="32" width="9.7" height="42" rx="2" fill="#93c5fd"/>
+          <rect x="670.7" y="15" width="9.7" height="59" rx="2" fill="#bfdbfe"/>
+          <rect x="683.4" y="30" width="9.7" height="44" rx="2" fill="#93c5fd"/>
+          <rect x="696.1" y="15" width="9.7" height="59" rx="2" fill="#1e40af"/>
+          <rect x="708.7" y="8" width="9.7" height="66" rx="2" fill="#1d4ed8"/>
+          <rect x="721.4" y="31" width="9.7" height="43" rx="2" fill="#93c5fd"/>
+          <rect x="734.0" y="38" width="9.7" height="36" rx="2" fill="#93c5fd"/>
+          <rect x="746.7" y="20" width="9.7" height="54" rx="2" fill="#3b82f6"/>
+          <rect x="759.3" y="12" width="9.7" height="62" rx="2" fill="#60a5fa"/>
+          <rect x="772.0" y="17" width="9.7" height="57" rx="2" fill="#93c5fd"/>
+          <rect x="784.6" y="31" width="9.7" height="43" rx="2" fill="#1d4ed8"/>
+          <rect x="797.3" y="13" width="9.7" height="61" rx="2" fill="#1d4ed8"/>
+          <rect x="810.0" y="6" width="9.7" height="68" rx="2" fill="#3b82f6"/>
+          <rect x="822.6" y="34" width="9.7" height="40" rx="2" fill="#3b82f6"/>
+          <rect x="835.3" y="39" width="9.7" height="35" rx="2" fill="#bfdbfe"/>
+          <rect x="847.9" y="31" width="9.7" height="43" rx="2" fill="#3b82f6"/>
+          <rect x="860.6" y="34" width="9.7" height="40" rx="2" fill="#1d4ed8"/>
+          <rect x="873.2" y="24" width="9.7" height="50" rx="2" fill="#93c5fd"/>
+          <rect x="885.9" y="31" width="9.7" height="43" rx="2" fill="#3b82f6"/>
+          <rect x="898.5" y="12" width="9.7" height="62" rx="2" fill="#3b82f6"/>
+          <rect x="911.2" y="31" width="9.7" height="43" rx="2" fill="#3b82f6"/>
+          <rect x="923.9" y="38" width="9.7" height="36" rx="2" fill="#93c5fd"/>
+          <rect x="936.5" y="33" width="9.7" height="41" rx="2" fill="#93c5fd"/>
+          <rect x="949.2" y="28" width="9.7" height="46" rx="2" fill="#93c5fd"/>
+          <rect x="961.8" y="38" width="9.7" height="36" rx="2" fill="#3b82f6"/>
+          <rect x="974.5" y="11" width="9.7" height="63" rx="2" fill="#3b82f6"/>
+          <rect x="987.1" y="40" width="9.7" height="34" rx="2" fill="#1d4ed8"/>
+          <rect x="999.8" y="9" width="9.7" height="65" rx="2" fill="#93c5fd"/>
+          <rect x="1012.4" y="37" width="9.7" height="37" rx="2" fill="#93c5fd"/>
+          <rect x="1025.1" y="15" width="9.7" height="59" rx="2" fill="#bfdbfe"/>
+          <rect x="1037.8" y="33" width="9.7" height="41" rx="2" fill="#93c5fd"/>
+          <rect x="1050.4" y="12" width="9.7" height="62" rx="2" fill="#60a5fa"/>
+          <rect x="1063.1" y="29" width="9.7" height="45" rx="2" fill="#3b82f6"/>
+          <rect x="1075.7" y="26" width="9.7" height="48" rx="2" fill="#3b82f6"/>
+          <rect x="1088.4" y="20" width="9.7" height="54" rx="2" fill="#3b82f6"/>
+          <rect x="1101.0" y="25" width="9.7" height="49" rx="2" fill="#1d4ed8"/>
+          <rect x="1113.7" y="15" width="9.7" height="59" rx="2" fill="#60a5fa"/>
+          <rect x="1126.3" y="14" width="9.7" height="60" rx="2" fill="#3b82f6"/>
+        </g>
+      </svg>
+    </div>
+
+    <div class="title__bottom">
+      <div>
+        <div class="authors">Jia Khot &middot; Lalit Maurya &middot; Rachit Kumar</div>
+        <div class="affil">Department of Computer Science &amp; Engineering, Shiv Nadar University</div>
+      </div>
+      <div class="course">CSD361<br>Introduction to Machine Learning</div>
+    </div>
+  </section>
+
+  <!-- ============ SLIDE 2 · INTRODUCTION ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Introduction</span>
+      <h1 class="slide__title">Big models, tiny memory</h1>
+      <p class="lead">Memory, not compute, is the binding constraint.</p>
+
+      <div class="fit-visual-wrap">
+        <svg class="fit-visual" viewBox="0 0 1136 270" role="img" aria-label="A 27.5 GiB 16-bit model does not fit a 5 GiB budget; the quantized 4.97 GiB model fits.">
+          <defs>
+            <linearGradient id="gBlue" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#60a5fa"/>
+              <stop offset="1" stop-color="#2563eb"/>
+            </linearGradient>
+            <linearGradient id="gTeal" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#2dd4bf"/>
+              <stop offset="1" stop-color="#0d9488"/>
+            </linearGradient>
+          </defs>
+
+          <text x="0" y="20" font-size="16" font-weight="700" fill="#5b6b82">16-bit original</text>
+          <rect x="0" y="32" width="360" height="150" rx="14" fill="url(#gBlue)"/>
+          <text x="180" y="102" text-anchor="middle" font-size="34" font-weight="800" fill="#ffffff">27.5 GiB</text>
+          <text x="180" y="127" text-anchor="middle" font-size="14" font-weight="600" fill="#e0e7ff">Qwen2.5-14B &middot; 14.8B params</text>
+          <rect x="60" y="88" width="300" height="94" rx="10" fill="#ecfdf5" stroke="#0d9488" stroke-width="2" stroke-dasharray="7 7"/>
+          <text x="210" y="140" text-anchor="middle" font-size="15" font-weight="700" fill="#0d9488">5 GiB budget</text>
+          <rect x="0" y="204" width="118" height="30" rx="15" fill="#fee2e2"/>
+          <text x="59" y="224" text-anchor="middle" font-size="14" font-weight="700" fill="#dc2626">doesn&#39;t fit</text>
+
+          <text x="518" y="108" text-anchor="middle" font-size="40" font-weight="800" fill="#2563eb">&#8594;</text>
+          <text x="518" y="136" text-anchor="middle" font-size="14" font-weight="700" fill="#5b6b82">82% smaller</text>
+
+          <text x="676" y="20" font-size="16" font-weight="700" fill="#5b6b82">Panther &middot; mixed precision</text>
+          <rect x="676" y="88" width="300" height="94" rx="10" fill="#ecfdf5" stroke="#0d9488" stroke-width="2" stroke-dasharray="7 7"/>
+          <text x="826" y="140" text-anchor="middle" font-size="15" font-weight="700" fill="#0d9488">5 GiB budget</text>
+          <rect x="716" y="114" width="220" height="48" rx="10" fill="url(#gTeal)"/>
+          <text x="826" y="144" text-anchor="middle" font-size="22" font-weight="800" fill="#ffffff">4.97 GiB</text>
+          <rect x="676" y="204" width="78" height="30" rx="15" fill="#d1fae5"/>
+          <text x="715" y="224" text-anchor="middle" font-size="14" font-weight="700" fill="#059669">fits</text>
+        </svg>
+      </div>
+
+      <div class="callout">
+        <span class="mark">&#10003;</span>
+        <span><strong>+8.6</strong> (1.5B) and <strong>+5.3</strong> (14B) mean accuracy points over the best fitting preset</span>
+      </div>
+
+      <div class="grid cols-3 stats">
+        <div class="card"><div class="stat">1.5B</div><div class="stat-label">Qwen2.5-1.5B · 1 GiB budget</div></div>
+        <div class="card"><div class="stat">14.8B</div><div class="stat-label">Qwen2.5-14B · 5 GiB budget</div></div>
+        <div class="card"><div class="stat">~80%</div><div class="stat-label">smaller once quantized</div></div>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">2</span></div>
+  </section>
+
+  <!-- ============ SLIDE 3 · PROBLEM FORMULATION ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Problem Formulation</span>
+      <h1 class="slide__title">One precision per matrix</h1>
+      <p class="lead">
+        A contest is a (model, RAM budget) pair. Find the per-matrix quantization type
+        assignment that fits the budget and loses the least quality.
+      </p>
+
+      <div class="grid cols-3" style="margin-top: 22px;">
+        <div class="math-card">
+          <div class="tag">Genome</div>
+          <div class="formula">g = (g<sub>1</sub>, &hellip;, g<sub>M</sub>), g<sub>i</sub> &isin; T</div>
+          <div class="note">one of 13 quantization types per matrix</div>
+        </div>
+        <div class="math-card">
+          <div class="tag">Feasibility</div>
+          <div class="formula">0.99&middot;B &le; RAM &le; 1.005&middot;B</div>
+          <div class="note">RAM(g) = file size + KV cache + overhead</div>
+        </div>
+        <div class="math-card">
+          <div class="tag">Objective</div>
+          <div class="formula">score = flips% + 10&middot;KL</div>
+          <div class="note">minimize over feasible genomes</div>
+        </div>
+      </div>
+
+      <p class="explain">
+        A <strong>genome</strong> assigns one of 13 quantization types to each of the model&#39;s matrices:
+        the word table, the seven matrices of every transformer layer, and the output head.
+        With 13 types per matrix, that is <strong>13<sup>197</sup></strong> layouts for the 1.5B model and
+        <strong>13<sup>338</sup></strong> for the 14B, far too many to enumerate, so we evolve the genome with a
+        genetic algorithm.
+      </p>
+      <p class="explain">
+        Candidates are scored by a single fitness, <strong>flips% + 10&middot;KL</strong>: answer flips on
+        benchmark questions plus a next-token divergence against the original. Only genomes whose RAM lands inside
+        the window <strong>0.99&middot;B to 1.005&middot;B</strong> are kept.
+      </p>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">3</span></div>
+  </section>
+
+  <!-- ============ SLIDE 4 · LITERATURE REVIEW ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Literature Review</span>
+      <h1 class="slide__title">Uniform vs mixed precision</h1>
+      <p class="lead">
+        Prior work splits into two strands: post-training quantization at a single precision,
+        and mixed-precision methods built for other architectures.
+      </p>
+
+      <div class="grid cols-2" style="margin-top: 24px; gap: 36px;">
+        <div class="strand-col">
+          <div class="strand">Uniform post-training quantization</div>
+          <div class="method">
+            <div class="m-head"><span class="m-name">GPTQ</span><span class="m-year">2023</span></div>
+            <div class="m-idea">Error-compensated rounding, column by column</div>
+            <span class="m-lim">one fixed precision</span>
+          </div>
+          <div class="method">
+            <div class="m-head"><span class="m-name">AWQ</span><span class="m-year">2024</span></div>
+            <div class="m-idea">Rescales the few channels that matter</div>
+            <span class="m-lim">one fixed precision</span>
+          </div>
+          <div class="method">
+            <div class="m-head"><span class="m-name">SmoothQuant</span><span class="m-year">2023</span></div>
+            <div class="m-idea">Shifts activation outliers into the weights</div>
+            <span class="m-lim">one fixed precision</span>
+          </div>
+        </div>
+
+        <div class="strand-col">
+          <div class="strand">Mixed precision</div>
+          <div class="method">
+            <div class="m-head"><span class="m-name">HAWQ</span><span class="m-year">2019</span></div>
+            <div class="m-idea">Hessian-ranked per-layer bit widths</div>
+            <span class="m-lim">CNNs only</span>
+          </div>
+          <div class="method">
+            <div class="m-head"><span class="m-name">HAQ</span><span class="m-year">2019</span></div>
+            <div class="m-idea">RL bit-width policy, hardware-aware</div>
+            <span class="m-lim">CNNs only</span>
+          </div>
+          <div class="method">
+            <div class="m-head"><span class="m-name">PTMQ</span><span class="m-year">2024</span></div>
+            <div class="m-idea">Multi-bit GA + KL under a size budget</div>
+            <span class="m-lim">CNNs / ViTs only</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="takeaway">
+        <span>Uniform methods lock one precision; mixed-precision work stops at CNNs / ViTs. Neither reaches decoder-only LLMs.</span>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">4</span></div>
+  </section>
+
+  <!-- ============ SLIDE 5 · RESEARCH GAP ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Research Gap</span>
+      <h1 class="slide__title">A missing quadrant</h1>
+      <p class="lead">
+        Prior work fills three of four quadrants. The empty one is mixed precision on
+        decoder-only LLMs, the setting that needs it most.
+      </p>
+
+      <div class="gap-matrix">
+        <div></div>
+        <div class="gap-axis">one fixed precision</div>
+        <div class="gap-axis">mixed precision</div>
+
+        <div class="gap-axis gap-axis--row">CNNs / ViTs</div>
+        <div class="gap-cell">
+          <div class="c-title">uniform PTQ</div>
+          <div class="c-sub">image models</div>
+        </div>
+        <div class="gap-cell">
+          <div class="c-title">HAWQ &middot; HAQ &middot; PTMQ</div>
+          <div class="c-sub">mixed precision</div>
+        </div>
+
+        <div class="gap-axis gap-axis--row">decoder LLMs</div>
+        <div class="gap-cell">
+          <div class="c-title">GPTQ &middot; AWQ &middot; SmoothQuant</div>
+          <div class="c-sub">single precision</div>
+        </div>
+        <div class="gap-cell gap-cell--empty">
+          <div class="c-title">Panther</div>
+          <div class="c-sub">mixed precision &middot; decoder LLMs</div>
+        </div>
+      </div>
+
+      <p class="explain" style="margin-top: 20px;">
+        <strong>Why it matters:</strong> matrices differ sharply in sensitivity to quantization, so per-matrix
+        precision recovers quality a single type cannot, and GA + KL already solves this allocation for CNNs / ViTs (PTMQ).
+      </p>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">5</span></div>
+  </section>
+
+  <!-- ============ SLIDE 6 · RESEARCH CONTRIBUTIONS ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Research Contributions</span>
+      <h1 class="slide__title">Four contributions</h1>
+      <p class="lead">From formulation to evaluation protocol, each closes a gap left by prior work.</p>
+
+      <div class="contribs">
+        <div class="contrib">
+          <div class="c-num">01</div>
+          <div class="c-title">Per-matrix formulation</div>
+          <div class="c-desc">Budget-constrained LLM deployment framed as a search over per-matrix quantization types.</div>
+        </div>
+        <div class="contrib">
+          <div class="c-num">02</div>
+          <div class="c-title">Near-free evaluation</div>
+          <div class="c-desc">GPTQ-compensated type copies assembled by byte copy, so no re-quantizing during search.</div>
+        </div>
+        <div class="contrib">
+          <div class="c-num">03</div>
+          <div class="c-title">Unified fidelity metric</div>
+          <div class="c-desc"><strong>flips% + 10&middot;KL</strong> scores candidates and ready-made presets on one scale.</div>
+        </div>
+        <div class="contrib">
+          <div class="c-num">04</div>
+          <div class="c-title">Honest evaluation protocol</div>
+          <div class="c-desc">Disjoint data sets, and a paired 95% interval judging the winner against the best preset.</div>
+        </div>
+      </div>
+
+      <div class="takeaway">
+        <span>The space is <strong>discrete and non-differentiable</strong>, yet easy to search: a <strong>genetic algorithm seeded with the best presets</strong> evolves per-matrix assignments.</span>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">6</span></div>
+  </section>
+
+  <!-- ============ SLIDE 7 · PROPOSED METHODOLOGY ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Proposed Methodology</span>
+      <h1 class="slide__title">Seven stages, one search</h1>
+      <p class="lead">
+        A linear, reproducible pipeline from data to verdict. The core is the search: a
+        genetic algorithm over per-matrix precision.
+      </p>
+
+      <div class="pipeline">
+        <div class="stage">
+          <div class="s-num">1</div>
+          <div class="s-name">Data</div>
+          <div class="s-desc">4 disjoint sets</div>
+        </div>
+        <div class="parrow">&rarr;</div>
+        <div class="stage">
+          <div class="s-num">2</div>
+          <div class="s-name">Model</div>
+          <div class="s-desc">13 GPTQ copies</div>
+        </div>
+        <div class="parrow">&rarr;</div>
+        <div class="stage">
+          <div class="s-num">3</div>
+          <div class="s-name">Presets</div>
+          <div class="s-desc">best competitor</div>
+        </div>
+        <div class="parrow">&rarr;</div>
+        <div class="stage stage--key">
+          <div class="s-num">4</div>
+          <div class="s-name">Search</div>
+          <div class="s-desc">genetic algorithm</div>
+        </div>
+        <div class="parrow">&rarr;</div>
+        <div class="stage">
+          <div class="s-num">5</div>
+          <div class="s-name">Distill</div>
+          <div class="s-desc">tune scales</div>
+        </div>
+        <div class="parrow">&rarr;</div>
+        <div class="stage">
+          <div class="s-num">6</div>
+          <div class="s-name">QAT</div>
+          <div class="s-desc">retrain (optional)</div>
+        </div>
+        <div class="parrow">&rarr;</div>
+        <div class="stage">
+          <div class="s-num">7</div>
+          <div class="s-name">Verdict</div>
+          <div class="s-desc">WIN / TIE / LOSE</div>
+        </div>
+      </div>
+
+      <div class="takeaway" style="margin-top: auto;">
+        <span>Every stage is a tested module, idempotent and reproducible. The <strong>search (stage 4)</strong> is a genetic algorithm, detailed next.</span>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">7</span></div>
+  </section>
+
+  <!-- ============ SLIDE 8 · THE GENETIC ALGORITHM ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Proposed Methodology</span>
+      <h1 class="slide__title">The genetic algorithm</h1>
+      <p class="lead">
+        A genome of per-matrix types is evolved under the RAM budget: seeded well,
+        crossed over, and stopped on a clean criterion.
+      </p>
+
+      <div class="ga-grid">
+        <div class="ga-card">
+          <div class="g-title">Start<span class="g-sub">seed population</span></div>
+          <ul>
+            <li>22 preset layouts</li>
+            <li>13 one-type layouts</li>
+            <li>4 CP-SAT layouts</li>
+            <li>each repaired into the RAM window</li>
+          </ul>
+        </div>
+        <div class="ga-card">
+          <div class="g-title">Crossover<span class="g-sub">operators</span></div>
+          <ul>
+            <li>two-point gene slicing</li>
+            <li>swaps whole layers, neighbours stay together</li>
+            <li>30% instead mutate 1-3 matrices by &plusmn;1-2 types</li>
+          </ul>
+        </div>
+        <div class="ga-card">
+          <div class="g-title">Fitness<span class="g-sub">score</span></div>
+          <ul>
+            <li><strong>score = flips% + 10&middot;KL</strong></li>
+            <li>measured against the 16-bit original</li>
+            <li>one measure for every candidate and the preset</li>
+          </ul>
+        </div>
+        <div class="ga-card">
+          <div class="g-title">Stop<span class="g-sub">ending metric</span></div>
+          <ul>
+            <li>15 candidates in a row, no new best</li>
+            <li>30-70 candidates in total</li>
+            <li>reproducible by seed</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">8</span></div>
+  </section>
+
+  <!-- ============ SLIDE 9 · THE VERDICT ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Proposed Methodology</span>
+      <h1 class="slide__title">The verdict</h1>
+      <p class="lead">
+        The winner is judged against the best preset once, on held-out data, with a paired
+        95% interval that yields WIN, TIE, or LOSE.
+      </p>
+
+      <div class="ga-grid">
+        <div class="ga-card">
+          <div class="g-title">Winner<span class="g-sub">selection</span></div>
+          <ul>
+            <li>3 finalists, scored on the winner set</li>
+            <li>never on the GA set where they emerged</li>
+            <li>lowest score wins; only its file is kept</li>
+          </ul>
+        </div>
+        <div class="ga-card">
+          <div class="g-title">Relative<span class="g-sub">the number</span></div>
+          <ul>
+            <li>relative = ours &divide; preset &times; 100</li>
+            <li>100 = the preset&#39;s damage</li>
+            <li>below 100 = less damage than the preset</li>
+          </ul>
+        </div>
+        <div class="ga-card">
+          <div class="g-title">Verdict<span class="g-sub">95% interval</span></div>
+          <ul>
+            <li>relative &plusmn; 1.96 &middot; SE of the paired difference</li>
+            <li>WIN below 100 &middot; TIE contains 100 &middot; LOSE above</li>
+            <li><strong>SE = &radic;( SE<sub>flips</sub>&sup2; + (10&middot;SE<sub>KL</sub>)&sup2; )</strong></li>
+          </ul>
+        </div>
+        <div class="ga-card">
+          <div class="g-title">Paired error<span class="g-sub">honest uncertainty</span></div>
+          <ul>
+            <li>flips per question, KL per chunk</li>
+            <li>only questions where the two files differ add uncertainty</li>
+            <li>same questions and text, so it is paired</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">9</span></div>
+  </section>
+
+  <!-- ============ SLIDE 10 · DATASET DESCRIPTION ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Dataset Description</span>
+      <h1 class="slide__title">Four sets that never overlap</h1>
+      <p class="lead">
+        Every set is built from pinned sources and never shares a document, prompt, or question.
+      </p>
+
+      <table class="dtable">
+        <thead>
+          <tr><th>Set</th><th>Used for</th><th>Questions</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="sdot" style="background:#2563eb;"></span>GA</td>
+            <td>the search&#39;s fitness</td>
+            <td class="q">MMLU 300 &middot; HellaSwag 200 &middot; ARC 200 &middot; WinoGrande 200</td>
+          </tr>
+          <tr>
+            <td><span class="sdot" style="background:#0d9488;"></span>winner</td>
+            <td>choosing the preset and the winner</td>
+            <td class="q">MMLU 1,000 &middot; HellaSwag 800 &middot; ARC 800 &middot; WinoGrande 800</td>
+          </tr>
+          <tr>
+            <td><span class="sdot" style="background:#059669;"></span>distill</td>
+            <td>importance matrix, GPTQ, distillation</td>
+            <td class="q">none (text only)</td>
+          </tr>
+          <tr>
+            <td><span class="sdot" style="background:#1e40af;"></span>verdict</td>
+            <td>the verdict, once</td>
+            <td class="q">MMLU 2,000 &middot; HellaSwag 2,000 &middot; ARC all &middot; WinoGrande all &middot; GSM8K 500</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="explain" style="margin-top: 22px;">
+        Built from pinned sources: FineWeb-Edu web text, OpenAssistant chat, and benchmark questions.
+        n-gram dedup drops any document containing 12 consecutive words of a question, keeping answers out of the
+        calibration text.
+      </p>
+
+      <div class="takeaway" style="margin-top: auto;">
+        <span>Nothing is trained on the GA, winner, or verdict sets; nothing is chosen with the verdict set.</span>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">10</span></div>
+  </section>
+
+  <!-- ============ SLIDE 11 · EXPERIMENTAL SETUP ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Experimental Setup</span>
+      <h1 class="slide__title">Two models, two budgets</h1>
+      <p class="lead">
+        Two instruction-tuned models, quantized end to end on a GPU server and timed on a Raspberry Pi 5.
+      </p>
+
+      <div class="grid cols-2" style="margin-top: 26px; gap: 20px;">
+        <div class="spec-card">
+          <div class="sp-title">Qwen2.5-1.5B-Instruct</div>
+          <div class="sp-chips">
+            <span class="sp-chip">1.5B params</span>
+            <span class="sp-chip">1 GiB budget</span>
+            <span class="sp-chip sp-chip--dark">competitor: IQ2_S</span>
+          </div>
+        </div>
+        <div class="spec-card">
+          <div class="sp-title">Qwen2.5-14B-Instruct</div>
+          <div class="sp-chips">
+            <span class="sp-chip">14.8B params</span>
+            <span class="sp-chip">5 GiB budget</span>
+            <span class="sp-chip sp-chip--dark">competitor: IQ2_XXS</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid cols-2" style="margin-top: 20px; gap: 20px;">
+        <div class="spec-card">
+          <div class="sp-sub">Build server</div>
+          <div class="sp-title">NVIDIA RTX PRO 6000 &middot; 96 GiB</div>
+          <div class="sp-chips">
+            <span class="sp-chip">AMD EPYC 9224 &middot; 124 GiB RAM</span>
+            <span class="sp-chip">CUDA 12.9</span>
+          </div>
+        </div>
+        <div class="spec-card">
+          <div class="sp-sub">Target device</div>
+          <div class="sp-title">Raspberry Pi 5</div>
+          <div class="sp-chips">
+            <span class="sp-chip">8 GiB RAM</span>
+            <span class="sp-chip">decode / prefill timed here</span>
+          </div>
+        </div>
+      </div>
+
+      <p class="explain" style="margin-top: auto;">
+        <strong>Software:</strong> llama.cpp at a pinned commit (quantize, imatrix, perplexity, server),
+        Hugging Face Transformers, and OR-Tools CP-SAT, run in rootless Podman containers.
+      </p>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">11</span></div>
+  </section>
+
+  <!-- ============ SLIDE 12 · EXPERIMENTAL RESULTS ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Experimental Results</span>
+      <h1 class="slide__title">Both contests are a WIN</h1>
+      <p class="lead">On held-out data, the winner beats the best preset on every task.</p>
+
+      <div class="verdict">
+        <div class="sec-label">The verdict &middot; relative damage, 100 = the preset</div>
+        <div class="v-row">
+          <div class="v-label">Qwen2.5-1.5B &middot; 1 GiB</div>
+          <div class="v-track">
+            <div class="v-ci" style="left:52.08%; width:7.58%;"></div>
+            <div class="v-dot" style="left:55.92%;"></div>
+            <div class="v-base" style="left:83.33%;"></div>
+          </div>
+          <div class="v-val"><strong>67.1</strong> [62.5, 71.6]</div>
+          <span class="v-win">WIN</span>
+        </div>
+        <div class="v-row">
+          <div class="v-label">Qwen2.5-14B &middot; 5 GiB</div>
+          <div class="v-track">
+            <div class="v-ci" style="left:56.92%; width:9.75%;"></div>
+            <div class="v-dot" style="left:61.75%;"></div>
+            <div class="v-base" style="left:83.33%;"></div>
+          </div>
+          <div class="v-val"><strong>74.1</strong> [68.3, 80.0]</div>
+          <span class="v-win">WIN</span>
+        </div>
+        <div class="v-legend">
+          <span><i class="sw sw--blue"></i> our damage &plusmn; 95% interval</span>
+          <span><i class="sw sw--teal"></i> the preset (100)</span>
+        </div>
+      </div>
+
+      <div class="acc-wrap">
+        <div class="sec-label">Held-out accuracy &middot; ours vs preset vs original</div>
+        <svg class="acc-chart" viewBox="0 0 1136 285" role="img" aria-label="Held-out accuracy by task: ours vs preset vs original, for both models.">
+  <text x="36" y="26" font-size="15" font-weight="800" fill="#0f172a">Qwen2.5-1.5B-Instruct</text>
+<line x1="36" y1="250.0" x2="550" y2="250.0" stroke="#eef2f7" stroke-width="1"/>
+<text x="28" y="254.0" text-anchor="end" font-size="11" fill="#94a3b8">0</text>
+<line x1="36" y1="148.0" x2="550" y2="148.0" stroke="#eef2f7" stroke-width="1"/>
+<text x="28" y="152.0" text-anchor="end" font-size="11" fill="#94a3b8">50</text>
+<line x1="36" y1="46.0" x2="550" y2="46.0" stroke="#eef2f7" stroke-width="1"/>
+<text x="28" y="50.0" text-anchor="end" font-size="11" fill="#94a3b8">100</text>
+<rect x="54.4" y="157.0" width="20" height="93.0" rx="3" fill="#94a3b8"/>
+<rect x="77.4" y="140.7" width="20" height="109.3" rx="3" fill="#2563eb"/>
+<rect x="100.4" y="127.4" width="20" height="122.6" rx="3" fill="#dbeafe"/>
+<text x="87.4" y="134.7" text-anchor="middle" font-size="11.5" font-weight="800" fill="#1e40af">53.6</text>
+<text x="87.4" y="272" text-anchor="middle" font-size="12" font-weight="600" fill="#5b6b82">MMLU</text>
+<rect x="157.2" y="133.3" width="20" height="116.7" rx="3" fill="#94a3b8"/>
+<rect x="180.2" y="121.5" width="20" height="128.5" rx="3" fill="#2563eb"/>
+<rect x="203.2" y="111.9" width="20" height="138.1" rx="3" fill="#dbeafe"/>
+<text x="190.2" y="115.5" text-anchor="middle" font-size="11.5" font-weight="800" fill="#1e40af">63.0</text>
+<text x="190.2" y="272" text-anchor="middle" font-size="12" font-weight="600" fill="#5b6b82">HellaSwag</text>
+<rect x="260.0" y="172.5" width="20" height="77.5" rx="3" fill="#94a3b8"/>
+<rect x="283.0" y="164.7" width="20" height="85.3" rx="3" fill="#2563eb"/>
+<rect x="306.0" y="155.1" width="20" height="94.9" rx="3" fill="#dbeafe"/>
+<text x="293.0" y="158.7" text-anchor="middle" font-size="11.5" font-weight="800" fill="#1e40af">41.8</text>
+<text x="293.0" y="272" text-anchor="middle" font-size="12" font-weight="600" fill="#5b6b82">ARC-C</text>
+<rect x="362.8" y="132.1" width="20" height="117.9" rx="3" fill="#94a3b8"/>
+<rect x="385.8" y="125.4" width="20" height="124.6" rx="3" fill="#2563eb"/>
+<rect x="408.8" y="119.6" width="20" height="130.4" rx="3" fill="#dbeafe"/>
+<text x="395.8" y="119.4" text-anchor="middle" font-size="11.5" font-weight="800" fill="#1e40af">61.1</text>
+<text x="395.8" y="272" text-anchor="middle" font-size="12" font-weight="600" fill="#5b6b82">WinoGrande</text>
+<rect x="465.6" y="247.3" width="20" height="2.7" rx="3" fill="#94a3b8"/>
+<rect x="488.6" y="201.7" width="20" height="48.3" rx="3" fill="#2563eb"/>
+<rect x="511.6" y="166.4" width="20" height="83.6" rx="3" fill="#dbeafe"/>
+<text x="498.6" y="195.7" text-anchor="middle" font-size="11.5" font-weight="800" fill="#1e40af">23.7</text>
+<text x="498.6" y="272" text-anchor="middle" font-size="12" font-weight="600" fill="#5b6b82">GSM8K</text>
+  <text x="614" y="26" font-size="15" font-weight="800" fill="#0f172a">Qwen2.5-14B-Instruct</text>
+<line x1="614" y1="250.0" x2="1128" y2="250.0" stroke="#eef2f7" stroke-width="1"/>
+<text x="606" y="254.0" text-anchor="end" font-size="11" fill="#94a3b8">0</text>
+<line x1="614" y1="148.0" x2="1128" y2="148.0" stroke="#eef2f7" stroke-width="1"/>
+<text x="606" y="152.0" text-anchor="end" font-size="11" fill="#94a3b8">50</text>
+<line x1="614" y1="46.0" x2="1128" y2="46.0" stroke="#eef2f7" stroke-width="1"/>
+<text x="606" y="50.0" text-anchor="end" font-size="11" fill="#94a3b8">100</text>
+<rect x="632.4" y="115.6" width="20" height="134.4" rx="3" fill="#94a3b8"/>
+<rect x="655.4" y="108.8" width="20" height="141.2" rx="3" fill="#2563eb"/>
+<rect x="678.4" y="86.0" width="20" height="164.0" rx="3" fill="#dbeafe"/>
+<text x="665.4" y="102.8" text-anchor="middle" font-size="11.5" font-weight="800" fill="#1e40af">69.2</text>
+<text x="665.4" y="272" text-anchor="middle" font-size="12" font-weight="600" fill="#5b6b82">MMLU</text>
+<rect x="735.2" y="97.0" width="20" height="153.0" rx="3" fill="#94a3b8"/>
+<rect x="758.2" y="90.7" width="20" height="159.3" rx="3" fill="#2563eb"/>
+<rect x="781.2" y="79.0" width="20" height="171.0" rx="3" fill="#dbeafe"/>
+<text x="768.2" y="84.7" text-anchor="middle" font-size="11.5" font-weight="800" fill="#1e40af">78.1</text>
+<text x="768.2" y="272" text-anchor="middle" font-size="12" font-weight="600" fill="#5b6b82">HellaSwag</text>
+<rect x="838.0" y="140.5" width="20" height="109.5" rx="3" fill="#94a3b8"/>
+<rect x="861.0" y="139.4" width="20" height="110.6" rx="3" fill="#2563eb"/>
+<rect x="884.0" y="124.5" width="20" height="125.5" rx="3" fill="#dbeafe"/>
+<text x="871.0" y="133.4" text-anchor="middle" font-size="11.5" font-weight="800" fill="#1e40af">54.2</text>
+<text x="871.0" y="272" text-anchor="middle" font-size="12" font-weight="600" fill="#5b6b82">ARC-C</text>
+<rect x="940.8" y="109.2" width="20" height="140.8" rx="3" fill="#94a3b8"/>
+<rect x="963.8" y="95.4" width="20" height="154.6" rx="3" fill="#2563eb"/>
+<rect x="986.8" y="98.4" width="20" height="151.6" rx="3" fill="#dbeafe"/>
+<text x="973.8" y="89.4" text-anchor="middle" font-size="11.5" font-weight="800" fill="#1e40af">75.8</text>
+<text x="973.8" y="272" text-anchor="middle" font-size="12" font-weight="600" fill="#5b6b82">WinoGrande</text>
+<rect x="1043.6" y="130.3" width="20" height="119.7" rx="3" fill="#94a3b8"/>
+<rect x="1066.6" y="105.2" width="20" height="144.8" rx="3" fill="#2563eb"/>
+<rect x="1089.6" y="82.1" width="20" height="167.9" rx="3" fill="#dbeafe"/>
+<text x="1076.6" y="99.2" text-anchor="middle" font-size="11.5" font-weight="800" fill="#1e40af">71.0</text>
+<text x="1076.6" y="272" text-anchor="middle" font-size="12" font-weight="600" fill="#5b6b82">GSM8K</text>
+</svg>
+        <div class="acc-legend">
+          <span><i class="sw sw--blue"></i> ours</span>
+          <span><i class="sw sw--gray"></i> preset</span>
+          <span><i class="sw sw--light"></i> original</span>
+        </div>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">12</span></div>
+  </section>
+
+  <!-- ============ SLIDE 13 · ABLATION & ANALYSIS ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Ablation &amp; Analysis</span>
+      <h1 class="slide__title">What each stage adds</h1>
+      <p class="lead">
+        Distillation and QAT each move the winner further past the preset, and the search
+        lands on a real mixed-precision mix.
+      </p>
+
+      <div class="grid cols-2" style="margin-top: 24px; gap: 20px; align-items: start;">
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          <div class="ga-card">
+            <div class="g-title">Distillation<span class="g-sub">scale tuning</span></div>
+            <ul>
+              <li>1.5B score <strong>22.77 &rarr; 17.93</strong></li>
+              <li>14B winner &rarr; <strong>16.74</strong></li>
+              <li>KL -70% at low bits (Q2_K 0.0288 &rarr; 0.0079)</li>
+            </ul>
+          </div>
+          <div class="ga-card">
+            <div class="g-title">QAT (Block-AP)<span class="g-sub">optional retraining</span></div>
+            <ul>
+              <li>retrains weights, block by block</li>
+              <li>14B: <strong>73.38%</strong> accuracy (+8.82 over preset)</li>
+              <li>test KL -44% (Q2_K 0.0294 &rarr; 0.0165)</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="ga-card">
+          <div class="g-title">The 14B winner&#39;s mix<span class="g-sub">per-matrix types</span></div>
+          <div class="mix">
+            <div class="mix-row"><span class="mix-name">IQ1_S</span><div class="mix-track"><div class="mix-fill" style="width:17.2%;"></div></div><span class="mix-count">16</span></div>
+            <div class="mix-row"><span class="mix-name">IQ2_XXS</span><div class="mix-track"><div class="mix-fill" style="width:100%;"></div></div><span class="mix-count">93</span></div>
+            <div class="mix-row"><span class="mix-name">IQ2_XS</span><div class="mix-track"><div class="mix-fill" style="width:44.1%;"></div></div><span class="mix-count">41</span></div>
+            <div class="mix-row"><span class="mix-name">IQ2_S</span><div class="mix-track"><div class="mix-fill" style="width:74.2%;"></div></div><span class="mix-count">69</span></div>
+            <div class="mix-row"><span class="mix-name">IQ3_XXS</span><div class="mix-track"><div class="mix-fill" style="width:54.8%;"></div></div><span class="mix-count">51</span></div>
+            <div class="mix-row"><span class="mix-name">IQ4_XS</span><div class="mix-track"><div class="mix-fill" style="width:21.5%;"></div></div><span class="mix-count">20</span></div>
+          </div>
+          <div class="mix-note">About 3 bits per weight, down from 16. The 1.5B winner is nearly uniform (192 / 197 are IQ3_XXS).</div>
+        </div>
+      </div>
+
+      <div class="takeaway" style="margin-top: auto;">
+        <span><strong>On the Pi 5:</strong> 1.5B decodes at 9.9 tok/s (0.71 GiB peak) &middot; 14B at 1.1 tok/s (4.68 GiB peak).</span>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">13</span></div>
+  </section>
+
+  <!-- ============ SLIDE 14 · DISCUSSION ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Discussion</span>
+      <h1 class="slide__title">Interpretation and limitations</h1>
+      <p class="lead">
+        The win comes from spending saved bits where they matter. A few limitations and open
+        questions remain.
+      </p>
+
+      <div class="grid cols-2" style="margin-top: 26px; gap: 20px; align-items: start;">
+        <div class="ga-card">
+          <div class="g-title">Interpretation<span class="g-sub">what the win means</span></div>
+          <ul>
+            <li>Mixed precision spends saved bits where they matter: most matrices drop to 2-3 bits, a few stay at 4.</li>
+            <li>Step-by-step reasoning (GSM8K) recovers the most, the first place uniform quantization fails.</li>
+            <li>Both winners fit their budget with margin and run at usable speed on the Pi 5.</li>
+          </ul>
+        </div>
+
+        <div class="ga-card">
+          <div class="g-title">Limitations<span class="g-sub">challenges and open items</span></div>
+          <ul>
+            <li>Two models run so far (1.5B, 14B); the 7B, 22B, and 24B contests remain.</li>
+            <li>The 14B Pi run was thermally throttled, so its speed is a lower bound.</li>
+            <li>QAT&#39;s on-disk cache is large (172 GB for the 14B), so it stays optional.</li>
+            <li>Results aren&#39;t directly comparable to the old pipeline; the fair test is both winners through the same verdict.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">14</span></div>
+  </section>
+
+  <!-- ============ SLIDE 15 · CONCLUSION ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Conclusion</span>
+      <h1 class="slide__title">Memory becomes a quality win</h1>
+      <p class="lead">
+        Mixed-precision search turns a hard memory budget into a quality win over the best
+        ready-made preset.
+      </p>
+
+      <div class="grid cols-2" style="margin-top: 26px; gap: 20px; align-items: start;">
+        <div class="ga-card">
+          <div class="g-title">What we found<span class="g-sub">key results</span></div>
+          <ul>
+            <li>Both contests WIN: relative damage <strong>67.1</strong> (1.5B) and <strong>74.1</strong> (14B), intervals below the preset.</li>
+            <li>Models shrink about <strong>80%</strong> (16-bit to ~3 bits per weight) and still fit their budgets.</li>
+            <li>Reasoning recovers the most: <strong>GSM8K +22.4</strong> points on the 1.5B.</li>
+          </ul>
+        </div>
+        <div class="ga-card">
+          <div class="g-title">Where this goes<span class="g-sub">future work</span></div>
+          <ul>
+            <li>Training-time quantization: fold the QAT objective into the model&#39;s own training.</li>
+            <li>Mixture-of-experts: keep rarely-routed experts at extreme low precision.</li>
+            <li>Layer-wise loading: one resident layer, stream the rest (AirLLM).</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">15</span></div>
+  </section>
+
+  <!-- ============ SLIDE 16 · TEAM CONTRIBUTIONS ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">Team Contributions</span>
+      <h1 class="slide__title">Who did what</h1>
+      <p class="lead">The pipeline is split evenly across the three of us, one owner per part.</p>
+
+      <div class="members">
+        <div class="member">
+          <div class="m-name">Jia Khot</div>
+          <div class="m-role">pipeline &amp; search</div>
+          <ul>
+            <li>Formulated the problem and rebuilt the pipeline end to end</li>
+            <li>Genetic search, fitness, and the verdict</li>
+            <li>Honest evaluation protocol (disjoint sets)</li>
+          </ul>
+        </div>
+        <div class="member">
+          <div class="m-name">Lalit Maurya</div>
+          <div class="m-role">data &amp; model</div>
+          <ul>
+            <li>Four disjoint data sets and n-gram dedup</li>
+            <li>13 GPTQ type copies and the importance matrix</li>
+            <li>Preset sizing and the RAM model</li>
+          </ul>
+        </div>
+        <div class="member">
+          <div class="m-name">Rachit Kumar</div>
+          <div class="m-role">distillation &amp; training</div>
+          <ul>
+            <li>Distillation (per-block scale multipliers)</li>
+            <li>Block-AP QAT, ported and verified</li>
+            <li>anton runs, containers, and deployment</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">16</span></div>
+  </section>
+
+  <!-- ============ SLIDE 17 · REFERENCES ============ -->
+  <section class="slide">
+    <div class="slide__body">
+      <span class="kicker">References</span>
+      <h1 class="slide__title">Papers, tools, and data</h1>
+
+      <div class="refs">
+        <div class="ref"><span class="idx">[1]</span><span>Frantar et al. <em>GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers</em>, 2023.</span></div>
+        <div class="ref"><span class="idx">[2]</span><span>Lin et al. <em>AWQ: Activation-aware Weight Quantization for On-Device LLM Compression and Acceleration</em>, 2024.</span></div>
+        <div class="ref"><span class="idx">[3]</span><span>Xiao et al. <em>SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models</em>, 2023.</span></div>
+        <div class="ref"><span class="idx">[4]</span><span>Dettmers et al. <em>SpQR: A Sparse-Quantized Representation for Near-Lossless LLM Weight Compression</em>, 2023.</span></div>
+        <div class="ref"><span class="idx">[5]</span><span>Dong et al. <em>HAWQ: Hessian AWare Quantization of Neural Networks with Mixed-Precision</em>, 2019.</span></div>
+        <div class="ref"><span class="idx">[6]</span><span>Wang et al. <em>HAQ: Hardware-Aware Automated Quantization with Mixed Precision</em>, 2019.</span></div>
+        <div class="ref"><span class="idx">[7]</span><span>Xu et al. <em>PTMQ: Post-training Multi-Bit Quantization of Neural Networks</em>, 2024.</span></div>
+        <div class="ref"><span class="idx">[8]</span><span>Chen et al. <em>EfficientQAT: Efficient Quantization-Aware Training for Large Language Models</em>, 2024.</span></div>
+        <div class="ref"><span class="idx">[9]</span><span>Hinton, Vinyals, Dean. <em>Distilling the Knowledge in a Neural Network</em>, 2015.</span></div>
+        <div class="ref"><span class="idx">[10]</span><span>Gerganov. <em>llama.cpp</em>, 2023.</span></div>
+        <div class="ref"><span class="idx">[11]</span><span>Goldberg. <em>Genetic Algorithms in Search, Optimization and Machine Learning</em>, 1989.</span></div>
+        <div class="ref"><span class="idx">[12]</span><span>Alizadeh et al. <em>LLM in a Flash: Efficient LLM Inference with Limited Memory</em>, 2023.</span></div>
+        <div class="ref"><span class="idx">[13]</span><span>Wolf et al. <em>Transformers: State-of-the-Art Natural Language Processing</em>, 2020.</span></div>
+        <div class="ref"><span class="idx">[14]</span><span>Lyo. <em>AirLLM: layer-by-layer LLM inference for limited memory</em>, 2024.</span></div>
+      </div>
+
+      <div class="refs-note" style="margin-top: auto;">
+        <strong>Datasets:</strong> FineWeb-Edu &middot; OpenAssistant &middot; MMLU &middot; HellaSwag &middot; ARC &middot; WinoGrande &middot; GSM8K.
+      </div>
+    </div>
+    <div class="slide__foot"><span>Panther · CSD361</span><span class="page">17</span></div>
+  </section>
+
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "panther-presentation",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Panther CSD361 final presentation — HTML deck rendered to PDF via Playwright.",
+  "scripts": {
+    "export": "node export.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

@@ -22,3 +22,7 @@ dist/
 /deploy/server/local.env
 /.claude/
 .DS_Store
+
+# Presentation (Node / Playwright)
+presentation/node_modules/
+presentation/preview-*.png
