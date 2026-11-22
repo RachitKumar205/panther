@@ -30,9 +30,11 @@ RUN git init -q /opt/llama.cpp && cd /opt/llama.cpp \
 # The programs Panther calls by name (and libggml-base.so, built beside them). sm_120: RTX PRO 6000 Blackwell.
 RUN cmake -S /opt/llama.cpp -B /opt/llama.cpp/build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DGGML_NATIVE=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF \
-      -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
+      -DLLAMA_USE_PREBUILT_UI=OFF -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
  && cmake --build /opt/llama.cpp/build-cuda -j "${JOBS}" \
       --target llama-quantize llama-imatrix llama-perplexity llama-server llama-tokenize
+# LLAMA_USE_PREBUILT_UI=OFF: llama-server's browser UI is not downloaded (unused: Panther calls its API only; the
+# pinned commit's prebuilt assets on Hugging Face were replaced on 21 Nov and no longer pass its check)
 
 # The HF → GGUF converter's own environment, from llama.cpp's requirements at the same commit (it pins an older
 # transformers than Panther's); deploy/server/convert.py runs the converter with it
