@@ -34,6 +34,25 @@ P=(podman --root "$W/containers/storage" --runroot "/run/user/$(id -u)/panther" 
 mkdir -p "$DATA/logs" "$DATA/scratch" "$W/tmp/libpod"
 export TMPDIR="$W/tmp"
 
+# GitLab guard (from the rachit branch): no container starts while GitLab is unhealthy or Panther is paused, and
+# _guard pauses every Panther container after 3 bad checks a minute apart, resuming them after 5 good ones
+healthy() { [ "$(curl -sL -o /dev/null -w '%{http_code}' --max-time 20 "${PANTHER_HEALTH_URL:?set PANTHER_HEALTH_URL in deploy/server/local.env (the GitLab guard)}")" = 200 ]; }
+held() { [ -e "$DATA/PAUSED" ] || [ -e "$DATA/PAUSED.guard" ] || ! healthy; }
+ours() { "${P[@]}" ps --format '{{.Names}}' --filter "status=$1" | grep '^panther-' | grep -v '^panther-dashboard$' || true; }
+guard() {
+  local bad=0 good=0
+  while sleep 60; do
+    if healthy; then good=$((good + 1)); bad=0; else bad=$((bad + 1)); good=0; fi
+    if [ "$bad" -ge 3 ] && [ ! -e "$DATA/PAUSED.guard" ]; then
+      touch "$DATA/PAUSED.guard"; ours running | xargs -r "${P[@]}" pause >/dev/null
+      echo "$(date '+%F %T') GitLab unhealthy: paused"
+    elif [ "$good" -ge 5 ] && [ -e "$DATA/PAUSED.guard" ]; then
+      rm -f "$DATA/PAUSED.guard"; [ -e "$DATA/PAUSED" ] || ours paused | xargs -r "${P[@]}" unpause >/dev/null
+      echo "$(date '+%F %T') GitLab healthy again: resumed"
+    fi
+  done
+}
+
 contest() {  # 14b@5 -> size, id
   [[ "${1:-}" =~ ^([0-9.]+[bB])@([0-9]+)$ ]] || { echo "write a contest like 14b@5, not '${1:-}'"; exit 1; }
   size="${BASH_REMATCH[1],,}"; id="${size}@${BASH_REMATCH[2]}"
@@ -47,28 +66,41 @@ container() {  # container network|gpu NAME MEMORY COMMAND...: one container, wa
            -e "HF_TOKEN=${HF_TOKEN:-}")
   case "$kind" in
     network) a+=(--network pasta) ;;
-    gpu) a+=(--network none --device nvidia.com/gpu=all --security-opt label=disable -e HF_HUB_OFFLINE=1) ;;
+    gpu) a+=(--network none --device nvidia.com/gpu=all --security-opt label=disable -e HF_HUB_OFFLINE=1
+             --tmpfs "/work/scratch:rw,size=${SCRATCH:-16g}" -e PANTHER_SCRATCH=/work/scratch) ;;  # candidates in RAM
   esac
+  if held; then echo "$name waits: paused, or GitLab unhealthy"; while held; do sleep 60; done; fi
   "${P[@]}" rm -f --ignore "$name" >/dev/null
-  "${P[@]}" run --rm "${a[@]}" "$IMAGE" "$@"
+  "${P[@]}" run --rm "${a[@]}" "$IMAGE" "$@" 2>&1 | stamp  # each line with its time, for the dashboard
 }
+stamp() { while IFS= read -r line; do printf '%s %s\n' "$(date '+%F %T')" "$line"; done; }
 
 case "${1:-}" in
   build)
     commit="$(awk '/^llama_cpp:/{f=1} f&&/commit:/{print $2; exit}' "$W/repo/configs/models.yaml")"
-    "${P[@]}" build --memory 64g -t "$IMAGE" --build-arg "LLAMA_COMMIT=$commit" \
-      --build-arg "JOBS=${PANTHER_CPUS:-40}" -f "$W/repo/deploy/server/Containerfile" "$W/repo" ;;
+    echo "$(date '+%F %T') build: started" | tee "$DATA/logs/build.log"  # the dashboard follows data/logs/build.log
+    if "${P[@]}" build --memory 64g -t "$IMAGE" --build-arg "LLAMA_COMMIT=$commit" \
+         --build-arg "JOBS=${PANTHER_CPUS:-40}" -f "$W/repo/deploy/server/Containerfile" "$W/repo" 2>&1 \
+         | stamp | tee -a "$DATA/logs/build.log"; then
+      echo "$(date '+%F %T') build: done" | tee -a "$DATA/logs/build.log"
+    else
+      echo "$(date '+%F %T') build: FAILED" | tee -a "$DATA/logs/build.log"; exit 1
+    fi ;;
   run)
     contest "${2:-}"; shift 2
     "${P[@]}" image exists "$IMAGE" || "$0" build
+    healthy || { echo "GitLab is not healthy (PANTHER_HEALTH_URL): not starting"; exit 1; }
+    pgrep -f "panther _guard" >/dev/null || (setsid nohup "$0" _guard >> "$DATA/logs/guard.log" 2>&1 < /dev/null &)
     (setsid nohup "$0" _run "$id" "$@" >> "$DATA/logs/$id.log" 2>&1 < /dev/null & echo $! > "$DATA/logs/$id.pid")
     echo "started $id; ./panther logs $id" ;;
   _run)  # detached: the fetch container (network, no GPU), then the run container (GPU, no network)
     contest "$2"; run_args=("${@:3}")
+    SCRATCH="$((8 * ${id#*@} + 4))g"  # a search round's 8 candidate files (each about the budget) and a margin
     echo "$(date '+%F %T') $id: started"
     container network "$id-fetch" 32g /opt/venv/bin/python -m panther fetch "$size"
     container gpu "$id-run" "${PANTHER_RAM:-100g}" /opt/venv/bin/python -m panther run "$id" "${run_args[@]}"
     echo "$(date '+%F %T') $id: done" ;;
+  _guard) guard ;;
   logs) contest "${2:-}"; exec tail -n 50 -f "$DATA/logs/$id.log" ;;
   stop)
     contest "${2:-}"
