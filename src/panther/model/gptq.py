@@ -79,7 +79,10 @@ def collect_hessians(model: torch.nn.Module, ids: torch.Tensor, modules: list[st
     for name in modules:
         def add(_module, inputs, name=name):
             x = inputs[0].reshape(-1, inputs[0].shape[-1]).float()
-            sums[name] = sums.get(name, 0) + x.T @ x
+            if name in sums:  # in place: one H per module, not a second one for each sum
+                sums[name].add_(x.T @ x)
+            else:
+                sums[name] = x.T @ x
         hooks.append(model.get_submodule(name).register_forward_pre_hook(add))
     device = next(model.parameters()).device
     with torch.no_grad():
@@ -87,4 +90,4 @@ def collect_hessians(model: torch.nn.Module, ids: torch.Tensor, modules: list[st
             model(ids[start:start + batch].to(device))
     for hook in hooks:
         hook.remove()
-    return {name: s / ids.numel() for name, s in sums.items()}
+    return {name: s.div_(ids.numel()) for name, s in sums.items()}  # in place: the group's H fit, not twice over

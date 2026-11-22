@@ -9,6 +9,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,6 +27,9 @@ REPO = Path(__file__).resolve().parents[3]
 DATA = Path(os.environ.get("PANTHER_DATA", REPO / "data"))
 CONVERT = Path(os.environ.get("PANTHER_CONVERT", "/opt/llama.cpp/convert_hf_to_gguf.py"))
 GIB = 1024**3
+# GPTQ rounds a matrix into this many types at once, the CPUs shared between them (llama.cpp's quantizer is the
+# slow part, in C without the GIL); 4 keeps the 14B's output layer (~3 GB a type in float32) inside the GPU's room
+TYPES_AT_ONCE = 4
 
 # The 13 types a matrix may take, fewest bits first. IQ3_S is left out: the same size as Q3_K, measured the same.
 TYPES = ("IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "Q2_K", "IQ3_XXS", "Q3_K",
@@ -145,7 +149,7 @@ class Model:
             readers[input_of(name)].append(name)
 
         errors = json.loads(self.errors.read_text()) if self.errors.exists() else {}
-        quantizer = Quantizer()
+        quantizer = Quantizer(threads=max(2, (os.cpu_count() or 8) // TYPES_AT_ONCE))
         device = "cuda" if torch.cuda.is_available() else "cpu"
         done = set()
         for hessians in self.hessians(text, list(readers)):
@@ -153,11 +157,17 @@ class Model:
                 gptq = GPTQ(h.to(device))
                 for name in readers[module]:
                     w = torch.from_numpy(gguf.quants.dequantize(original[name].data, original[name].tensor_type))
-                    for t, tensors in copies.items():
+                    w = w.to(device)
+
+                    def one(t: str, name: str = name, w: torch.Tensor = w, gptq: GPTQ = gptq) -> float:
+                        tensors = copies[t]  # each type on its own: the same codes as one after another
                         assert tensors[name].tensor_type.name == t
-                        codes, values = gptq.round(w.to(device), t, quantizer)
+                        codes, values = gptq.round(w, t, quantizer)
                         tensors[name].data[...] = codes.reshape(tensors[name].data.shape)
-                        errors.setdefault(name, {})[t] = gptq.output_error(w.to(device), values)
+                        return gptq.output_error(w, values)
+                    with ThreadPoolExecutor(TYPES_AT_ONCE) as pool:
+                        for t, error in zip(copies, pool.map(one, copies), strict=True):
+                            errors.setdefault(name, {})[t] = error
                     done.add(name)
             del hessians  # free this group's H before the next group is collected (they share the GPU)
         assert done == set(matrices), f"no GPTQ codes for {sorted(set(matrices) - done)}"

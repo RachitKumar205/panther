@@ -51,7 +51,9 @@ class Genes:
 
     def __init__(self, model: Model, budget: Budget) -> None:
         self.model, self.budget = model, budget
-        original = gguf.GGUFReader(model.original)
+        original = reader(model.original)
+        for t in TYPES:  # parsed now, once: a round's threads would otherwise all parse the same files at once
+            reader(model.copy(t))
         matrices = sorted((t for t in original.tensors if len(t.shape) == 2), key=lambda t: position(t.name))
         self.order = [t.name for t in matrices]
         self.units = [[t.name for t in matrices if position(t.name) == p]  # crossover moves whole units
