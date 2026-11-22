@@ -7,17 +7,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-import model_viz as mv
 
 PLOTS = Path(__file__).resolve().parents[1] / "plots"
 GIB = 2 ** 30
 
 
+# Tensor bytes of the 16-bit original and of the winner, read from the GGUF files on the build server
+SIZES = {"1.5b": (3_087_718_400, 581_259_776), "7b": (15_231_899_648, 4_827_504_640),
+         "14b": (29_541_748_736, 4_531_470_336)}
+
+
 def fig_squares(key: str) -> None:
-    mats = mv.build_model(key)
-    assign = mv.assign_types(mats, mv.WINNER[key])
-    b16 = sum(r * c * 2 for (_, r, c) in mats)
-    bq = sum(r * c * mv.BPW[t] / 8 for (_, r, c), t in zip(mats, assign))
+    b16, bq = SIZES[key]
     ratio = bq / b16
     saved = 100 * (1 - ratio)
     s = ratio ** 0.5
@@ -50,6 +51,6 @@ def fig_squares(key: str) -> None:
 
 
 if __name__ == "__main__":
-    for key in ("1.5b", "14b"):
+    for key in SIZES:
         fig_squares(key)
     print("wrote square plots")

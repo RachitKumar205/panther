@@ -1,8 +1,8 @@
-"""Analyse the two Panther runs (1.5B@1 and 14B@5) and produce report figures.
+"""Analyse the Panther contests and produce the report figures.
 
-The held-out (verdict) numbers are transcribed from runs/panther-runs-21nov/README.md,
-and the per-task multiple-choice accuracies are cross-checked against the raw
-`benchmark-results.csv` files with pandas.
+The held-out (verdict) numbers are copied from each contest's verdict.json on the build server
+(data/contests/<model>@<budget>/verdict.json, 22 Nov 2026). Answer flips are score - 10 x KL, the
+fitness definition, since verdict.json records the score and the KL.
 """
 
 from __future__ import annotations
@@ -13,9 +13,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
-RUNS = Path(__file__).resolve().parents[1] / "runs" / "panther-runs-21nov"
 PLOTS = Path(__file__).resolve().parents[1] / "plots"
 PLOTS.mkdir(exist_ok=True)
 
@@ -27,32 +25,45 @@ DATA = {
         "short": "1.5B @ 1 GiB",
         "preset": "IQ2_S",
         "acc": {
-            "ours": [53.6, 63.0, 41.8, 61.1, 23.7],
-            "preset": [45.6, 57.2, 38.0, 57.8, 1.3],
-            "original": [60.1, 67.7, 46.5, 63.9, 41.0],
+            "ours": [53.8, 63.3, 43.8, 62.5, 33.4],
+            "preset": [45.9, 56.1, 36.8, 59.0, 4.4],
+            "original": [62.2, 67.5, 46.5, 63.9, 35.6],
         },
-        "kl": {"ours": 0.26, "preset": 0.51},
-        "flips": {"ours": 20.21, "preset": 28.81},
-        "same_top": {"ours": 78.2, "preset": 66.9},
-        "ppl": {"ours": 9.50, "preset": 12.44, "original": 7.42},
-        "relative": 67.1,
-        "ci": (62.5, 71.6),
+        "kl": {"ours": 0.194, "preset": 0.494},
+        "flips": {"ours": 21.36, "preset": 27.49},
+        "same_top": {"ours": 79.4, "preset": 67.7},
+        "relative": 71.9,
+        "ci": (67.5, 76.2),
+    },
+    "7b@5": {
+        "label": "Qwen2.5-7B-Instruct @ 5 GiB",
+        "short": "7B @ 5 GiB",
+        "preset": "Q4_K_M",
+        "acc": {
+            "ours": [75.4, 79.3, 52.7, 71.0, 75.8],
+            "preset": [74.7, 78.8, 54.1, 70.5, 77.4],
+            "original": [75.5, 79.3, 53.2, 70.8, 77.2],
+        },
+        "kl": {"ours": 0.0129, "preset": 0.0154},
+        "flips": {"ours": 6.34, "preset": 7.27},
+        "same_top": {"ours": 95.1, "preset": 94.4},
+        "relative": 87.1,
+        "ci": (75.5, 98.6),
     },
     "14b@5": {
         "label": "Qwen2.5-14B-Instruct @ 5 GiB",
         "short": "14B @ 5 GiB",
         "preset": "IQ2_XXS",
         "acc": {
-            "ours": [69.2, 78.1, 54.2, 75.8, 71.0],
-            "preset": [65.9, 75.0, 53.7, 69.0, 58.7],
-            "original": [80.4, 83.8, 61.5, 74.3, 82.3],
+            "ours": [73.6, 77.9, 53.7, 75.5, 77.2],
+            "preset": [69.8, 74.8, 50.9, 68.8, 61.8],
+            "original": [80.5, 83.4, 61.5, 74.4, 82.8],
         },
-        "kl": {"ours": 0.30, "preset": 0.45},
-        "flips": {"ours": 16.58, "preset": 21.92},
-        "same_top": {"ours": 78.6, "preset": 72.9},
-        "ppl": {"ours": 6.54, "preset": 7.42, "original": 5.03},
-        "relative": 74.1,
-        "ci": (68.3, 80.0),
+        "kl": {"ours": 0.237, "preset": 0.395},
+        "flips": {"ours": 15.11, "preset": 22.30},
+        "same_top": {"ours": 79.7, "preset": 73.7},
+        "relative": 66.6,
+        "ci": (61.7, 71.5),
     },
 }
 
@@ -62,45 +73,12 @@ METRIC_LABEL = {
     "kl": "KL divergence",
     "flips": "answer flips (%)",
     "same_top": "same top word (%)",
-    "ppl": "perplexity",
 }
 
 
 def _fmt(v, d=1):
     s = f"{v:.{d}f}"
     return s[:-2] if s.endswith(".0") else s
-
-
-def cross_check_csv() -> None:
-    """Verify the four multiple-choice tasks against the raw CSVs."""
-    print("== cross-check against benchmark-results.csv ==")
-    for contest, d in DATA.items():
-        df = pd.read_csv(RUNS / contest / "benchmark-results.csv")
-
-        def role(w):
-            w = str(w)
-            if "winner" in w:
-                return "ours"
-            if "preset" in w:
-                return "preset"
-            if "original" in w:
-                return "original"
-            return None
-
-        df["role"] = df["what"].map(role)
-        verdict = df[
-            (df["split"] == "poc_test")
-            & (df["kind"].isin(["task", "task.json"]))
-            & (df["role"].notna())
-        ]
-        csv_acc = verdict.groupby(["role", "task"])["accuracy_pct"].mean()
-        csv_task = {"MMLU": "mmlu", "HellaSwag": "hellaswag", "ARC": "arc_challenge", "WinoGrande": "winogrande"}
-        print(f"\n{contest}:")
-        for r in ["original", "preset", "ours"]:
-            row = {t: round(csv_acc.get((r, csv_task[t]), float("nan")), 1) for t in TASKS[:4]}
-            expect = dict(zip(TASKS[:4], d["acc"][r][:4]))
-            match = all(abs(row[t] - expect[t]) < 0.11 for t in TASKS[:4] if not np.isnan(row[t]))
-            print(f"  {r:8s} csv={row}  expect={expect}  {'OK' if match else 'MISMATCH'}")
 
 
 def summary() -> None:
@@ -126,7 +104,7 @@ def fig_accuracy(key: str) -> None:
         bars = ax.bar(x + (i - 1) * width, d["acc"][role], width, label=ROLE_LABEL[role], color=COLORS[role])
         for b in bars:
             ax.text(b.get_x() + b.get_width() / 2, b.get_height() + top * 0.02, _fmt(b.get_height()),
-                    ha="center", va="bottom", fontsize=7, color="#334155")
+                    ha="center", va="bottom", fontsize=6, rotation=90, color="#334155")
     ax.set_xticks(x)
     ax.set_xticklabels(TASKS, fontsize=9, rotation=12, ha="right")
     ax.set_ylabel("accuracy (%)", fontsize=10)
@@ -200,13 +178,11 @@ def fig_verdict() -> None:
 
 
 if __name__ == "__main__":
-    cross_check_csv()
     summary()
     for key in DATA:
         fig_accuracy(key)
-    fig_metric("kl", "kl", ["ours", "preset"], 2)
+    fig_metric("kl", "kl", ["ours", "preset"], 3)
     fig_metric("flips", "flips", ["ours", "preset"], 1)
     fig_metric("sametop", "same_top", ["ours", "preset"], 1)
-    fig_metric("ppl", "ppl", ["original", "preset", "ours"], 2)
     fig_verdict()
     print("\nwrote plots to", PLOTS)

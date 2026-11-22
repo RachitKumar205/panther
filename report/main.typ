@@ -187,7 +187,7 @@ Taken together, the eight stages form a single, reproducible pipeline: given a m
 
 = Experimental Setup
 
-Two instruction-tuned models were quantised and evaluated end to end. Everything that touches a model — the download, the importance matrix, GPTQ, the genetic search, distillation and the optional QAT — ran on one GPU server; the resulting `llama.cpp` files were then loaded and timed on a Raspberry Pi 5.
+Three instruction-tuned models were quantised and evaluated end to end, in three contests. Everything that touches a model — the download, the importance matrix, GPTQ, the genetic search, distillation and the optional QAT — ran on one GPU server; the resulting `llama.cpp` files were then loaded and timed on a Raspberry Pi 5.
 
 == Models
 
@@ -196,10 +196,11 @@ Two instruction-tuned models were quantised and evaluated end to end. Everything
     columns: 4,
     [Model], [Parameters], [RAM budget], [Competitor preset],
     [Qwen2.5-1.5B-Instruct], [1.5B], [1 GiB], [`IQ2_S`],
+    [Qwen2.5-7B-Instruct], [7.6B], [5 GiB], [`Q4_K_M`],
     [Qwen2.5-14B-Instruct], [14.8B], [5 GiB], [`IQ2_XXS`],
   ),
   kind: table,
-  caption: [The two models and the contest each was run in.],
+  caption: [The three models and the contest each was run in. The competitor is the fitting preset with the lowest score on the winner set.],
 ) <tbl:models>
 
 == The build server
@@ -222,7 +223,7 @@ Two instruction-tuned models were quantised and evaluated end to end. Everything
 
 == The target device
 
-The quantised files run on a Raspberry Pi 5 with 8 GiB of RAM and a 64 GB SD card. A contest's RAM budget is the Pi memory the file must fit into, and the Pi is where the decode and prefill speeds are measured.
+The quantised files run on a Raspberry Pi 5 with 8 GiB of RAM and a 64 GB SD card. A contest's RAM budget is the Pi memory the file must fit into, and the Pi is where the decode and prefill speeds are measured: four threads, the 8-bit KV cache at a 4,096-token context, a 256-token prompt and 64 generated tokens, with peak RAM read from the server process. Each file is timed with mainline `llama.cpp` and with `ik_llama.cpp`, a fork with faster CPU kernels for the low-bit types, with and without its run-time repacking (`-rtr`).
 
 == Software
 
@@ -230,48 +231,61 @@ Model work uses `llama.cpp` at the pinned commit `cd959bae` (tag v0.9.0): `llama
 
 = Results
 
-Two contests were run end to end and judged once on the held-out verdict set: the Qwen2.5-1.5B-Instruct model at a 1 GiB budget against the `IQ2_S` preset, and the Qwen2.5-14B-Instruct model at a 5 GiB budget against the `IQ2_XXS` preset. The verdict — the winner measured against the competitor preset on questions neither file has seen — is a WIN for both. The relative score (100 = the preset's damage) shows the winner reducing the preset's damage by roughly a third on the 1.5B and a quarter on the 14B.
+Three contests were run end to end and judged once on the held-out verdict set: Qwen2.5-1.5B-Instruct at 1 GiB against `IQ2_S`, Qwen2.5-7B-Instruct at 5 GiB against `Q4_K_M`, and Qwen2.5-14B-Instruct at 5 GiB against `IQ2_XXS`. All three presets fit their budgets, so every contest is fair. The verdict — the winner measured against the competitor on questions and text neither file has seen — is a WIN in all three (@tbl:verdict). The winner removes about a third of the preset's damage on the 14B and over a quarter on the 1.5B; on the 7B, where a 5 GiB budget already leaves room for a 4-bit preset, the margin is narrow but its interval still lies below 100. The verdict is unchanged when the KL weight $lambda$ is set to 5 or 20 instead of 10.
 
-#table(
-  columns: 3,
-  [], [Qwen2.5-1.5B @ 1 GiB], [Qwen2.5-14B @ 5 GiB],
-  [Competitor preset], [`IQ2_S`], [`IQ2_XXS`],
-  [Relative score (95 % interval)], [67.1 [62.5, 71.6]], [74.1 [68.3, 80.0]],
-  [Verdict], [WIN], [WIN],
-)
+#figure(
+  table(
+    columns: 4,
+    [], [1.5B @ 1 GiB], [7B @ 5 GiB], [14B @ 5 GiB],
+    [Competitor], [`IQ2_S`], [`Q4_K_M`], [`IQ2_XXS`],
+    [Score: ours / preset], [23.30 / 32.43], [6.47 / 7.43], [17.48 / 26.25],
+    [Relative score], [71.9], [87.1], [66.6],
+    [95 % interval], [[67.5, 76.2]], [[75.5, 98.6]], [[61.7, 71.5]],
+    [Verdict], [WIN], [WIN], [WIN],
+  ),
+  kind: table,
+  caption: [The verdict on the held-out verdict set (100 = the preset's damage; lower is better).],
+) <tbl:verdict>
 
-@fig:verdict shows the two intervals, both wholly below 100, so each win exceeds what sampling luck could explain.
+@fig:verdict shows the three intervals, all wholly below 100, so each win exceeds what sampling luck could explain.
 
 #figure(
   image("plots/verdict.png", width: 100%),
-  caption: [The verdict: relative score with its 95 % interval for both contests. Both intervals lie wholly below 100 (the preset's damage), so both are a WIN.],
+  caption: [The verdict: relative score with its 95 % interval for each contest. All three intervals lie wholly below 100 (the preset's damage), so all three are a WIN.],
 ) <fig:verdict>
 
 == Accuracy
 
-On the held-out benchmark the winner is more accurate than the preset on every one of the five tasks, closing part of the gap to the original (@tbl:acc). The largest recovery is on GSM8K, the step-by-step reasoning task: the `IQ2_S` preset collapses to 1.3 % while the winner reaches 23.7 % (+22.4 points) on the 1.5B, and the winner gains 12.3 points on the 14B (71.0 % vs. 58.7 %).
+At the two tight budgets the winner is more accurate than the preset on every one of the five held-out tasks, closing most of the gap to the original (@tbl:acc). The largest recovery is on GSM8K, the step-by-step reasoning task: the `IQ2_S` preset collapses to 4.4 % on the 1.5B while the winner keeps 33.4 % (+29.0 points, against the original's 35.6 %), and on the 14B the winner gains 15.4 points (77.2 % vs. 61.8 %). Overall the winner keeps 93.1 % of the original's accuracy on the 1.5B (preset 73.3 %) and 93.5 % on the 14B (preset 85.2 %). On the 7B both files keep over 99.5 % and differ by at most 1.6 points on any task; there the win comes from staying closer to the original's predictions rather than from accuracy.
 
 #figure(
   table(
-    columns: 7,
-    [Task], [1.5B ours], [1.5B preset], [1.5B original], [14B ours], [14B preset], [14B original],
-    [MMLU], [53.6], [45.6], [60.1], [69.2], [65.9], [80.4],
-    [HellaSwag], [63.0], [57.2], [67.7], [78.1], [75.0], [83.8],
-    [ARC-Challenge], [41.8], [38.0], [46.5], [54.2], [53.7], [61.5],
-    [WinoGrande], [61.1], [57.8], [63.9], [75.8], [69.0], [74.3],
-    [GSM8K], [23.7], [1.3], [41.0], [71.0], [58.7], [82.3],
-    [Mean], [48.6], [40.0], [55.8], [69.7], [64.4], [76.5],
+    columns: 10,
+    [Task], [1.5B ours], [1.5B preset], [1.5B orig.], [7B ours], [7B preset], [7B orig.], [14B ours], [14B preset], [14B orig.],
+    [MMLU], [53.8], [45.9], [62.2], [75.4], [74.7], [75.5], [73.6], [69.8], [80.5],
+    [HellaSwag], [63.3], [56.1], [67.5], [79.3], [78.8], [79.3], [77.9], [74.8], [83.4],
+    [ARC-Challenge], [43.8], [36.8], [46.5], [52.7], [54.1], [53.2], [53.7], [50.9], [61.5],
+    [WinoGrande], [62.5], [59.0], [63.9], [71.0], [70.5], [70.8], [75.5], [68.8], [74.4],
+    [GSM8K], [33.4], [4.4], [35.6], [75.8], [77.4], [77.2], [77.2], [61.8], [82.8],
+    [Mean], [51.4], [40.4], [55.1], [70.9], [71.1], [71.2], [71.5], [65.2], [76.5],
   ),
   kind: table,
+  placement: top,
+  scope: "parent",
   caption: [Held-out accuracy (%), by task and model.],
 ) <tbl:acc>
 
-@fig:acc1 and @fig:acc14 show the same numbers.
+@fig:acc1, @fig:acc7 and @fig:acc14 show the same numbers.
 
 #figure(
   image("plots/accuracy_1.5b@1.png", width: 90%),
   caption: [Held-out accuracy per task, Qwen2.5-1.5B-Instruct.],
 ) <fig:acc1>
+
+#figure(
+  image("plots/accuracy_7b@5.png", width: 90%),
+  caption: [Held-out accuracy per task, Qwen2.5-7B-Instruct.],
+) <fig:acc7>
 
 #figure(
   image("plots/accuracy_14b@5.png", width: 90%),
@@ -280,19 +294,20 @@ On the held-out benchmark the winner is more accurate than the preset on every o
 
 == Quality
 
-The same pattern holds on the distributional metrics (@tbl:qual): on both models the winner drifts less from the original than the preset does — lower KL, fewer answer flips, more unchanged top-word predictions, and lower perplexity.
+The same pattern holds on the distributional metrics (@tbl:qual): in every contest the winner drifts less from the original than the preset does — lower KL, fewer answer flips and more unchanged top-word predictions. On the 7B the KL is 16 % lower (0.0129 vs. 0.0154), on the 14B 40 % lower and on the 1.5B 61 % lower.
 
 #figure(
   table(
-    columns: 5,
-    [Metric], [1.5B ours], [1.5B preset], [14B ours], [14B preset],
-    [KL divergence], [0.26], [0.51], [0.30], [0.45],
-    [Answer flips (%)], [20.2], [28.8], [16.6], [21.9],
-    [Same top word (%)], [78.2], [66.9], [78.6], [72.9],
-    [Perplexity], [9.50], [12.44], [6.54], [7.42],
+    columns: 7,
+    [Metric], [1.5B ours], [1.5B preset], [7B ours], [7B preset], [14B ours], [14B preset],
+    [KL divergence], [0.194], [0.494], [0.0129], [0.0154], [0.237], [0.395],
+    [Answer flips (%)], [21.4], [27.5], [6.3], [7.3], [15.1], [22.3],
+    [Same top word (%)], [79.4], [67.7], [95.1], [94.4], [79.7], [73.7],
   ),
   kind: table,
-  caption: [Held-out quality metrics (original perplexity 7.42 and 5.03).],
+  placement: top,
+  scope: "parent",
+  caption: [Held-out quality against the original. Answer flips are the share of the four multiple-choice tasks' questions whose right/wrong answer differs from the original's.],
 ) <tbl:qual>
 
 #figure(
@@ -310,70 +325,99 @@ The same pattern holds on the distributional metrics (@tbl:qual): on both models
   caption: [Same top-word share (higher is better).],
 ) <fig:sametop>
 
-#figure(
-  image("plots/ppl.png", width: 100%),
-  caption: [Perplexity (lower is better).],
-) <fig:ppl>
-
 == Space and the winner's mix
 
-The mixed-precision search shrinks the model sharply while spending the saved bits where they matter: the 16-bit original ends up about 80 % smaller, because the winner stores its weights at about 3 bits apiece instead of 16. @fig:model3d renders the same result as a single square: the light ghost square is the 16-bit original, the filled blue square is the quantised winner, and the dotted squares are the further copies of it that fit in the original's space.
+The search spends each budget in full and puts the bits where they matter. Measured from the files, the 1.5B winner stores its weights at 3.01 bits apiece (81 % smaller than the 16-bit original), the 14B at 2.45 bits (85 % smaller) and the 7B at 5.07 bits (68 % smaller). @fig:model3d, @fig:model3d7 and @fig:model3d14 render this as squares: the light ghost square is the 16-bit original, the filled blue square is the quantised winner, and the dotted squares are the further copies of it that fit in the original's space.
 
 #figure(
   image("plots/layers3d_1.5b.png", width: 50%),
-  caption: [Qwen2.5-1.5B-Instruct: the ghost square is the 16-bit original (2.9 GiB), the filled blue square is the quantised winner (0.55 GiB), and the dotted squares are the copies that fit alongside it.],
+  caption: [Qwen2.5-1.5B-Instruct: the 16-bit original (2.9 GiB) against the quantised winner (0.54 GiB).],
 ) <fig:model3d>
 
 #figure(
+  image("plots/layers3d_7b.png", width: 50%),
+  caption: [Qwen2.5-7B-Instruct: the 16-bit original (14.2 GiB) against the quantised winner (4.50 GiB).],
+) <fig:model3d7>
+
+#figure(
   image("plots/layers3d_14b.png", width: 50%),
-  caption: [Qwen2.5-14B-Instruct: the 16-bit original (27.5 GiB) against the quantised winner (4.97 GiB), with the copies that fit alongside it.],
+  caption: [Qwen2.5-14B-Instruct: the 16-bit original (27.5 GiB) against the quantised winner (4.22 GiB).],
 ) <fig:model3d14>
 
 == The winner's multi-bit configuration
 
-The search assigns one quantization type to each matrix, so a winner is a mixed-precision configuration rather than a single type everywhere. @tbl:config lists the final assignment for both winners.
-
-#figure(
-  table(
-    columns: 4,
-    [Type], [bits / weight], [Qwen2.5-1.5B], [Qwen2.5-14B],
-    [`IQ1_S`], [1.56], [—], [16],
-    [`IQ2_XXS`], [2.06], [—], [93],
-    [`IQ2_XS`], [2.31], [1], [41],
-    [`IQ2_S`], [2.50], [—], [69],
-    [`Q2_K`], [2.63], [4], [—],
-    [`IQ3_XXS`], [3.06], [192], [51],
-    [`IQ4_XS`], [4.25], [—], [20],
-  ),
-  kind: table,
-  caption: [The final mixed-precision configuration of the two winners.],
-) <tbl:config>
-
-The 1.5B winner is nearly uniform — 192 of its 197 matrices are `IQ3_XXS` — because a 1 GiB budget forces almost everything down to the same low precision. The 14B winner is a real mix: `IQ2_XXS` and `IQ2_S` cover the majority, while 20 matrices are kept at `IQ4_XS` and 16 are pushed down to `IQ1_S`. (The 14B record copied here lists 290 of its 338 matrices; the remaining 48 types are in the full winner record on the server.)
-
-== The winner and how it runs
-
-Distillation helped both winners: on the 1.5B it took the selection score from 22.77 to 17.93, and the 14B winner was distilled to 16.74. A QAT finalist — Block-AP retraining of the 14B winner's weights, then distilled — pushes it further still, to 73.38 % held-out accuracy, +8.82 points over the preset.
-
-On the Raspberry Pi 5, both files fit their budget with margin and run at usable speed (@tbl:pi).
+The search assigns one quantization type to each matrix, so a winner is a mixed-precision configuration rather than a single type everywhere. @tbl:config lists the final assignment of every matrix of the three winners, read from the files.
 
 #figure(
   table(
     columns: 5,
-    [Contest], [decode (tok/s)], [prefill (tok/s)], [peak RAM (GiB)], [predicted (GiB)],
-    [Qwen2.5-1.5B @ 1 GiB], [9.89], [14.37], [0.71], [1.00],
-    [Qwen2.5-14B @ 5 GiB], [1.11], [1.58], [4.68], [4.95],
+    [Type], [bits / weight], [1.5B], [7B], [14B],
+    [`IQ1_S`], [1.56], [—], [—], [24],
+    [`IQ1_M`], [1.75], [—], [—], [6],
+    [`IQ2_XXS`], [2.06], [3], [—], [17],
+    [`IQ2_XS`], [2.31], [4], [—], [14],
+    [`IQ2_S`], [2.50], [1], [1], [277],
+    [`Q2_K`], [2.63], [2], [—], [—],
+    [`IQ3_XXS`], [3.06], [129], [4], [—],
+    [`Q3_K`], [3.44], [32], [—], [—],
+    [`IQ4_XS`], [4.25], [11], [16], [—],
+    [`Q4_K`], [4.50], [15], [6], [—],
+    [`Q5_K`], [5.50], [—], [171], [—],
+    [Matrices], [], [197], [198], [338],
   ),
   kind: table,
-  caption: [Raspberry Pi 5 inference: decode (generation) and prefill (prompt processing) speeds, with peak RAM against the prediction. The 14B run was thermally throttled.],
+  caption: [The final mixed-precision configuration of the three winners (matrices per type).],
+) <tbl:config>
+
+Each winner has a dominant type close to its budget's average and moves a minority of matrices away from it. The 1.5B winner is mostly `IQ3_XXS` (129 of 197) and raises 58 matrices to 3.4–4.5 bits, paying for them by pushing 10 to 2-bit types. The 14B winner is mostly `IQ2_S` (277 of 338) and pushes 30 matrices down to the 1-bit types `IQ1_S` and `IQ1_M` to keep the rest at 2–2.5 bits. The 7B winner is mostly `Q5_K` (171 of 198), with 27 matrices at 2.5–4.5 bits.
+
+== The winner, distillation and QAT
+
+The winner is chosen on the winner set from the three search finalists, each scored as searched and after distillation. At low bit-widths distillation helped every finalist (@tbl:distill): on the 1.5B the best finalist's score fell from 20.72 to 17.49 and on the 14B from 19.87 to 15.68, with KL falling by about a quarter. At about 5 bits it did the opposite: every 7B finalist got worse, its KL rising about fourfold (0.0148 → 0.0607), so the 7B winner is an undistilled finalist. Choosing the winner on the winner set caught this automatically. No QAT finalist was built in these contests (the stage is optional and off by default).
+
+#figure(
+  table(
+    columns: 4,
+    [Finalist], [1.5B], [7B], [14B],
+    [0], [20.72 → *17.49*], [4.81 → 8.27], [19.87 → *15.68*],
+    [1], [20.35 → 18.48], [*4.55* → 8.40], [20.30 → 16.49],
+    [2], [21.15 → 18.73], [5.34 → 8.95], [21.87 → 17.21],
+    [Preset], [31.15], [5.20], [22.56],
+  ),
+  kind: table,
+  caption: [Winner-set score of each finalist before → after distillation, and of the preset (lower is better). The winner is in bold.],
+) <tbl:distill>
+
+== How the winners run on the Pi
+
+On the Raspberry Pi 5 every file fits its budget with margin: peak RAM stays 0.2–0.3 GiB under the prediction in every run (@tbl:pi). `ik_llama.cpp` with run-time repacking (`-rtr`) writes fastest on all three models — 11.0 tokens per second on the 1.5B, 2.4 on the 7B and 1.45 on the 14B — while `ik_llama.cpp` without it reads the prompt fastest. The gap is widest on the 14B, whose 1- and 2-bit types run slowly in their stored layout: there `-rtr` writes 1.7 times faster than without it, while on the 7B, mostly `Q5_K`, the three runtimes write within 5 % of each other.
+
+#figure(
+  table(
+    columns: 6,
+    [Contest], [Runtime], [decode (tok/s)], [prefill (tok/s)], [peak RAM (GiB)], [predicted (GiB)],
+    [1.5B @ 1 GiB], [ik `-rtr`], [11.01], [58.14], [0.78], [1.00],
+    [], [ik], [9.39], [109.59], [0.71], [1.00],
+    [], [mainline], [10.50], [15.51], [0.70], [1.00],
+    [7B @ 5 GiB], [ik `-rtr`], [2.43], [14.60], [4.71], [5.02],
+    [], [ik], [2.31], [14.11], [4.74], [5.02],
+    [], [mainline], [2.31], [5.38], [4.75], [5.02],
+    [14B @ 5 GiB], [ik `-rtr`], [1.45], [4.42], [4.77], [5.02],
+    [], [ik], [0.86], [8.69], [4.77], [5.02],
+    [], [mainline], [0.92], [1.25], [4.75], [5.02],
+  ),
+  kind: table,
+  placement: top,
+  scope: "parent",
+  caption: [Raspberry Pi 5 inference: decode (generation) and prefill (prompt processing) speeds, with peak RAM against the RAM model's prediction (file + KV cache + 0.40 GiB).],
 ) <tbl:pi>
 
 = Conclusion
 
 We formulated the deployment of large language models on memory-constrained devices as a mixed-precision search: for each (model, RAM budget) contest, assign a quantization type to every matrix so the resulting file fits the budget while losing as little quality as possible. Three choices make that search practical — GPTQ-compensated type copies turn candidate evaluation into a byte copy, a single fitness measure ranks every file on one scale, and disjoint data sets keep training, selection and judgement honest.
 
-Across the two contests reported here, both came out as WIN: the winner reduced the competitor preset's damage to a relative 67.1 on the 1.5B @ 1 GiB and 74.1 on the 14B @ 5 GiB, while shrinking the models by about 80 % (16-bit to roughly 3 bits per weight). The largest gain is on step-by-step reasoning: GSM8K recovers 22 points on the 1.5B, where the preset drops to 1.3 %. Both files fit their budgets with margin and run at usable speed on a Raspberry Pi 5.
+Across the three contests reported here, all came out as WIN: the winner cut the competitor preset's damage to a relative 71.9 on the 1.5B @ 1 GiB, 87.1 on the 7B @ 5 GiB and 66.6 on the 14B @ 5 GiB. The gain is largest where the budget is tightest: at 1 GiB and at 5 GiB for the 14B the winner keeps about 93 % of the original's accuracy against the preset's 73 % and 85 %, and recovers 29 and 15 points on step-by-step reasoning (GSM8K), where the low-bit presets fail first. When the budget is roomy, as for the 7B at 5 GiB, a 4-bit preset already keeps over 99.5 % and the search's advantage shrinks to a closer match of the original's predictions; there distillation also stopped helping, which the winner set caught. All the files fit their budgets on a Raspberry Pi 5.
 
-Three directions follow from here. *Training-time quantization* would fold the quantization-aware objective into the model's own training rather than applying QAT only to the winning genome, making still lower bit-widths usable. *Mixture-of-experts* models are a natural next target: since only a few experts are active per token, different experts could be held at very different precisions — the frequently routed experts near-lossless, the rare ones at extreme low precision — turning our per-matrix search into a per-expert one. Finally, *layer-wise loading* (as in AirLLM @airllm), which keeps only the current layer resident and streams the rest from disk, would let the memory budget be spent on activations and the KV cache instead of weights, shrinking the effective footprint far beyond a uniform ~3 bits per weight. Beyond these, the KL weight (10), the QAT sample count and the solver's ridge strength remain the open hyperparameters to sweep alongside the verdict.
+Three directions follow from here. *Training-time quantization* would fold the quantization-aware objective into the model's own training rather than applying QAT only to the winning genome, making still lower bit-widths usable. *Mixture-of-experts* models are a natural next target: since only a few experts are active per token, different experts could be held at very different precisions — the frequently routed experts near-lossless, the rare ones at extreme low precision — turning our per-matrix search into a per-expert one. Finally, *layer-wise loading* (as in AirLLM @airllm), which keeps only the current layer resident and streams the rest from disk, would let the memory budget be spent on activations and the KV cache instead of weights, shrinking the effective footprint far beyond a uniform ~3 bits per weight. Beyond these, the QAT sample count and the solver's ridge strength remain the open hyperparameters to sweep alongside the verdict.
 
 
